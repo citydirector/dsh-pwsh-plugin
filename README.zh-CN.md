@@ -24,7 +24,8 @@
 
 ## 安装
 
-三条路，选一条。
+这个包本身就是 **DSH bundle**：自带一份 `cordis.patch.yml`，会自己插入 `- id: pwsh-run` 那一行。
+所以装完就能用，不需要动你的 profile。
 
 **侧栏。** Plugins → Add plugin → `https://github.com/citydirector/dsh-pwsh-plugin`，然后打开开关。
 
@@ -39,7 +40,19 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 & $dsh plugin --profile desktop add 'file:<检出目录>'
 ```
 
-**手写一行** —— 开发期，或者不想装成依赖时：
+`add` 会把 `dsh-pwsh-plugin` 追加进 profile `package.json` 的 `dsh.profile.bundles`，`remove` 取回。
+想验证效果就对一个非保留 profile 跑 `--dump-config`，能看到 `# == dsh-pwsh-plugin` 段和紧跟的
+`- id: pwsh-run / name: dsh-pwsh-plugin`。
+
+选 spec 之前要知道两件事：
+
+- **`github:` 是拷贝，`file:` 是硬链接。** `github:` 装的是那个 tag 的快照 —— 改检出不会生效，得重新 `add`。
+  `file:` 直接硬链接检出，改完立刻生效（`fsutil hardlink list` 能看到两条路径），代价是 `package.json`
+  里钉死了绝对路径。开发期用 `file:`，长期用 `github:`。
+- **bundle 那一行带不了 `?v=N`。** 它的 `name` 必须是包名，才能从 profile 的 `node_modules` 解析。
+  手写 `file:` 行那套「提版本号绕 ESM URL 缓存」的手法在这里不存在 —— 改完插件代码要重启 DSH。
+
+**手写一行** —— 不想装成依赖时（开发期常用）：
 
 ```yaml
 - insert:
@@ -53,7 +66,9 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
 - **`desktop` 是保留 profile。** 便携版 `dsh.exe` 会答 `profile "desktop" is managed exclusively by the Electron application` 并退出 1；只有桌面安装里的 `dsh.cmd`（它以 `manageDesktopProfile: true` 起 desktop-host 的 CLI）能碰它。
 - **`DSH_HOME` 必须指到便携版的数据根。** 默认是 `~/.dsh`，指错就报 `Open DeepSeek Harness Desktop once to initialize its profile` —— 它在找 `~/.dsh/profiles/desktop/package.json`。
-- **别重复注册。** 仓库里的 `cordis.patch.yml` 自己会插入 `- id: pwsh-run`。如果 profile 的 patch 文件里已经手写了同 id 的条目，先删掉手写那条 —— 注册按名字查重，第二个 `pwsh_run` 在启动时是硬错误。
+- **别重复注册。** 从手写行换成 bundle（或反过来）时，**先删手写那条再装**。两层都会插入 `- id: pwsh-run`，
+  合成后的配置树里就有两条；注册按名字查重，第二个 `pwsh_run` 在启动时是硬错误。`--dump-config` 一眼就能看出重复 ——
+  切换后跑这一条。
 
 `plugin/` 下三个文件（`index.mjs`、`session.mjs`、`session-server.ps1`）必须放在一起：
 `index.mjs` 在加载时读那个 `.ps1`，再以 `-EncodedCommand` 送给子进程。

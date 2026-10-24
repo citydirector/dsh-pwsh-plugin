@@ -26,7 +26,8 @@ choice are in [FINDINGS.md](FINDINGS.md).
 
 ## Install
 
-Any one of these three.
+The package is a **DSH bundle**: it ships a `cordis.patch.yml` that inserts its own `- id: pwsh-run` row,
+so installing it is all you do — you never edit your profile by hand.
 
 **Sidebar.** Plugins → Add plugin → `https://github.com/citydirector/dsh-pwsh-plugin`, then switch it on.
 
@@ -41,7 +42,21 @@ $env:DSH_HOME = '<DSH_HOME>'        # the data root the desktop app itself uses
 & $dsh plugin --profile desktop add 'file:<path to checkout>'
 ```
 
-**One line by hand** — for development, or when you do not want it as a dependency:
+`add` appends `dsh-pwsh-plugin` to `dsh.profile.bundles` in the profile's `package.json`; `remove` takes it
+back out. Verify with `--dump-config` on a non-reserved profile, where the row shows up as
+`# == dsh-pwsh-plugin` followed by `- id: pwsh-run / name: dsh-pwsh-plugin`.
+
+Two things to know before you choose a spec:
+
+- **`github:` copies, `file:` hard-links.** A `github:` install is a snapshot of the tag — editing the checkout
+  changes nothing until you run `add` again. A `file:` install hard-links the checkout, so edits are live
+  immediately (`fsutil hardlink list` shows both paths), at the cost of pinning an absolute path in
+  `package.json`. Use `file:` while developing, `github:` for keeps.
+- **The bundle row cannot carry `?v=N`.** Its `name` must be the package name so it resolves from the
+  profile's `node_modules`. The `?v=N` URL-cache-buster trick that a hand-written `file:` row affords does
+  not exist here — after changing plugin code, restart DSH.
+
+**Manual install**, if you would rather not take a dependency:
 
 ```yaml
 - insert:
@@ -59,9 +74,10 @@ Three constraints that cost real time to find:
 - **`DSH_HOME` must point at the portable data root.** The default is `~/.dsh`; point it elsewhere and you
   get `Open DeepSeek Harness Desktop once to initialize its profile` — it is looking for
   `~/.dsh/profiles/desktop/package.json`.
-- **Do not double-register.** The bundled `cordis.patch.yml` inserts `- id: pwsh-run` by itself. If your
-  profile's patch file already has a hand-written entry with that id, delete the hand-written one first.
-  Registration is keyed by name, and a second `pwsh_run` is a hard error at boot.
+- **Do not double-register.** If you switch from a manual row to the bundle (or the other way round), delete
+  the hand-written entry **before** installing. Both layers insert `- id: pwsh-run` and the composed tree
+  will hold two of them; registration is keyed by name, and a second `pwsh_run` is a hard error at boot.
+  `--dump-config` shows the duplicate plainly — that is the check to run after switching.
 
 The three files in `plugin/` (`index.mjs`, `session.mjs`, `session-server.ps1`) must stay together —
 `index.mjs` reads the `.ps1` at load time and ships it to the child as `-EncodedCommand`.
