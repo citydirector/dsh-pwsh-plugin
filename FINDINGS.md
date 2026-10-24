@@ -839,7 +839,22 @@ check()                                  → 217–330 ms → {"state":"current"
 安装示例 `#v0.1.1`），提交 `2c7543a`，annotated tag `v0.1.1` → `8a50a40`，main 与 tag 都已推送；
 desktop profile 的依赖行同步为 `#v0.1.1`，重装后 `node_modules` 里的 `package.json` 读回 0.1.1。
 
-### 6. 还没验证的一件事
+### 6. bundle 模式改代码必须重启（已由缓存实验钉死）
 
-bundle 行的 `name` 必须是包名，**带不了 `?v=N`**（第二十节）。因此「改插件代码 → 提 URL 版本号 → 热生效」
-这套开发期手法在 bundle 模式下不存在，改完得重启 DSH。**这一条仍是推断，没有真机重启确认过。**
+第二十节说 bundle 行的 `name` 必须是包名、带不了 `?v=N`。这条**代价**原来是推断，现在实测过了。
+
+做法：取 `require.resolve('dsh-pwsh-plugin')` 得到的真实 URL（`file:///<DSH_HOME>/profiles/desktop/node_modules/dsh-pwsh-plugin/plugin/index.mjs`），
+同一进程里按顺序 import 三次，中间把文件里的 `export const name` 改掉：
+
+| 步骤 | 结果 |
+|---|---|
+| 1. 普通 import | `pwsh-run` |
+| 2. 改文件后用**同一个 URL** 再 import | `pwsh-run`，且返回的是**同一个模块对象**（`same === true`）|
+| 3. 改文件后用 `<url>?v=bust` import | `PATCHED` —— 新 URL 才绕过缓存 |
+
+结论：ESM 按 URL 缓存，磁盘上文件换了、URL 没换，进程里还是旧模块。
+bundle 模式给不出新 URL，所以 `dsh plugin add …#vX.Y.Z` 装新版本之后（或本地 `file:` 硬链接改了之后），
+**必须重启 DSH** 才会加载新代码 —— 这一点与手写 `file:` 行 + `?v=N` 的老手法正相反。
+
+同一实验也顺手确认了恢复路径：把文件写回原内容后，五个承重文件（`plugin/index.mjs`、`session.mjs`、
+`session-server.ps1`、`package.json`、`cordis.patch.yml`）与工作区 md5 全同。
