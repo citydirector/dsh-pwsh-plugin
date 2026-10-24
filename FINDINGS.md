@@ -770,3 +770,76 @@ Done in 88ms using pnpm v12.15.0
 
 注意 `file:` 后面的路径要写正斜杠（`file:D:/…`）——README 与本文都用这个形态，且实测可用。
 
+
+---
+
+## 二十一、bundle 切换与更新检查的闭环实测
+
+第十九节讲了更新检查怎么设计，第二十节讲了安装入口怎么选。这一节是两者接上之后的真机结果 ——
+从「手写 patch 行」换成「bundle 依赖」，以及用**装进 profile 的那份模块**（不是工作区副本）验证更新判决。
+
+### 1. 切换前必须先删手写段
+
+`applyEntryPatches()` 的 `insert` 分支只是 `data.push(...insert)`，不去重（第二十节第 3 小节）。
+所以顺序是「先删手写 → 再装 bundle」，反了就会在合成树里留下两条 `- id: pwsh-run`。
+
+删掉之后 profile 的 `cordis.patch.yml` 从 1779 行降到 **1753** 行，`grep pwsh-run` 只剩 skadi-route
+`residentTools` 里那个工具名（第 823 / 825 行）—— 那是在说「晋升后别过滤掉它」，与注册无关。
+
+### 2. `--dump-config` 对 `desktop` 也拒绝
+
+第二十节记的是 `plugin list` 拒绝，实测 `--dump-config` 一样拒绝：
+
+```
+PS> & '<desktop cli>\dsh.cmd' --profile desktop --dump-config
+error: profile "desktop" is managed exclusively by the Electron application
+rc=1
+```
+
+`rejectElectronProfile` 挂在 profile 解析入口上，不是挂在 `plugin add` 上。
+想验 patch 合法性就借一个临时 profile：装同一个 bundle、把 desktop 的 `cordis.patch.yml` 拷进去，
+`--dump-config` 应给出 `rc=0` 与 `- id: pwsh-run` 计数 **1**。验完把临时 profile 送回收站。
+
+### 3. 装进去的东西与工作区逐字节一致
+
+`github:` 是拷贝（第二十节），所以值得核对一次 —— 五个承重文件 md5 全同：
+
+| 文件 | md5 前 8 位 |
+|---|---|
+| `plugin/index.mjs` | `E5B3E41A` |
+| `plugin/session.mjs` | `A2ACF1A7` |
+| `plugin/session-server.ps1` | `46ED2221` |
+| `cordis.patch.yml` | `30666D67` |
+| `package.json` | `71426A25` |
+
+装完本会话就能用（工具面 390 个，`pwsh_run` 是可调函数），`$global:` 变量跨调用保留。
+
+### 4. 更新检查：用装进 profile 的那份跑
+
+工作区副本测过不等于线上那份对。直接 import
+`file:///<DSH_HOME>/profiles/desktop/node_modules/dsh-pwsh-plugin/plugin/update-check.mjs`：
+
+```
+new UpdateChecker()                      → 从包自己的 package.json 读到 0.1.1
+check()                                  → 217–330 ms → {"state":"current","latest":"v0.1.1"}
+```
+
+再把候选标签喂给纯函数，验判决边界：
+
+| 输入标签 | 判决 |
+|---|---|
+| `v0.1.0 v0.1.1 v0.2.0 v0.2.0-rc.1 nonsense` | `{"state":"available","latest":"v0.2.0"}`，spec = `github:citydirector/dsh-pwsh-plugin#v0.2.0` |
+| 只有 `v0.1.0`（当前 0.1.1） | `{"state":"current","latest":"v0.1.0"}`，不误报 |
+
+预发布 `v0.2.0-rc.1` 与非 `vX.Y.Z` 的标签都被跳过 —— 这是标签契约在起作用，不是巧合。
+
+### 5. 版本推进
+
+文档与示例 tag 必须一起动，否则照抄 README 装到旧版：`0.1.0` → `0.1.1`（`package.json` + 中英 README 的
+安装示例 `#v0.1.1`），提交 `2c7543a`，annotated tag `v0.1.1` → `8a50a40`，main 与 tag 都已推送；
+desktop profile 的依赖行同步为 `#v0.1.1`，重装后 `node_modules` 里的 `package.json` 读回 0.1.1。
+
+### 6. 还没验证的一件事
+
+bundle 行的 `name` 必须是包名，**带不了 `?v=N`**（第二十节）。因此「改插件代码 → 提 URL 版本号 → 热生效」
+这套开发期手法在 bundle 模式下不存在，改完得重启 DSH。**这一条仍是推断，没有真机重启确认过。**
