@@ -833,13 +833,38 @@ check()                                  → 217–330 ms → {"state":"current"
 
 预发布 `v0.2.0-rc.1` 与非 `vX.Y.Z` 的标签都被跳过 —— 这是标签契约在起作用，不是巧合。
 
-### 5. 版本推进
+### 5. 真闭环：装旧版，让它自己查到新版
+
+上面的判决是喂标签进去验的。真正想确认的是「**线上真有一个更新的版本时，装着的旧版会怎么说**」。
+做法不是模拟，而是真装旧版：
+
+```powershell
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.1.0'   # 2.1s → 0.1.0
+```
+
+然后 import 装进 profile 的那份 `update-check.mjs`（此时它是 v0.1.0 的代码）：
+
+```
+installed version : 0.1.0
+check             : {"state":"available","latest":"v0.1.1", …}  317 ms
+document          : {…, "running":"0.1.0", "spec":"github:citydirector/dsh-pwsh-plugin#v0.1.1"}
+announce          : {"latest":"v0.1.1","spec":"github:citydirector/dsh-pwsh-plugin#v0.1.1"}
+announce again    : undefined
+```
+
+三件事一次确认：查询命中真远端、给出的 spec 正好是能直接装的那条、`announce` 只吐一次（不会每次调用都刷）。
+验完升回 `v0.1.1`，`package.json` 里的依赖行也随之回到 `#v0.1.1`。
+
+> 这一步也顺带暴露了一个测试问题：`updatetest` 原本写死断言 `packageVersion() === '0.1.0'`，
+> 版本一升就红。已改成「等于 `package.json` 声明的版本」+「三段版本号」两条（51 → 52 项）。
+
+### 6. 版本推进
 
 文档与示例 tag 必须一起动，否则照抄 README 装到旧版：`0.1.0` → `0.1.1`（`package.json` + 中英 README 的
 安装示例 `#v0.1.1`），提交 `2c7543a`，annotated tag `v0.1.1` → `8a50a40`，main 与 tag 都已推送；
 desktop profile 的依赖行同步为 `#v0.1.1`，重装后 `node_modules` 里的 `package.json` 读回 0.1.1。
 
-### 6. bundle 模式改代码必须重启（已由缓存实验钉死）
+### 7. bundle 模式改代码必须重启（已由缓存实验钉死）
 
 第二十节说 bundle 行的 `name` 必须是包名、带不了 `?v=N`。这条**代价**原来是推断，现在实测过了。
 
