@@ -35,7 +35,7 @@
 $dsh = '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.1.0'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.1.1'
 # 或者从本地检出装
 & $dsh plugin --profile desktop add 'file:<检出目录>'
 ```
