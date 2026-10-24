@@ -1,0 +1,141 @@
+# wsl/llrun — the `bash` tool's write boundary
+
+DSH's `bash` tool runs in WSL. On `/mnt/c` and `/mnt/d` (9p / drvfs) it can write **anywhere** — the DSH
+sandbox does not reach across that mount. `wsl/llrun` is a small C shim that inserts three boundaries in
+front of the shell, turning that hole into a closed loop. `wsl/custom-bash.mjs` wires it into the
+`bash` tool (see [Wiring](#wiring-custom-bashmjs)).
+
+```
+llrun [--no-isolate] [--no-seal] [-r] [-C <dir>] <workspace|-> <prog> [args...]
+```
+
+| Argument | Meaning |
+|---|---|
+| `workspace` | Writable directory (WSL path). `-` = current directory. `/` is refused outright. |
+| `-r` | **Strict read-only** (maps to DSH's `read-only` mode). Every directory except `/dev` drops to read-only; see the table below. |
+| `-C <dir>` | `chdir` after landlock is applied, so the script's `$0` and line numbers stay clean. |
+| `--no-isolate` | Skip socket masking (docker becomes reachable — this drops a whole layer); also loses the `/var/tmp` seal. |
+| `--no-seal` | Disable only the `/var/tmp` seal; socket masking stays. |
+
+## The three boundaries
+
+1. **User + mount namespace.** Binds `/run/docker.sock`, `/var/run/docker.sock`,
+   `/run/containerd/containerd.sock` and `/run/podman/podman.sock` onto `/dev/null`, then covers
+   `/etc/ssh/ssh_config.d` with an empty directory (a userns makes the ownership check there fail).
+2. **landlock (ABI 7).** System directories keep full access; `/mnt/c` `/mnt/d` `/mnt/e` become read-only;
+   the workspace stays writable. **The whitelist does not contain `/init`** — WSL's interop relay cannot
+   execute, so `cmd.exe`, `pwsh.exe` and any absolute-path PE are blocked along with it. This is the
+   linchpin of the whole scheme; adding `/init` back means having no boundary at all.
+3. **`/var/tmp` mount seal.** Inside the userns, `bind` the directory onto itself and `remount,ro`.
+   It has to be a mount: **landlock unions parent and child rules**, so a full-access `/var` swallows the
+   stricter read-only rule for `/var/tmp` (`/dev` + `/dev/shm` behave the same way — both stay writable).
+   Only a mount-level ro can seal a subdirectory, and `remount` needs `CAP_SYS_ADMIN`, which is only
+   available inside the userns — which is why `--no-isolate` cannot seal it.
+   `-r` additionally seals `/dev/shm` (plain mode leaves it alone, see below).
+
+## read-only (`-r`) semantics
+
+| Operation | Default | `-r` strict |
+|---|---|---|
+| Read / list / execute | allowed | **allowed** (without read access, not even `ls` or `cat` starts) |
+| Write / create / delete / rename / truncate | workspace and non-Windows mounts allowed | **all denied** |
+| Write `/dev/null` | allowed | **allowed** (character device, must keep full access) |
+| Write `/tmp` `/home` `/etc` `/var/log` | allowed | **denied** |
+| Write `/dev/shm` `/var/tmp` | allowed | **denied** (mount seal) |
+| Touch mtime / `chmod` | allowed | **still allowed** (inherent landlock blind spot — the kernel has no such permission concept) |
+
+**What `-r` really costs.** `/tmp` is read-only, so **any tool that needs temporary files breaks**:
+`gcc` gives `Cannot create temporary file in /tmp/: Permission denied` (`Aborted`). `python3`, `git`,
+`curl`, `dpkg`, `ssh` and `bun` all work. With `/dev/shm` sealed, Python's
+`multiprocessing.Semaphore` / `SharedMemory` raise `OSError: [Errno 30]` and `Manager` raises
+`EOFError` — an inherent cost of the read-only tier, not a defect.
+
+## Build and install
+
+```bash
+cd wsl && gcc -O2 -Wall -Wextra -o llrun llrun.c
+cp llrun <DSH_HOME>/bin/llrun && chmod 755 <DSH_HOME>/bin/llrun
+cp llrun ~/.local/bin/llrun && chmod 755 ~/.local/bin/llrun
+```
+
+## Acceptance matrix (54 assertions, all green, repeated runs)
+
+`bash wsl/acceptance.sh` → `TOTAL pass=54 fail=0 skip=0`, `leaks=0`.
+
+The script is machine-independent: it derives the workspace from its own location, discovers the Windows
+user directory under `/mnt/*/Users/*/`, and only asserts against directories that actually exist. It also
+re-checks the disk at the end (`leaks=N`) so a silently-succeeding write cannot pass unnoticed.
+
+- **Write boundary**: outside targets (drive root, `Documents`, the portable data root, the profile dir,
+  `C:\Users\<user>`) all DENIED with disk re-check absent; workspace, `/tmp` and `/home` writable;
+  `/var/tmp` sealed but readable.
+- **Windows executables**: `cmd.exe`, `powershell.exe`, `notepad.exe` and a direct `/init` call all BLOCKED.
+- **Docker escape**: `docker ps` BLOCKED, raw socket connect BLOCKED; `--no-isolate` reverses it (CONNECTED).
+- **Toolchain**: `git`, `node`, `python3`, `gcc`, `dpkg -l`, `curl https`, `ssh` all normal.
+- **`-r` tier**: 8 write assertions DENIED (workspace, `/tmp`, `/home`, `/dev/shm`, `/var/tmp`, `/etc`,
+  `/var/log`, `mktemp`); 6 read assertions OK; delete and `mkdir` DENIED; `python3` / `git` / `curl` /
+  `dpkg` / `ssh` stay alive, `gcc` unusable as expected.
+- **Switches**: `--no-seal` and `--no-isolate` both open `/var/tmp` as designed.
+- **Verbatim pass-through**: exit codes, heredoc literals, Chinese text and quoting all survive unchanged.
+
+**Overhead**: bare bash 2-3 ms per call → llrun 8-9 ms per call, about **+6 ms**.
+
+## Known costs
+
+- **`sudo` is unusable** (`PR_SET_NO_NEW_PRIVS` refuses setuid elevation), so `apt-get install` is out;
+  read-only queries like `dpkg -l` and `apt list` still work.
+- `dbus-send --session` / `systemctl --user` work (restored by the same-uid mapping; the early 0→1000
+  mapping broke them).
+- **mtime and `chmod` are not restricted**: landlock's permission vocabulary has no concept for them, so
+  even the read-only tier can retimestamp or re-permission an existing file (content, creation, deletion
+  and rename are all blocked). A kernel-level blind spot, not an implementation gap.
+- **`-r` does not stop damage inside the workspace** — it guards against writing *outward*, not against
+  emptying the workspace. The workspace is writable by design in the default tier, and `rm -rf` has full
+  authority there. Only discipline prevents that.
+- **`/dev/shm` must stay writable in the default tier**: it is the POSIX shared-memory mount, and sealing
+  it crashes Python `multiprocessing` `Semaphore` / `SharedMemory`. Only `-r` seals it (a read-only run
+  should not spawn multi-process work anyway).
+- **The ssh mask uses a fixed path, `/tmp/.llrun-empty`** (since v6). An earlier `mkdtemp` version leaked
+  one directory per call — 421 of them had accumulated in testing.
+- **No Windows executable can be called from inside WSL any more** (scoop, pwsh, node.exe all BLOCKED).
+
+## Wiring (`custom-bash.mjs`)
+
+`wsl/custom-bash.mjs` is the source copy of `presets/shared/custom-bash.mjs` in the DSH profile. Edit it
+here, then deploy:
+
+```bash
+cp wsl/custom-bash.mjs <DSH_HOME>/profiles/desktop/presets/shared/custom-bash.mjs
+```
+
+**Commands go in over stdin**: `argv = [bash, '-s']` plus `stdio.stdin = { data: command }`. It used to be
+`[bash, '-c', command]`, where backticks, `$` and complex quoting were all eaten by the Windows
+`bash.exe` layer first — the root cause of a workspace-deletion incident (a `\n` lost its backslash in the
+inner bash, gluing two commands together).
+
+**Mode triage** (`sandboxPolicy.resolve` must be given `session`, otherwise it silently falls back to the
+deployment default):
+
+| Session permission | Process started |
+|---|---|
+| `danger-full-access` | bare `bash -s`, no fence (DSH's established semantics) |
+| `workspace-write` | `llrun <workspace> /bin/bash -s` |
+| `read-only` | `llrun -r <workspace> /bin/bash -s` |
+| `sandboxPolicy` absent | **throws, refuses to run**, unless `fence: false` is configured |
+| llrun not executable | **throws, refuses to run** — never silently degrades to unfenced |
+
+`workspace` comes from the policy's `workspaceRoot` (falling back to the session cwd), with Windows paths
+translated to `/mnt/<drive>/...`. A POSIX `workdir` goes to llrun's `-C` (chdir after landlock); a Windows
+one still becomes the process cwd.
+
+Configuration:
+
+```yaml
+- id: custom-bash
+  name: './presets/shared/custom-bash.mjs'
+  config:
+    llrunPath: '/usr/local/bin/llrun'   # default
+    fence: true                         # false = no fence (not recommended)
+```
+
+Tests: `node test/bashtest.mjs` (17, mock runtime) + `node test/bash-e2e.mjs` (11, real runtime + real llrun).

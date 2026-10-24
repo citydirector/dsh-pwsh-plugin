@@ -1,0 +1,53 @@
+{
+  "name": "dsh-pwsh-plugin",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Persistent pwsh session tool (pwsh_run) for DeepSeek Harness: run PowerShell scripts with zero escaping, no 32K command-line cap, and state that survives across calls.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "powershell",
+    "pwsh",
+    "persistent-session"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/citydirector/dsh-pwsh-plugin.git"
+  },
+  "exports": {
+    ".": "./plugin/index.mjs",
+    "./session": "./plugin/session.mjs",
+    "./update": "./plugin/update-check.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "plugin",
+    "wsl",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "FINDINGS.md",
+    "LICENSE"
+  ],
+  "main": "./plugin/index.mjs",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.2 <0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0-rc.2 <0.3.0"
+  },
+  "scripts": {
+    "test": "node test/itest.mjs && node test/plugintest.mjs && node test/updatetest.mjs && node test/wiringtest.mjs",
+    "test:all": "node test/itest.mjs && node test/plugintest.mjs && node test/e2e-real-subprocess.mjs && node test/sandboxtest.mjs && node test/bashtest.mjs && node test/bash-e2e.mjs && node test/updatetest.mjs && node test/wiringtest.mjs",
+    "test:update": "node test/updatetest.mjs && node test/wiringtest.mjs"
+  }
+}

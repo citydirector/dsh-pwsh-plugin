@@ -1,0 +1,15 @@
+# dsh-pwsh-plugin 的 bundle patch：往 profile 里插一行宿主插件。
+#
+# 这一行写的是**包名**，不是 `./` 相对路径：DSH 会把相对名解析成绝对 file URL，
+# 而配置编辑器第一次写入时会把那个绝对 URL 抄进用户自己的 cordis.patch.yml，
+# 便携版一挪目录这一行就废了。包名始终从 profile 的 node_modules 解析。
+#
+# 行 id 是承重的：插件的设置命名空间就是它的 profile 条目 id。
+- insert:
+    - id: pwsh-run
+      name: dsh-pwsh-plugin
+      config:
+        pwshPath: pwsh
+        timeoutMs: 120000
+        idleMs: 1800000
+        maxSessions: 4

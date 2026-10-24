@@ -1,0 +1,13 @@
+# runtime artifacts — never commit
+node_modules/
+*.log
+
+# local scratch space used while debugging
+_skadi_temp/
+_probe*
+_repl.mjs
+
+# temp / OS noise
+.DS_Store
+Thumbs.db
+*.tmp
