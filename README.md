@@ -262,11 +262,11 @@ node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
 node test/bashtest.mjs                       # 17: custom-bash fence triage
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
-node test/updatetest.mjs                     # 51: update check, local git only
+node test/updatetest.mjs                     # 52: update check, local git only
 node test/wiringtest.mjs                     #  9: update notice wiring
 ```
 
-Eight scripts, **132 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Eight scripts, **133 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.

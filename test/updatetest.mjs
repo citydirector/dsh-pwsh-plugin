@@ -7,7 +7,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -91,9 +91,12 @@ deep('一个标签都没有', updateVerdict([], '0.1.0'), { state: 'current' })
 deep('标签比本地还旧', updateVerdict(['v0.0.9'], '0.1.0'), { state: 'current', latest: 'v0.0.9' })
 
 // ── 7. 本包版本 ────────────────────────────────────────────────────────────
+// 只断言"读得到"与"读对了"：发版必然改版本号，把数字写死在断言里等于每次发版都要改测试。
 console.log('\n[7] packageVersion')
+const declared = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 const version = packageVersion()
-check('读到 0.1.0', version === '0.1.0', String(version))
+check('读到 package.json 声明的版本', version === declared, String(version) + ' vs ' + String(declared))
+check('是三段版本号', typeof version === 'string' && /^\d+\.\d+\.\d+$/.test(version), String(version))
 
 // ── 8. 本地仓库预演：真读标签 ──────────────────────────────────────────────
 console.log('\n[8] fetchReleaseTags（本地 git 仓库）')

@@ -628,7 +628,7 @@ README 里的预演脚本已改成 PowerShell 写法，并且照抄跑通过一�
 
 ### 测试
 
-`test/updatetest.mjs`（51 项）不联外网：发布源用 `mkdtempSync` 建的真 git 仓库 +
+`test/updatetest.mjs`（52 项）不联外网：发布源用 `mkdtempSync` 建的真 git 仓库 +
 `git+file://` 规格，走完「读标签 → 比版本 → 下判决 → 出 spec → 去重 announce」全链路，
 `finally` 里 `rmSync` 自清。失败路径（源不存在、自身版本读不出）各有钉住用例。
 
