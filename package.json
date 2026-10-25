@@ -1,6 +1,6 @@
 {
   "name": "dsh-pwsh-plugin",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Persistent pwsh session tool (pwsh_run) for DeepSeek Harness: run PowerShell scripts with zero escaping, no 32K command-line cap, and state that survives across calls.",
   "keywords": [
