@@ -9,10 +9,12 @@
  *   踩到脏状态。所以安装这一步交给 dsh-plugin-manager（Plugins 页面用的同一个服务），
  *   它自己跑 pnpm、自己回滚 package.json / lockfile。
  *
- * 它做不到的事，必须说清楚
- *   bundle 行的 name 是包名，拿不到 URL 上的缓存破坏参数，ESM 按 URL 缓存模块。
- *   所以装完磁盘上是新版，正在跑的进程里仍是旧模块，**只有重启 DSH 才会真正换过去**。
- *   installBundle 的返回里 application 正是 'restart-required'，这里照实转述。
+ * 能不能不重启
+ *   bundle 行的 name 是包名，拿不到 URL 上的缓存破坏参数，ESM 按 URL 缓存模块 —— 光重新 apply
+ *   只是再 import 同一个 URL。但 installBundle 走 HMR 的 runExclusive，重组合会比对文件指纹
+ *   （inode:size:mtime），把变了的模块驱逐、重新 import，所以**在 HMR 在场的宿主上是真换掉了**，
+ *   实测 137ms 生效。前提是调用点在 HMR 事务之外，否则嵌套会被拒（见 auto-update.mjs）。
+ *   没有 HMR 的宿主上 application 才是 'restart-required'，这里照实转述。
  */
 
 /** 安装后要把 application 这个枚举翻译成一句能照做的话。 */
