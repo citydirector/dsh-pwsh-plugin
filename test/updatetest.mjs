@@ -22,6 +22,7 @@ import {
   updateSource,
   updateVerdict,
 } from '../plugin/update-check.mjs'
+import { installRelease } from '../plugin/update-apply.mjs'
 
 let pass = 0
 let fail = 0
@@ -178,6 +179,56 @@ try {
   timed.stop()
   same('stop 之后没有定时器', timed.timer, undefined)
   same('stop 之后没有间隔器', timed.interval, undefined)
+
+  // ---------------------------------------------------------------- 安装
+  console.log('\n[13] 安装：交给 pluginManager')
+  {
+    const none = await installRelease(undefined, 'github:owner/repo#v1.0.0')
+    same('服务缺席时 outcome=no-manager', none.outcome, 'no-manager')
+    check('服务缺席时 ok=false', none.ok === false)
+
+    const shell = await installRelease({}, 'github:owner/repo#v1.0.0')
+    same('没有 installBundle 时也是 no-manager', shell.outcome, 'no-manager')
+
+    const calls = []
+    const fake = {
+      async installBundle(spec, options) {
+        calls.push([spec, options])
+        return { application: 'restart-required', changed: true, target: 'dsh-pwsh-plugin' }
+      },
+    }
+    const restarted = await installRelease(fake, 'github:owner/repo#v1.0.1', { requestId: 'req-1' })
+    check('装成功时 ok=true', restarted.ok === true)
+    same('outcome 透传 application', restarted.outcome, 'restart-required')
+    same('spec 原样传给安装器', calls[0][0], 'github:owner/repo#v1.0.1')
+    same('requestId 原样传给安装器', calls[0][1].requestId, 'req-1')
+    check('提示要重启', restarted.text.includes('Restart DSH'), restarted.text)
+
+    // bundle 行给不出新的 module URL，所以 'applied' 也不该宣称「已经换过来了」。
+    const applied = await installRelease({
+      async installBundle() { return { application: 'applied', changed: true } },
+    }, 'github:owner/repo#v1.0.1')
+    check('applied 仍然要求重启', applied.text.includes('Restart DSH'), applied.text)
+
+    const failed = await installRelease({
+      async installBundle() {
+        return { application: 'failed', changed: false, error: { code: 'operation-error', diagnostic: 'pnpm exited 1' } }
+      },
+    }, 'github:owner/repo#v1.0.1')
+    check('失败时 ok=false', failed.ok === false)
+    check('失败文案带错误码与诊断', failed.text.includes('operation-error') && failed.text.includes('pnpm exited 1'), failed.text)
+
+    const cancelled = await installRelease({
+      async installBundle() { return { application: 'cancelled', changed: false } },
+    }, 'github:owner/repo#v1.0.1')
+    check('取消也按失败处理', cancelled.ok === false)
+
+    const threw = await installRelease({
+      async installBundle() { throw new Error('profile is locked') },
+    }, 'github:owner/repo#v1.0.1')
+    same('抛错时 outcome=threw', threw.outcome, 'threw')
+    check('抛错文案带上原始原因', threw.text.includes('profile is locked'), threw.text)
+  }
 } finally {
   cleanup()
 }

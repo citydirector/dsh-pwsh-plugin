@@ -31,6 +31,7 @@
 
 import { readFileSync } from 'node:fs'
 import { DEFAULT_MAX_OUTPUT_BYTES, bootArgv, startSession } from './session.mjs'
+import { installRelease } from './update-apply.mjs'
 import { UpdateChecker } from './update-check.mjs'
 
 /** 加载器诊断里显示的插件名。 */
@@ -118,22 +119,25 @@ function describeConfineFailure(error, workspaceRoot) {
  *
  * DSH 的 Windows 沙箱（workspace-write）给进程挂的是 Low 完整性 + WRITE_RESTRICTED 令牌，
  * 这种令牌建不了匿名管道，于是所有「捕获子进程 stdio」的起法一律失败——`& exe` 也在其中
- * （PowerShell 的调用运算符内部要建管道）。原始报错只有一句「failed to run: 拒绝访问」，
+ * （PowerShell 的调用运算符内部要建管道）。原始报错只有一句「拒绝访问」，
  * 看不出这是沙箱边界而不是命令写错了，模型很容易在这里反复换姿势盲试。
- *
- * 第三段匹配的是 stdout 槽位接 NUL 时才会出现的变体（本插件默认接磁盘句柄，不会走到）。
  */
 export function describeExecDenial(text) {
-  if (!/failed to run/.test(text)) return null
+  // 第一道门必须同时认内层文案：服务端交付的是剥到最内层的异常，`& exe` 到这里的原文是
+  // "StandardOutputEncoding is only supported when standard output is redirected."，没有
+  // "failed to run" 前缀。只按外层文案判定会让这条提示在真实路径上永不出现。
+  if (!/failed to run|StandardOutputEncoding is only supported/.test(text)) return null
   if (!/拒绝访问|Access is denied|StandardOutputEncoding is only supported/.test(text)) return null
   return '[The sandbox is blocking that child process: this session runs under a restricted token (Low integrity +'
-    + ' WRITE_RESTRICTED) that cannot create anonymous pipes, so any launch capturing a child\'s stdio fails —'
-    + ' including `& exe`. Three launches that do work: (1) Start-Process -RedirectStandardOutput <file>'
-    + ' -RedirectStandardError <file> — output is captured, but .ExitCode comes back empty;'
-    + ' (2) [Diagnostics.Process]::Start with UseShellExecute=$false and no redirection — .ExitCode is correct,'
-    + ' but the child inherits this session\'s stdout; (3) a .cmd wrapper that writes stdout/stderr to files and'
-    + ' `echo %ERRORLEVEL%` into a third one — you get both. Do not let a child inherit stdout without redirecting'
-    + ' it: this tool detaches the child std handles, so it will not corrupt this session, but the output is lost.]'
+    + ' WRITE_RESTRICTED) that cannot create anonymous pipes, so any launch that captures a child\'s stdio fails —'
+    + ' including `& exe`. Launches that do work: (1) [Diagnostics.Process]::Start on'
+    + ' `cmd.exe /c "<exe> <args> > out.txt 2> err.txt"` with UseShellExecute=$false — .ExitCode is correct and'
+    + ' both files carry the output; (2) Start-Process -NoNewWindow -PassThru -Wait -RedirectStandardOutput <file>'
+    + ' -RedirectStandardError <file> — output is captured, but .ExitCode comes back empty. Two things NOT to do:'
+    + ' do not pass CreateNoWindow=$true, and do not call Start-Process without -NoNewWindow — a fresh console'
+    + ' cannot initialize under the restricted token, so the child dies with STATUS_DLL_INIT_FAILED (0xC0000142)'
+    + ' and Windows raises a modal error dialog. Also do not let a child inherit this session\'s stdout: this tool'
+    + ' detaches the child std handles, so session corruption is prevented — the lost output is not.]'
 }
 
 /** 合并调用方取消信号与本地超时信号。 */
@@ -150,7 +154,7 @@ export function apply(ctx, config) {
   const maxOutputBytes = Number.isSafeInteger(config?.maxOutputBytes) && config.maxOutputBytes > 0 ? config.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES
   // 明确放弃边界的唯一开关：策略服务缺席时默认拒绝启动，只有这里能改主意。
   const allowUnconfined = config?.allowUnconfined === true
-  // 更新检查：只查不发。查到新版本时在当次调用的输出末尾挂一行，安装仍交给外部（CLI 或 plugin_manager）。
+  // 更新检查：查到新版本时在当次调用的输出末尾挂一行。装不装由用户显式调 pwsh_run_update 决定。
   const updateCheck = config?.updateCheck !== false
 
   // 沙箱服务每次启动会话时再取：插件 apply 可能早于沙箱服务挂载，
@@ -289,6 +293,84 @@ export function apply(ctx, config) {
     checker?.start()
     return () => checker?.stop()
   }, 'pwsh-run.update')
+
+  /**
+   * 更新工具：把「查到」与「装」拆成同一入口的两个动作。
+   *
+   * 为什么要有它
+   *   只把提示挂在 pwsh_run 输出末尾时，模型看见了也无从下手（它拿不到 profile 名，
+   *   也不知道该不该重启）。给出一个能被调用的动作，比给一句话可靠。
+   *
+   * 为什么装这一步不自己下载
+   *   见 update-apply.mjs 的头注释：本插件是 profile 的一个 bundle 依赖，版本钉在
+   *   package.json 与 pnpm-lock.yaml 里，绕开包管理器改文件会让 lockfile 与磁盘不一致。
+   */
+  ctx.effect(() => ctx.tools.register({
+    name: 'pwsh_run_update',
+    description: [
+      'Check for, and optionally install, a newer release of the pwsh_run plugin.',
+      '* action "check" reads the release tags once and reports the verdict; it never installs anything.',
+      '* action "install" hands the pinned tag spec to DSH\'s own plugin manager (the same service the Plugins page uses), which runs pnpm and rolls back on failure.',
+      '* Installing writes the package to the profile. The running process keeps the old modules because a bundle row cannot carry a cache-busting URL — restart DSH to load the new code. The result says which of the two happened.',
+      '* Only vX.Y.Z release tags are considered; pre-releases and branch heads are ignored.',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['check', 'install'],
+          description: 'check (default): report whether a newer release exists. install: also install the newest release.',
+        },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { text: { type: 'string' } },
+        required: ['text'],
+      },
+      render: (_args, value) => [{ type: 'text', text: value.text }],
+    },
+    async execute(args) {
+      if (checker === undefined) {
+        return { text: 'pwsh_run update checks are disabled in this profile (config.updateCheck: false), so pwsh_run_update has nothing to do.' }
+      }
+      const action = args?.action === 'install' ? 'install' : 'check'
+      const state = await checker.check()
+      const doc = checker.document()
+      const lines = ['state: ' + String(doc.state)]
+      if (doc.running !== undefined) lines.push('running: ' + doc.running)
+      if (doc.latest !== undefined) lines.push('newest release: ' + doc.latest)
+      if (doc.spec !== undefined) lines.push('install spec: ' + doc.spec)
+      if (doc.error !== undefined) lines.push('error: ' + String(doc.error))
+      if (state.state !== 'available') {
+        // failed 与 current 必须分开说：查不到的时候说「已是最新」是句谎话。
+        if (state.state === 'current') {
+          lines.push(action === 'install'
+            ? 'Nothing to install: this is the newest release the source publishes.'
+            : 'No newer release.')
+        }
+        else {
+          // 这条分支上 doc.spec 是 undefined，插值只会印出一个字面占位符，所以给模板。
+          lines.push('Could not reach the release source, so whether a newer version exists is unknown. '
+            + 'Run the check again later, or upgrade by hand: dsh plugin --profile <name> add "github:<owner>/<repo>#vX.Y.Z"')
+        }
+        return { text: lines.join('\n') }
+      }
+      if (action === 'check') {
+        lines.push('Run this again with action "install", or run: dsh plugin --profile <name> add "' + String(doc.spec) + '"')
+        return { text: lines.join('\n') }
+      }
+      const outcome = await installRelease(ctx.get('pluginManager'), String(doc.spec), { requestId: 'pwsh-run-update' })
+      lines.push('install: ' + outcome.outcome)
+      lines.push(outcome.text)
+      if (outcome.ok !== true && doc.spec !== undefined) lines.push('Manual path: dsh plugin --profile <name> add "' + String(doc.spec) + '"')
+      return { text: lines.join('\n') }
+    },
+  }), 'pwsh-run.update-tool')
 
   // 工具注册也要挂到 effect 上：live patchReload 会重新 apply 本模块，
   // 旧注册不撤的话 ctx.tools.register 会抛 "already registered"。

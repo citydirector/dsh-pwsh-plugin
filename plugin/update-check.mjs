@@ -1,5 +1,5 @@
 /**
- * pwsh-run 的更新检查 —— 只查不发，安装交给用户自己（sidepanel 或 `dsh plugin` CLI）。
+ * pwsh-run 的更新检查 —— 只查不装。装这一步由 update-apply.mjs 走 DSH 自己的 pluginManager。
  *
  * 为什么单独一个模块
  *   这个插件是纯宿主平面的工具插件，没有配置页面，也没有 client 入口。
@@ -11,7 +11,8 @@
  *   与 package.json 里的版本比较。**从不自己安装**：发现新版本时只把
  *   版本号与 tag 钉住的安装规格（github:owner/repo#vX.Y.Z）记下来，
  *   由外部去装。一个 tag 一个规格，所以装新版本就是盖掉旧的，不需要额外逻辑。
- *   这里刻意不调 plugin_manager：组合里它默认关着，调不存在的东西会让提示变成谎话。
+ *   这里自己不动手：本模块只负责「读标签 → 比版本 → 记状态」，装与不装是另一个决定，
+ *   由 pwsh_run_update 工具按用户的显式动作去做（见 update-apply.mjs）。
  *
  * 发布源可覆盖
  *   DSH_PWSH_UPDATE_SOURCE 可以是 owner/repo，也可以是任意 git URL
