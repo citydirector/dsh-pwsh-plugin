@@ -1058,6 +1058,12 @@ function packagedLlrunPath() {
 patch 层不去重（`applyEntryPatches` 的 insert 分支就是 `data.push(...insert)`），boot 时同名注册是硬错误
 → **本机 desktop 直接装会撞双行陷阱，必须先删那三处手写行。**
 
+那三处已在 2026-10-25 删掉（`profiles/desktop/cordis.patch.yml` 1769 → 1736 行），删后
+`grep 'id: custom-bash'` 在该文件里为 **0**，`pwsh-run` 也只剩 bundle 那一条。
+另一件事：三处手写在三个不同预设的 realm 里，删之前真 boot 20 秒 stderr 里 `already registered`
+命中 **0** —— `dsh-tools/lib/index.js:2874` 的注释说明硬错误只发生在同一层，跨 realm 同名注册是允许的。
+所以「双行陷阱」精确地说只发生在**同 scope 的 bundle 行与手写行**之间。
+
 ### 6. 参数顺序坑（再记一次）
 
 `dsh plugin --profile X --dump-config` → `[ERROR] Unknown option: 'dump-config'`，rc=1。
