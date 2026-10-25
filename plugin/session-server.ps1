@@ -44,6 +44,51 @@ $SafeOut = [IO.StreamWriter]::new([IO.MemoryStream]::new(), $Utf8)
 [Console]::SetOut($SafeOut)
 [Console]::SetError($SafeOut)
 
+# 孙子进程的 std handle 继承自 Win32 槽位，Console::SetIn/SetOut 只改 .NET 层，槽位里仍是
+# 真正的协议管道：脚本里一句 Start-Process 起的子进程就能往协议流里写（实测伪造一行
+# <<<BYE>>> 会让客户端当场判定会话死亡），也能读走客户端发来的调用数据。
+# 所以拿到协议流之后要把三个槽位整体换掉：stdin 接 NUL（子进程读到 EOF），
+# stdout/stderr 接一个带 FILE_FLAG_DELETE_ON_CLOSE 的临时文件（子进程写进去，随进程退出自动消失）。
+# stdout 不能接 NUL：NUL 是字符设备，PowerShell 会认为输出没被重定向，于是 & exe 的报错从
+# 「failed to run: 拒绝访问」变成「StandardOutputEncoding is only supported when standard output
+# is redirected」，沙箱边界的诊断信息就丢了。磁盘句柄没有这个问题（实测两种文案只随句柄类型变）。
+# 接管失败只降级不中断：它是加固，不是本工具能干活的前提；原因随第一次调用的警告行告知模型。
+$TakeoverNote = ''
+$K = $null
+$Drain = ''
+$hOut = [IntPtr]::Zero
+try {
+    $Sig = @'
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool SetStdHandle(int n, IntPtr h);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern uint SetFilePointer(IntPtr h, int lo, IntPtr hi, uint method);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool SetEndOfFile(IntPtr h);
+'@
+    $K = Add-Type -MemberDefinition $Sig -Name StdioTakeover -Namespace PwshRun -PassThru -ErrorAction Stop
+    $Invalid = [IntPtr]::new(-1)
+    # 0x40000000 GENERIC_WRITE / 0x80000000 GENERIC_READ / 0x3 share read+write / 0x3 OPEN_EXISTING
+    $NulR = $K::CreateFileW('NUL', [uint32]2147483648, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0, [IntPtr]::Zero)
+    if ($NulR -eq [IntPtr]::Zero -or $NulR -eq $Invalid) { throw 'CreateFileW(NUL, read) failed' }
+    if (-not $K::SetStdHandle(-10, $NulR)) { throw 'SetStdHandle(stdin) failed' }
+    # 0x2 CREATE_ALWAYS / 0x7 share read+write+delete / 0x04000000 FILE_FLAG_DELETE_ON_CLOSE
+    $Drain = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'pwsh-run-drain-' + [Guid]::NewGuid().ToString('N') + '.log')
+    $hOut = $K::CreateFileW($Drain, [uint32]1073741824, [uint32]7, [IntPtr]::Zero, [uint32]2, [uint32]67108864, [IntPtr]::Zero)
+    if ($hOut -eq [IntPtr]::Zero -or $hOut -eq $Invalid) {
+        # 临时目录不可写时退回 NUL：协议流仍然干净，只是 & exe 的报错文案会变成重定向那一句。
+        $Drain = ''
+        $hOut = $K::CreateFileW('NUL', [uint32]1073741824, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0, [IntPtr]::Zero)
+        if ($hOut -eq [IntPtr]::Zero -or $hOut -eq $Invalid) { throw 'CreateFileW(stdout) failed' }
+    }
+    if (-not $K::SetStdHandle(-11, $hOut)) { throw 'SetStdHandle(stdout) failed' }
+    if (-not $K::SetStdHandle(-12, $hOut)) { throw 'SetStdHandle(stderr) failed' }
+} catch {
+    $TakeoverNote = 'pwsh-run: could not detach the child std handles (' + $_.Exception.Message + '); a script that starts its own processes may write into the session protocol stream and break this session.'
+}
+
 $RS = [RunspaceFactory]::CreateRunspace()
 $RS.Open()
 $Fmt = @'
@@ -81,6 +126,17 @@ while ($true) {
     $to = [double]$line.Substring($sp1+1, $sp2-$sp1-1)
     $src = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line.Substring($sp2+1)))
     $ProtoOut.WriteLine('<<<B:' + $cid + '>>>')
+    # 子进程往 drain 文件里写的东西没人要，每次调用前截回零，免得常驻会话把临时盘越写越满。
+    # 截断失败不理会：那只是空间回收，不影响本调用。
+    if ($null -ne $K -and $Drain.Length -gt 0) {
+      try { [void]$K::SetFilePointer($hOut, 0, [IntPtr]::Zero, 0); [void]$K::SetEndOfFile($hOut) } catch {}
+    }
+    # 接管失败的说明只随第一次调用交付一次：模型需要知道这一次的会话对子进程不可靠，
+    # 但把它挂在每次调用上只会变成噪音。
+    if ($TakeoverNote.Length -gt 0) {
+      $ProtoOut.WriteLine('W:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($TakeoverNote)))
+      $TakeoverNote = ''
+    }
     $PS = [PowerShell]::Create()
     $PS.Runspace = $RS
     $out = [System.Management.Automation.PSDataCollection[psobject]]::new()

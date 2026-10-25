@@ -206,6 +206,7 @@ Remove-Item -Recurse -Force $root
 | 输出顺序看着不对 | stdout 与 stderr 按类型合并，不按时间。自己用 `2>&1` 合。 |
 | `exit N` 的退出码拿不到 | runspace 语义 —— 用 `Write-Output` 或读 `$LASTEXITCODE`。 |
 | 调用结束后子进程还占着文件 | 会话持有 `Process` 对象。等 `idleMs`，或者用一次超时强制重建。 |
+| `Program 'node.exe' failed to run: 拒绝访问。` | `workspace-write` 下的正常现象：受限令牌建不了匿名管道，凡是「捕获子进程 stdio」的起法都失败，`& exe` 也在其中。改用 `Start-Process -RedirectStandardOutput/-RedirectStandardError <文件>`（能拿到输出，拿不到退出码）、`[Diagnostics.Process]::Start`（`UseShellExecute=$false`、不重定向，能拿退出码但子进程继承 stdout），或一个把 stdout / stderr / `%ERRORLEVEL%` 分别写进三个文件的 `.cmd` 包装器。工具也会把这段说明附在输出末尾。 |
 
 ## 已知边界
 
@@ -216,6 +217,12 @@ Remove-Item -Recurse -Force $root
 - **stdout / stderr 的逐行时序不保留** —— 全部流经 `*>&1` 合并后按类型打标。
 - **`[Console]::Error.WriteLine` 会被吞掉**（服务端为防协议污染把 `Console.Error` 指向内存流）。
   子进程的 stderr、`Write-Error`、`throw` 都正常回来。
+- **子进程的 std handle 已与协议流断开。** `Console::SetIn/SetOut` 只改 .NET 层，服务端还改写了三个 Win32 槽位：
+  stdin 接 `NUL`，stdout / stderr 接一个带 `FILE_FLAG_DELETE_ON_CLOSE` 的临时文件、每次调用前截回零。
+  于是子进程往继承来的 stdout 写东西不会再伪造出协议行（实测：子进程一句 `Write-Output '<<<BYE>>>'`
+  曾让会话当场死亡），读继承来的 stdin 也只会读到 EOF，而不是调用方的请求。
+  stdout **故意不接 `NUL`**：那是字符设备，PowerShell 会认为输出没被重定向，沙箱拒绝的报错会变成一句
+  没用的 `StandardOutputEncoding` 提示。临时目录不可写时退回 `NUL`，并在第一次调用的警告里说明一次。
 - **会话是串行的**：并发调用排成队列逐个执行（不会串输出，但也没有并行加速）。
 - **不依赖 WSL。** `pwsh_run` 全程不碰 WSL，只有 `wsl/custom-bash.mjs` 才碰。没有可用的 `bashPath` 时，
   该预设照样加载成功（可执行文件是惰性解析的），`bash` 工具每次调用报
@@ -245,6 +252,7 @@ test/
   bash-e2e.mjs        custom-bash 端到端（真 runtime + 真 llrun）
   updatetest.mjs      更新检查（本地 git 仓库）
   wiringtest.mjs      更新提示真的接到工具输出末尾
+  denialtest.mjs      沙箱拒绝提示只在该触发的报错上触发
 wsl/
   llrun.c llrun      C 垫片与构建产物
   custom-bash.mjs    bundle 接进组合的 bash 工具替代实现（仅 Windows）
@@ -255,7 +263,7 @@ FINDINGS.md          全部实测数据与设计理由
 
 ```bash
 cd <检出目录>
-PWSH_BIN='pwsh' node test/itest.mjs          # 14：协议与会话本体
+PWSH_BIN='pwsh' node test/itest.mjs          # 15：协议与会话本体
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15：插件完整路径
 node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
@@ -263,9 +271,10 @@ node test/bashtest.mjs                       # 19：custom-bash 围栏分诊
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
 node test/updatetest.mjs                     # 52：更新检查（只碰本地 git）
 node test/wiringtest.mjs                     #  9：更新提示接线
+node test/denialtest.mjs                     #  9：沙箱拒绝提示（不起子进程，哪儿都能跑）
 ```
 
-八份脚本合计 **135 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+九份脚本合计 **145 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

@@ -1070,3 +1070,81 @@ patch 层不去重（`applyEntryPatches` 的 insert 分支就是 `data.push(...i
 必须写成 `dsh.cmd --profile X --dump-config`，`--dump-config` 在 `plugin` 之外。
 
 
+
+
+## 二十四、子进程与协议流：两个真实事故（2026-10-25）
+
+### 1. 事故一：一句 `<<<BYE>>>` 就能杀掉会话
+
+服务端原本只用 `Console::SetIn/SetOut/SetError` 把 .NET 层的三个流换掉。**Win32 的 std handle 槽位没有动**，
+新起的子进程从槽位继承的仍是那条协议管道。
+
+实测（脚本里放一句 `Start-Process pwsh.exe -Command 'Write-Output (<<<BYE>>> 的字符拼接)'`）：
+`pwsh_run` 当场返回 `[Error: session said BYE; a new session starts on the next call]`，连续三次全中。
+反向也成立：子进程 `[Console]::In.ReadLine()` 能读走客户端发来的协议行，读到的是**真实请求**。
+
+有意思的是普通 `cmd /c echo` 与 node 的 `console.log` 反而不漏 —— 它们写的是继承来的 stdout 句柄本身；
+而 PowerShell 的调用运算符与 `Start-Process` 在不重定向时会先建管道，管道两端都还挂在协议流上。
+
+**修法**：拿到协议流后改写三个槽位 —— stdin 接 `NUL`；stdout / stderr 接一个
+`FILE_FLAG_DELETE_ON_CLOSE` 的临时文件，每次调用前 `SetFilePointer(0)` + `SetEndOfFile` 截回零。
+
+**为什么 stdout 不能接 `NUL`**（这一步踩过）：`NUL` 是字符设备（`GetFileType` = 2），PowerShell 据此判定
+「输出没有被重定向」，于是 `& exe` 的报错从
+
+    Program 'node.exe' failed to run: 拒绝访问。
+
+变成
+
+    Program 'node.exe' failed to run: StandardOutputEncoding is only supported when standard output is redirected.
+
+沙箱边界最有用的那条诊断信息就没了。磁盘句柄（`GetFileType` = 1）三种场景下文案都不变，实测
+P0/P1/P2 三档（未接管 / 只换 stdout / 再换 stdin）完全一致。
+
+**验证**（文件式 stdin/stdout 驱动改造后的服务端）：协议流只剩 `O:UFJF` / `O:UE9TVA==` / `S:b2s=` 三行，
+伪造行消失；偷 stdin 的孙子进程拿到 `CHILD-SAW-EOF`。
+
+**降级**：临时目录不可写时退回 `NUL`（协议流仍然干净，只是报错文案变成重定向那一句）；
+接管失败时把原因写进 `$TakeoverNote`，随**第一次调用**以 `W:` 行交付一次，然后清空 —— 挂在每次调用上只是噪音。
+
+### 2. 事故二：`& exe` 被拒时的报错看不出是沙箱
+
+workspace-write 会话里 `& node --version` 报 `Program 'node.exe' failed to run: 拒绝访问。`。
+根因（P/Invoke 实测）是受限令牌 = Low 完整性 + `WRITE_RESTRICTED`，**建不了匿名管道**：
+`CreatePipe`（带不带 `SECURITY_ATTRIBUTES` 都一样）→ `ok=False err=5`，
+`[IO.Pipes.AnonymousPipeServerStream]::new` → access denied。命名管道反而能建，但 node 的 `stdio:'pipe'`
+走的是匿名管道，一样 `EPERM`。
+
+所以凡是「捕获子进程 stdio」的起法全失，`& exe` 也在其中（调用运算符内部要建管道）。
+三条实测可用的绕法：`Start-Process -RedirectStandardOutput/-RedirectStandardError <文件>`（拿得到输出、
+拿不到退出码）、`[Diagnostics.Process]::Start`（`UseShellExecute=$false`、不重定向，拿得到退出码但子进程
+继承 stdout）、`.cmd` 包装器（stdout / stderr / `%ERRORLEVEL%` 各写一个文件，两样都拿得到）。
+
+原始报错只说明「起不来」，看不出这是沙箱边界。现在 `describeExecDenial()` 识别
+`failed to run` + `拒绝访问|Access is denied|StandardOutputEncoding is only supported`，在输出末尾附上面三条，
+并点明「不要在不重定向的情况下让子进程继承 stdout」。
+
+误报同样要防：`Cannot find path`、只有前半句的 `failed to run: 找不到文件。`、空串都不触发。
+`test/denialtest.mjs` 9 项钉住识别与不识别两侧 —— 它**不起任何子进程**，所以在连 spawn 都 EPERM 的
+会话里照样能跑。
+
+### 3. 两个环境的报错文案不同，原因在 `Console.OutputEncoding`
+
+同一条 `& '...\git.exe' --version`，在原生 `pwsh` 工具里报「拒绝访问」，在 `pwsh_run` 会话里报
+「StandardOutputEncoding is only supported when standard output is redirected」。差异不在沙箱，而在编码：
+
+| 环境 | `[Console]::OutputEncoding` | 报错文案 |
+|---|---|---|
+| 原生 `pwsh` 工具 | `utf-8` | `failed to run: 拒绝访问。` |
+| `pwsh_run` 会话 | `gb2312`（取系统 ANSI 代码页）| `failed to run: StandardOutputEncoding is only supported when standard output is redirected.` |
+
+PowerShell 在重定向场景下要把子进程输出按 `Console.OutputEncoding` 解码，非 UTF-8 时先撞上自己的编码检查，
+于是沙箱那句「拒绝访问」还没轮到就抛了。手动 `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)`
+后文案**变回**「拒绝访问」，但子进程照样起不来 —— 两种文案都指向同一个边界。
+所以 `describeExecDenial` 两条都要认。
+
+四档对照实验（`probe-mode.ps1`，M0 基线 / M1 仅 `Console::SetOut` / M2 再加磁盘槽位 / M3 换成 `NUL` 槽位）
+在**管道式**与**文件式** stdout 下各跑一遍，结论一致：`& exe` 的成败**只取决于令牌能不能建匿名管道**，
+与 .NET 层的 `SetOut`、与 Win32 槽位的句柄类型（`GetFileType` 3=管道 / 1=磁盘 / 2=字符设备）都无关。
+唯一的区别是「把输出接进管道」这一种写法（`& exe ... | ForEach-Object`）文案会变成「拒绝访问」——
+因为这条路径先走管道、再撞令牌。

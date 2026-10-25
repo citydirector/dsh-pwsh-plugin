@@ -1,8 +1,8 @@
 // 集成测试：不依赖 DSH，直接用 plugin/session.mjs 的真实代码路径驱动常驻会话
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { startSession } from "../plugin/session.mjs";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 const SERVER = readFileSync(new URL("../plugin/session-server.ps1", import.meta.url), "utf8");
 const PWSH = process.env.PWSH_BIN ?? "pwsh";
@@ -82,13 +82,37 @@ check("after-parse", r.sentinel === "ok" && r.out.length === 1, "sentinel=" + r.
 r = await s.run("[Console]::In.ReadLine()\n[Console]::Out.WriteLine('RAW')\nWrite-Output 'clean'", 10000);
 check("console-isolation", r.sentinel === "ok" && r.out.includes("clean"), "sentinel=" + r.sentinel + " out=" + JSON.stringify(r.out));
 
-// 9. 崩溃 → 会话死亡可见
+// 9. 子进程的 std handle 已与协议流断开：脚本起的子进程既写不进协议流，也读不走调用数据。
+//    不接管的后果实测过一次：子进程随手写一行 <<<BYE>>>，客户端当场判定会话死亡。
+//    子命令一律走 -EncodedCommand，省得在字符串里叠引号。
+const psQuote = (value) => "'" + String(value).replaceAll("'", "''") + "'";
+const enc = (text) => Buffer.from(text, "utf16le").toString("base64");
+const stealFile = join(process.env.TEMP ?? ".", "itest-steal.txt");
+try { unlinkSync(stealFile); } catch {}
+const childBye = enc("[Console]::Out.WriteLine('<<<BYE>>>')");
+// 第一行必须是真赋值，包成引号就变成字符串字面量了——那样无论接管与否都会走 EOF 分支，测不出东西。
+const childSteal = enc("$l=[Console]::In.ReadLine()\nif ($null -eq $l) { [IO.File]::WriteAllText("
+  + psQuote(stealFile) + ", " + psQuote("CHILD-EOF") + ") } else { [IO.File]::WriteAllText("
+  + psQuote(stealFile) + ", " + psQuote("CHILD-STOLE:") + " + $l) }");
+r = await s.run(
+  "$me=(Get-Process -Id $PID).Path\n"
+  + "$null=Start-Process -FilePath $me -ArgumentList '-NoProfile','-EncodedCommand'," + psQuote(childBye) + " -NoNewWindow -PassThru -Wait\n"
+  + "$null=Start-Process -FilePath $me -ArgumentList '-NoProfile','-EncodedCommand'," + psQuote(childSteal) + " -NoNewWindow -PassThru -Wait\n"
+  + "Write-Output 'POST'",
+  30000,
+);
+const stole = (() => { try { return readFileSync(stealFile, "utf8").trim(); } catch { return "(missing)"; } })();
+try { unlinkSync(stealFile); } catch {}
+check("child-stdio-detached", r.sentinel === "ok" && r.out.join("|") === "POST" && stole === "CHILD-EOF",
+  "sentinel=" + r.sentinel + " out=" + JSON.stringify(r.out) + " stole=" + stole);
+
+// 10. 崩溃 → 会话死亡可见
 const before = s.dead;
 r = await s.run("[Environment]::Exit(9)", 10000).catch((e) => ({ rejected: String(e) }));
 await new Promise((res) => setTimeout(res, 300));
 check("crash-detect", s.dead === true && before === false, "reason=" + s.deathReason);
 
-// 10. 重建
+// 11. 重建
 const s2 = await startSession(subprocess, { executable: PWSH, serverSource: SERVER, cwd: process.cwd(), label: "itest2" });
 r = await s2.run("Write-Output 'rebuilt'", 10000);
 check("rebuild", r.sentinel === "ok" && r.out.length === 1, "sentinel=" + r.sentinel);

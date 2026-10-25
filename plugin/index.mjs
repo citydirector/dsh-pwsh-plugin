@@ -113,6 +113,29 @@ function describeConfineFailure(error, workspaceRoot) {
     + ' or start the session from a directory under your user profile.'
 }
 
+/**
+ * 捕获「子进程起不来」的报错，附上能照着做的说明。
+ *
+ * DSH 的 Windows 沙箱（workspace-write）给进程挂的是 Low 完整性 + WRITE_RESTRICTED 令牌，
+ * 这种令牌建不了匿名管道，于是所有「捕获子进程 stdio」的起法一律失败——`& exe` 也在其中
+ * （PowerShell 的调用运算符内部要建管道）。原始报错只有一句「failed to run: 拒绝访问」，
+ * 看不出这是沙箱边界而不是命令写错了，模型很容易在这里反复换姿势盲试。
+ *
+ * 第三段匹配的是 stdout 槽位接 NUL 时才会出现的变体（本插件默认接磁盘句柄，不会走到）。
+ */
+export function describeExecDenial(text) {
+  if (!/failed to run/.test(text)) return null
+  if (!/拒绝访问|Access is denied|StandardOutputEncoding is only supported/.test(text)) return null
+  return '[The sandbox is blocking that child process: this session runs under a restricted token (Low integrity +'
+    + ' WRITE_RESTRICTED) that cannot create anonymous pipes, so any launch capturing a child\'s stdio fails —'
+    + ' including `& exe`. Three launches that do work: (1) Start-Process -RedirectStandardOutput <file>'
+    + ' -RedirectStandardError <file> — output is captured, but .ExitCode comes back empty;'
+    + ' (2) [Diagnostics.Process]::Start with UseShellExecute=$false and no redirection — .ExitCode is correct,'
+    + ' but the child inherits this session\'s stdout; (3) a .cmd wrapper that writes stdout/stderr to files and'
+    + ' `echo %ERRORLEVEL%` into a third one — you get both. Do not let a child inherit stdout without redirecting'
+    + ' it: this tool detaches the child std handles, so it will not corrupt this session, but the output is lost.]'
+}
+
 /** 合并调用方取消信号与本地超时信号。 */
 function withTimeout(signal, timeoutMs) {
   const timeout = AbortSignal.timeout(timeoutMs)
@@ -369,10 +392,11 @@ export function apply(ctx, config) {
         .concat(response?.err ?? [])
         .concat(response?.exceptions ?? [])
         .concat(response?.fatal ?? [])
-        .concat(notes)
-        .filter((part) => part.length > 0)
         .join('\n')
-      return { text: text.length > 0 ? text : '(no output)' }
+      const denial = describeExecDenial(text)
+      if (denial !== null) notes.push(denial)
+      const all = [text].concat(notes).filter((part) => part.length > 0).join('\n')
+      return { text: all.length > 0 ? all : '(no output)' }
     },
   }), 'pwsh-run.tool')
 }

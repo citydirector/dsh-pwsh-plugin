@@ -227,6 +227,7 @@ derives every path from its own location and re-checks the disk for leaks.
 | Output looks reordered | stdout and stderr are merged by type, not by time. Merge them yourself with `2>&1`. |
 | `exit N` code is not reported | Runspace semantics — use `Write-Output` or read `$LASTEXITCODE`. |
 | A child process keeps a file locked after the call | The session holds the `Process` object. Wait for `idleMs`, or force a rebuild with a timeout. |
+| `Program 'node.exe' failed to run: Access is denied.` (or `拒绝访问`) | Expected under `workspace-write`: the restricted token cannot create anonymous pipes, so **any** launch that captures a child's stdio fails — `& exe` included. Use `Start-Process -RedirectStandardOutput/-RedirectStandardError <file>` (captures output, no exit code), `[Diagnostics.Process]::Start` with `UseShellExecute=$false` and no redirection (exit code, child inherits stdout), or a `.cmd` wrapper that writes stdout, stderr and `%ERRORLEVEL%` to three files. The tool appends this same advice to the output. |
 
 ## Known limits
 
@@ -238,6 +239,14 @@ derives every path from its own location and re-checks the disk for leaks.
 - **stdout / stderr interleaving is not preserved** — everything goes through `*>&1` and is tagged by type.
 - **`[Console]::Error.WriteLine` is swallowed** (the server points `Console.Error` at an in-memory stream so
   the protocol cannot be polluted). A child process's stderr, `Write-Error` and `throw` all come back fine.
+- **Child std handles are detached from the protocol.** `Console::SetIn/SetOut` only changes the .NET layer, so
+  the server also rewrites the three Win32 slots: stdin goes to `NUL`, stdout and stderr go to a
+  `FILE_FLAG_DELETE_ON_CLOSE` temp file truncated before every call. A grandchild that writes to inherited
+  stdout can no longer inject a fake protocol line (measured: one `Write-Output '<<<BYE>>>'` from a child used
+  to kill the session), and one that reads inherited stdin gets EOF instead of the caller's request.
+  stdout deliberately does **not** go to `NUL`: that is a character device, PowerShell then believes its output
+  is not redirected and the sandbox denial changes into a useless `StandardOutputEncoding` message.
+  If the temp directory is unwritable it falls back to `NUL` and says so once, in a warning on the first call.
 - **A session is serial**: concurrent calls queue up and run one at a time (no interleaved output, but no
   parallel speedup either).
 - **No WSL is required.** `pwsh_run` never touches WSL; only `wsl/custom-bash.mjs` does. Without a usable
@@ -272,6 +281,7 @@ test/
   bash-e2e.mjs        custom-bash end to end (real runtime + real llrun)
   updatetest.mjs      update check against a local git repository
   wiringtest.mjs      the update notice really lands at the end of tool output
+  denialtest.mjs      the sandbox-denial hint fires on the right messages only
 wsl/
   llrun.c llrun      the C shim and its build
   custom-bash.mjs    the bash tool replacement the bundle wires in (Windows only)
@@ -282,7 +292,7 @@ FINDINGS.md          every measurement and the reasoning behind the design
 
 ```bash
 cd <checkout>
-PWSH_BIN='pwsh' node test/itest.mjs          # 14: protocol and session core
+PWSH_BIN='pwsh' node test/itest.mjs          # 15: protocol and session core
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15: full plugin path
 node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
@@ -290,9 +300,10 @@ node test/bashtest.mjs                       # 19: custom-bash fence triage
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
 node test/updatetest.mjs                     # 52: update check, local git only
 node test/wiringtest.mjs                     #  9: update notice wiring
+node test/denialtest.mjs                     #  9: sandbox-denial hint (no spawn, runs anywhere)
 ```
 
-Eight scripts, **135 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Nine scripts, **145 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.
