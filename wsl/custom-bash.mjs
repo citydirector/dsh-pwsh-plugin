@@ -17,6 +17,7 @@
  *   maxOutputBytes  stdout / stderr 各自的收集上限，默认 64000。
  *   llrunPath       WSL 侧的 llrun 二进制（POSIX 路径）。默认按顺序探测 $LLRUN、
  *                   <DSH_HOME>/bin/llrun、/usr/local/bin/llrun、~/.local/bin/llrun，
+ *                   最后才用包内自带的 wsl/llrun —— 显式安装的优先，包里那份只负责开箱可用。
  *                   取第一个可执行的；探测结果缓存，装好即生效，不必重启。
  *   fence           是否按 sandbox 权限档挂围栏，默认 true。
  *
@@ -39,6 +40,8 @@
  *   - 默认工作目录取自 workingDirectory 服务而非 header.cwd：会话中途切目录后 header 不更新。
  */
 
+import { fileURLToPath } from 'node:url'
+
 import { resolveCwd } from './compaction-epoch.mjs'
 
 /** 加载器诊断里显示的插件名。 */
@@ -52,7 +55,23 @@ const DEFAULT_MAX_OUTPUT_BYTES = 64000
 const PROBE_TIMEOUT_MS = 8000
 
 /**
+ * 本文件同目录的 llrun，也就是随插件包一起发布的那份。
+ * 从包加载时它是真的存在（bundle 把这一行指进 node_modules），
+ * 所以「装完就能用」不依赖用户往系统目录里放东西。
+ * 非 file: 协议加载（测试里的 data: URL 之类）时拿不到路径，返回 undefined。
+ */
+function packagedLlrunPath() {
+  try {
+    // 目录 URL 带尾分隔符，去掉再转，免得拼出双斜杠。
+    return toWslPath(fileURLToPath(new URL('.', import.meta.url)).replace(/[\\/]$/, ''))
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * llrun 的候选位置。显式配置 llrunPath 时只用那一个；否则按顺序探测第一个可执行的。
+ * 用户自己装的排在包内那份前面：系统级的 llrun 可能更新，包内的只保证可用。
  * /usr/local/bin 在多数发行版属于 root，普通用户装不进去，所以用户可写的位置也要列上。
  */
 function defaultLlrunCandidates() {
@@ -63,6 +82,8 @@ function defaultLlrunCandidates() {
   const posixHome = toWslPath(process.env.DSH_HOME)
   if (posixHome !== undefined) candidates.push(posixHome + '/bin/llrun')
   candidates.push('/usr/local/bin/llrun', '~/.local/bin/llrun')
+  const packaged = packagedLlrunPath()
+  if (packaged !== undefined) candidates.push(packaged + '/llrun')
   return [...new Set(candidates)]
 }
 

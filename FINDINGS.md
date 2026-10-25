@@ -501,8 +501,8 @@ allow(rs, "/dev", all);   allow(rs, "/dev/shm", ro);  → /dev/shm/_llt  WROTE
 
 ### 17. 接入 `custom-bash.mjs`（v10，已实施）
 
-`wsl/custom-bash.mjs` 是 profile 里 `presets/shared/custom-bash.mjs` 的源码副本。
-两个改动：**命令改走 stdin**、**按 sandbox mode 分诊挂 llrun**。
+`wsl/custom-bash.mjs` 是 `bash` 工具的替代实现（v13 起由 bundle 自己的 patch 接进组合，
+见第二十三节）。两个改动：**命令改走 stdin**、**按 sandbox mode 分诊挂 llrun**。
 
 **为什么必须改 stdin**：原来 `argv = [bash, '-c', command]`。Windows 的 `bash.exe`（WSL 垫片）
 会把 `-c` 后面的字符串再过一层自己的解析，反引号、`\n` 里的反斜杠、复杂引号都会被吃掉。
@@ -954,4 +954,113 @@ workspace 取用户目录下的一个临时目录）：
 该给什么权限。`plugin/index.mjs` 现在把它翻成一段话：指出 workspace 根、说明需要 `WRITE_DAC` +
 `WRITE_OWNER`（全控制满足）、给出 `icacls "<root>" /grant "%USERNAME%":(OI)(CI)F` 或换到用户目录下的目录。
 `execute` 侧也不再套第二层 `pwsh_run could not start a session:` 前缀。
+## 二十三、方案 D：bundle 自己接线，装完即用、卸载即还原（2026-10-25）
+
+### 1. 为什么不是「改一份 shim 转发」（方案 C 被证伪）
+
+方案 C 的设想是让 profile 里那份 `presets/shared/custom-bash.mjs` 改成一行 `export * from`，指向包内实现。
+在全新 profile `_skc1` 里实测（`dsh plugin --profile _skc1 add 'github:citydirector/dsh-pwsh-plugin#v0.1.3'`）：
+
+| 检查项 | 结果 |
+|---|---|
+| profile 目录内容 | `.plugin-manager` `node_modules` `cordis.patch.yml` `package.json` `pnpm-lock.yaml` `pnpm-workspace.yaml` |
+| `presets/` 是否存在 | **False** |
+| 该 profile patch 里 `custom-bash` 计数 | **0** |
+
+→ `presets/shared/custom-bash.mjs` 只是本机预设（skadi / skadi-route / skadi-ptc）的私有物，不是 DSH 的通用组件。
+方案 C 只对本机有效，换个用户就无从下手，达不到「别人不用麻烦」。
+
+### 2. 方案 D：让 bundle 的 patch 自己插这一行
+
+关键机制在 `dsh-app-boot/lib/index.js:3537`：
+
+```js
+function anchorInsertedPluginNames(patches, file) {
+  const base = dirname(resolve(file));
+  const visit = (entry) => {
+    if (typeof entry.name === 'string' && (isAbsolute(entry.name) || entry.name.startsWith('./') || entry.name.startsWith('../')))
+      entry.name = pathToFileURL(resolve(base, entry.name)).href;
+    if (entry.group && Array.isArray(entry.config)) entry.config.forEach(visit);
+  };
+  for (const patch of patches) patch.insert?.forEach(visit);
+  return patches;
+}
+```
+
+`parsePatchList` 末尾 `return anchorInsertedPluginNames(parsed, file)`（index.js:3569），bundle 与用户 patch 走同一条路。
+**`./` 相对名按 patch 文件所在目录改写**，所以写在包根 patch 里的 `./wsl/custom-bash.mjs` 会落进
+`<profile>/node_modules/dsh-pwsh-plugin/wsl/`。
+
+但这里有一个反直觉的取舍：**不要用 `./`**。它会被改写成绝对 `file://` URL 并抄进合成后的配置树，
+等于把安装路径钉死 —— 便携版挪一次目录、或换一台机器，那行就废。改用**裸子路径**：
+
+```yaml
+- id: custom-bash
+  name: dsh-pwsh-plugin/wsl/custom-bash.mjs
+  disabled: !!js process.platform !== 'win32'
+```
+
+裸子路径不进改写分支，每次 boot 都从 profile 的 `node_modules` 重新解析。代价是
+`package.json` 的 `exports` 必须加上 `"./wsl/custom-bash.mjs": "./wsl/custom-bash.mjs"`，否则
+`ERR_PACKAGE_PATH_NOT_EXPORTED`。`wsl/llrun` 本身不需要导出 —— 插件靠 `import.meta.url` 找它。
+
+### 3. 三个必须踩对的细节
+
+**不要在 patch 里顺手禁用 `tool-bash`。** `dsh-base/cordis.patch.yml:269` 的 `tool-bash` 本来就带
+`disabled: !!js process.platform === 'win32'`，我们这行只在 win32 启用，两边已经互斥。
+再写一条 `- id: tool-bash / disabled: true` 会把 Linux 上的官方 bash 一起关掉。
+
+**llrun 必须跟着包走。** 原来的候选全在系统目录（`$LLRUN` / `<DSH_HOME>/bin/llrun` /
+`/usr/local/bin/llrun` / `~/.local/bin/llrun`），新用户一个都没有，装上就是 fail-closed。
+现在末尾追加包内那份（`import.meta.url` → `toWslPath` → `<pkg>/wsl/llrun`），顺序是
+「用户装的在前，包内只保证开箱可用」：
+
+```js
+function packagedLlrunPath() {
+  try {
+    // 目录 URL 带尾分隔符，去掉再转，免得拼出双斜杠。
+    return toWslPath(fileURLToPath(new URL('.', import.meta.url)).replace(/[\\/]$/, ''))
+  } catch {
+    return undefined
+  }
+}
+```
+
+**llrun 在 git 里丢了可执行位。** `git ls-files -s wsl/llrun` 原本是 `100644`。本机侥幸能跑纯属 9p 挂载的
+功劳（`/proc/mounts`: `9p rw,noatime,aname=drvfs;path=D:\;uid=1000;...`，Windows 侧一律给 `rwxrwxrwx`）；
+在 ext4 上模拟 clone（`chmod 644`）→ 探测 `test -x` 失败 → fail-closed。用
+`git update-index --chmod=+x wsl/llrun` 改成 `100755`（`core.filemode false` 时只改索引）。
+
+### 4. 反证实验：负向用例为什么一开始没抓到
+
+把 `wsl/llrun` 临时改名后跑负向探针，结果是 `UNEXPECTED: ran` —— 因为本机
+`/home/<user>/.local/bin/llrun` 真实存在，探测命中了它。捕获探测脚本的 stdin 才看清候选顺序。
+把 `HOME` 指到空目录后才真正走到包内那份（`RESULT: "PACKAGED-ONLY-HOME"`）。
+`test/bashtest.mjs` 的 `llrun-packaged-candidate` 因此必须同时挪开 `HOME`。
+
+### 5. 装卸演练（临时 profile `_skx` / `_sky`，均已进回收站）
+
+`_skx`（干净 profile，`add 'file:<检出>'`）：
+
+| 检查项 | 结果 |
+|---|---|
+| `--dump-config` | rc=0，`- id: pwsh-run` **1 条**、`- id: custom-bash` **1 条** |
+| `custom-bash` 的 name 渲染 | `dsh-pwsh-plugin/wsl/custom-bash.mjs`（裸子路径不被改写，符合预期） |
+| 解析与实际加载 | `resolve` → 包内真实路径；`import` → `name=custom-bash inject=["subprocess","tools"]` |
+| 卸载后 `--dump-config` | `pwsh-run` 与 `custom-bash` **各 0 条** |
+| 卸载后 `node_modules/dsh-pwsh-plugin` | 不存在 |
+| 卸载后 `pnpm-lock.yaml` 命中 | **0** |
+| 卸载后 profile `cordis.patch.yml` | 仍是初始的 `[]`（从未被写过） |
+
+**卸载完美还原成立。**
+
+`_sky`（克隆 desktop 的 patch + `presets/` 后再装 bundle）：`id: custom-bash` 共 **4 条**（1 条 bundle + 3 条手写）。
+patch 层不去重（`applyEntryPatches` 的 insert 分支就是 `data.push(...insert)`），boot 时同名注册是硬错误
+→ **本机 desktop 直接装会撞双行陷阱，必须先删那三处手写行。**
+
+### 6. 参数顺序坑（再记一次）
+
+`dsh plugin --profile X --dump-config` → `[ERROR] Unknown option: 'dump-config'`，rc=1。
+必须写成 `dsh.cmd --profile X --dump-config`，`--dump-config` 在 `plugin` 之外。
+
 

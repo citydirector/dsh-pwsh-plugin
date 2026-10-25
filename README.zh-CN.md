@@ -24,8 +24,18 @@
 
 ## 安装
 
-这个包本身就是 **DSH bundle**：自带一份 `cordis.patch.yml`，会自己插入 `- id: pwsh-run` 那一行。
+这个包本身就是 **DSH bundle**：自带一份 `cordis.patch.yml`，会自己插入它需要的那几行。
 所以装完就能用，不需要动你的 profile。
+
+它插两行：
+
+- `- id: pwsh-run` —— 工具本体。
+- `- id: custom-bash` —— `bash` 工具的替代实现，仅 Windows 启用（`disabled: !!js process.platform !== 'win32'`）。
+  它指向包内的 `dsh-pwsh-plugin/wsl/custom-bash.mjs`，所以围栏用的就是随包发布的那份 `llrun` 二进制 ——
+  不用拷贝，也不用往 `/usr/local/bin` 里装东西。`remove` 会把两行和包一起拿走，profile 恢复原样。
+
+它**不会**顺手禁用官方的 `tool-bash`：那一行本来就带 `disabled: !!js process.platform === 'win32'`，
+在这里写死 `disabled: true` 会把 Linux 上的官方 bash 一起关掉。
 
 **侧栏。** Plugins → Add plugin → `https://github.com/citydirector/dsh-pwsh-plugin`，然后打开开关。
 
@@ -35,7 +45,7 @@
 $dsh = '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.1.3'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.0'
 # 或者从本地检出装
 & $dsh plugin --profile desktop add 'file:<检出目录>'
 ```
@@ -237,7 +247,7 @@ test/
   wiringtest.mjs      更新提示真的接到工具输出末尾
 wsl/
   llrun.c llrun      C 垫片与构建产物
-  custom-bash.mjs    presets/shared/custom-bash.mjs 的替代实现
+  custom-bash.mjs    bundle 接进组合的 bash 工具替代实现（仅 Windows）
   acceptance.sh      54 项验收矩阵
 docs/llrun.md        垫片的完整说明
 FINDINGS.md          全部实测数据与设计理由
@@ -249,13 +259,13 @@ PWSH_BIN='pwsh' node test/itest.mjs          # 14：协议与会话本体
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15：插件完整路径
 node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
-node test/bashtest.mjs                       # 18：custom-bash 围栏分诊
+node test/bashtest.mjs                       # 19：custom-bash 围栏分诊
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
 node test/updatetest.mjs                     # 52：更新检查（只碰本地 git）
 node test/wiringtest.mjs                     #  9：更新提示接线
 ```
 
-八份脚本合计 **134 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+八份脚本合计 **135 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

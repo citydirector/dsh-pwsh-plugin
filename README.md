@@ -26,8 +26,19 @@ choice are in [FINDINGS.md](FINDINGS.md).
 
 ## Install
 
-The package is a **DSH bundle**: it ships a `cordis.patch.yml` that inserts its own `- id: pwsh-run` row,
-so installing it is all you do — you never edit your profile by hand.
+The package is a **DSH bundle**: it ships a `cordis.patch.yml` that inserts its own rows, so installing
+it is all you do — you never edit your profile by hand.
+
+It inserts two:
+
+- `- id: pwsh-run` — the tool itself.
+- `- id: custom-bash` — the `bash` tool replacement, Windows only (`disabled: !!js process.platform !== 'win32'`).
+  It points at `dsh-pwsh-plugin/wsl/custom-bash.mjs` inside the package, so the `llrun` binary that comes with
+  it is what the fence uses — nothing to copy, nothing to install into `/usr/local/bin`. `remove` takes both
+  rows and the package away, leaving your profile exactly as it was.
+
+It does **not** disable the stock `tool-bash`: that row already carries `disabled: !!js process.platform ===
+'win32'`, and a hard `disabled: true` from here would switch the official bash off on Linux too.
 
 **Sidebar.** Plugins → Add plugin → `https://github.com/citydirector/dsh-pwsh-plugin`, then switch it on.
 
@@ -37,7 +48,7 @@ so installing it is all you do — you never edit your profile by hand.
 $dsh = '<desktop install>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # the data root the desktop app itself uses
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.1.3'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.0'
 # or, from a local checkout
 & $dsh plugin --profile desktop add 'file:<path to checkout>'
 ```
@@ -263,7 +274,7 @@ test/
   wiringtest.mjs      the update notice really lands at the end of tool output
 wsl/
   llrun.c llrun      the C shim and its build
-  custom-bash.mjs    replacement for presets/shared/custom-bash.mjs
+  custom-bash.mjs    the bash tool replacement the bundle wires in (Windows only)
   acceptance.sh      the 54-assertion matrix
 docs/llrun.md        the shim in full
 FINDINGS.md          every measurement and the reasoning behind the design
@@ -275,13 +286,13 @@ PWSH_BIN='pwsh' node test/itest.mjs          # 14: protocol and session core
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15: full plugin path
 node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
-node test/bashtest.mjs                       # 18: custom-bash fence triage
+node test/bashtest.mjs                       # 19: custom-bash fence triage
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
 node test/updatetest.mjs                     # 52: update check, local git only
 node test/wiringtest.mjs                     #  9: update notice wiring
 ```
 
-Eight scripts, **134 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Eight scripts, **135 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.

@@ -1,7 +1,8 @@
 // custom-bash 围栏测试：mock sandboxPolicy 驱动 mode 分诊，真 llrun 做边界
 import { spawn } from 'node:child_process'
-import { existsSync, rmSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { apply } from '../wsl/custom-bash.mjs'
 import { toWslPath } from './support.mjs'
 
@@ -156,6 +157,29 @@ try {
 } finally {
   if (savedLlrun === undefined) delete process.env.LLRUN
   else process.env.LLRUN = savedLlrun
+}
+
+// L. 包内候选：$LLRUN、DSH_HOME、系统目录全都没有时，同目录那份 wsl/llrun 必须被找到。
+// 这是「装完即用」的地基 —— 新用户的机器上只有包里这一份。
+// HOME 也要指到空目录：探测脚本里的 ~/.local/bin 由 bash 展开，
+// 开发机上往往真装过 llrun，不挪开就会测成那条分支。
+const savedDshHome = process.env.DSH_HOME
+const savedHome = process.env.HOME
+const emptyHome = join(tmpdir(), '_skadi_empty_home')
+try {
+  mkdirSync(emptyHome, { recursive: true })
+  process.env.HOME = emptyHome
+  delete process.env.LLRUN
+  delete process.env.DSH_LLRUN
+  delete process.env.DSH_HOME
+  apply(ctxBase, {})
+  r = await run('echo packaged-candidate')
+  check('llrun-packaged-candidate', r.text.includes('packaged-candidate'), JSON.stringify(r.text).slice(0, 160))
+} finally {
+  if (savedDshHome !== undefined) process.env.DSH_HOME = savedDshHome
+  if (savedHome === undefined) delete process.env.HOME
+  else process.env.HOME = savedHome
+  rmSync(emptyHome, { recursive: true, force: true })
 }
 apply(ctxBase, { llrunPath: LLRUN })
 

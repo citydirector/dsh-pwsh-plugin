@@ -1,8 +1,8 @@
-# dsh-pwsh-plugin 的 bundle patch：往 profile 里插一行宿主插件。
+# dsh-pwsh-plugin 的 bundle patch：装包即接线，卸包即还原，用户不必碰自己的 cordis.patch.yml。
 #
-# 这一行写的是**包名**，不是 `./` 相对路径：DSH 会把相对名解析成绝对 file URL，
-# 而配置编辑器第一次写入时会把那个绝对 URL 抄进用户自己的 cordis.patch.yml，
-# 便携版一挪目录这一行就废了。包名始终从 profile 的 node_modules 解析。
+# 名字一行用包名、一行用包内子路径，都不是 `./` 相对名：相对名会被改写成绝对 file URL
+# 落进 --dump-config 输出，配置编辑器再把它抄进用户自己的 patch 文件，便携版一挪目录就废了。
+# 包名始终从 profile 的 node_modules 解析，导出的子路径见 package.json 的 exports。
 #
 # 行 id 是承重的：插件的设置命名空间就是它的 profile 条目 id。
 - insert:
@@ -13,3 +13,15 @@
         timeoutMs: 120000
         idleMs: 1800000
         maxSessions: 4
+
+    # Windows 上的 bash：官方 persistent bash 依赖 PTY，PTY 后端只支持 linux/darwin，
+    # 而官方 bash 工具在 win32 上被禁用，Windows 会话因此没有 bash。这一行补上它，
+    # 顺带把 llrun 围栏接进来（llrun 随包发布，见 wsl/custom-bash.mjs 的候选顺序）。
+    #
+    # 只在 win32 启用：其他平台用官方的 bash / persistent-bash，重复注册同名工具会被注册表拒绝。
+    # 不在这里禁用 tool-bash —— 平台条件已经互斥，硬禁会在 Linux 上把官方 bash 一起关掉。
+    - id: custom-bash
+      name: dsh-pwsh-plugin/wsl/custom-bash.mjs
+      disabled: !!js process.platform !== 'win32'
+      config:
+        timeoutMs: 300000

@@ -114,12 +114,35 @@ re-checks the disk at the end (`leaks=N`) so a silently-succeeding write cannot 
 
 ## Wiring (`custom-bash.mjs`)
 
-`wsl/custom-bash.mjs` is the source copy of `presets/shared/custom-bash.mjs` in the DSH profile. Edit it
-here, then deploy:
+`wsl/custom-bash.mjs` is what the bundle wires in. The package's own `cordis.patch.yml` carries:
 
-```bash
-cp wsl/custom-bash.mjs <DSH_HOME>/profiles/desktop/presets/shared/custom-bash.mjs
+```yaml
+- id: custom-bash
+  name: dsh-pwsh-plugin/wsl/custom-bash.mjs
+  disabled: !!js process.platform !== 'win32'
 ```
+
+A **bare subpath**, resolved from the profile's `node_modules`. That matters: the loader rewrites a `./` or
+absolute `name` inside an inserted entry into an absolute `file://` URL and copies it into the composed
+tree (`anchorInsertedPluginNames` in `dsh-app-boot`), which pins the install path — move the data directory
+and the row breaks. A bare subpath resolves fresh on every boot instead. It needs
+`"./wsl/custom-bash.mjs"` in the package `exports`; the `llrun` binary itself is not exported and does not
+need to be, because the plugin finds it through `import.meta.url`.
+
+So: install the bundle, and the `bash` tool is fenced. Uninstall it, and the `custom-bash` row goes with it —
+there is no separate copy to keep in sync and nothing to delete by hand.
+
+If you wire it by hand instead, the row is:
+
+```yaml
+- id: custom-bash
+  name: '<path>/wsl/custom-bash.mjs'
+  disabled: !!js process.platform !== 'win32'
+```
+
+Do not also disable `tool-bash` from a patch. That row already carries
+`disabled: !!js process.platform === 'win32'`; a hard `disabled: true` would turn the stock bash off on
+Linux as well.
 
 **Commands go in over stdin**: `argv = [bash, '-s']` plus `stdio.stdin = { data: command }`. It used to be
 `[bash, '-c', command]`, where backticks, `$` and complex quoting were all eaten by the Windows
@@ -145,10 +168,15 @@ Configuration:
 
 ```yaml
 - id: custom-bash
-  name: './presets/shared/custom-bash.mjs'
   config:
-    llrunPath: '/mnt/c/Users/<you>/.local/bin/llrun'   # omit to probe the four candidates
+    llrunPath: '/mnt/c/Users/<you>/.local/bin/llrun'   # omit to probe the candidates
     fence: true                                        # false = no fence (not recommended)
 ```
 
-Tests: `node test/bashtest.mjs` (18, mock runtime) + `node test/bash-e2e.mjs` (11, real runtime + real llrun).
+`llrunPath` is only for overriding. Left out, the plugin probes `$LLRUN` / `$DSH_LLRUN`,
+`<DSH_HOME>/bin/llrun`, `/usr/local/bin/llrun`, `~/.local/bin/llrun`, and finally the copy that sits next
+to `custom-bash.mjs` inside the package — first executable wins, and the result is cached, so a fresh
+install works without a restart. Yours come first: a system-level `llrun` may be newer, the packaged one only
+guarantees that the fence is there at all.
+
+Tests: `node test/bashtest.mjs` (19, mock runtime) + `node test/bash-e2e.mjs` (11, real runtime + real llrun).
