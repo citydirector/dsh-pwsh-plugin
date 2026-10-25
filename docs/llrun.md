@@ -54,9 +54,22 @@ llrun [--no-isolate] [--no-seal] [-r] [-C <dir>] <workspace|-> <prog> [args...]
 
 ```bash
 cd wsl && gcc -O2 -Wall -Wextra -o llrun llrun.c
-cp llrun <DSH_HOME>/bin/llrun && chmod 755 <DSH_HOME>/bin/llrun
-cp llrun ~/.local/bin/llrun && chmod 755 ~/.local/bin/llrun
+mkdir -p <DSH_HOME>/bin && cp llrun <DSH_HOME>/bin/llrun && chmod 755 <DSH_HOME>/bin/llrun
 ```
+
+`custom-bash.mjs` does not hard-code one path. It probes, in this order, and takes the first executable:
+
+| # | Candidate | Note |
+|---|---|---|
+| 1 | `$LLRUN` or `$DSH_LLRUN` | explicit override; also useful for a per-session binary |
+| 2 | `<DSH_HOME>/bin/llrun` | **recommended** — inside your own data root, survives upgrades with it |
+| 3 | `/usr/local/bin/llrun` | only if you can write there (`sudo`) |
+| 4 | `~/.local/bin/llrun` | no `sudo`, but must be a path the shell user can execute |
+
+The result is cached across calls, so installing the binary later takes effect on the next call — no DSH
+restart. The probe runs once over `bash -s` and returns a single exit code, so a missing candidate costs a
+few milliseconds and never changes the tool's behaviour. Setting `llrunPath` in the config skips the probe
+and accepts exactly that one path.
 
 ## Acceptance matrix (54 assertions, all green, repeated runs)
 
@@ -122,7 +135,7 @@ deployment default):
 | `workspace-write` | `llrun <workspace> /bin/bash -s` |
 | `read-only` | `llrun -r <workspace> /bin/bash -s` |
 | `sandboxPolicy` absent | **throws, refuses to run**, unless `fence: false` is configured |
-| llrun not executable | **throws, refuses to run** — never silently degrades to unfenced |
+| no candidate executable | **throws, refuses to run** — never silently degrades to unfenced; the message lists every probed path |
 
 `workspace` comes from the policy's `workspaceRoot` (falling back to the session cwd), with Windows paths
 translated to `/mnt/<drive>/...`. A POSIX `workdir` goes to llrun's `-C` (chdir after landlock); a Windows
@@ -134,8 +147,8 @@ Configuration:
 - id: custom-bash
   name: './presets/shared/custom-bash.mjs'
   config:
-    llrunPath: '/usr/local/bin/llrun'   # default
-    fence: true                         # false = no fence (not recommended)
+    llrunPath: '/mnt/c/Users/<you>/.local/bin/llrun'   # omit to probe the four candidates
+    fence: true                                        # false = no fence (not recommended)
 ```
 
-Tests: `node test/bashtest.mjs` (17, mock runtime) + `node test/bash-e2e.mjs` (11, real runtime + real llrun).
+Tests: `node test/bashtest.mjs` (18, mock runtime) + `node test/bash-e2e.mjs` (11, real runtime + real llrun).

@@ -121,7 +121,7 @@ try {
   await R3.execute({ command: 'echo hi' }, exec)
   threw2 = 'NO-ERROR'
 } catch (error) { threw2 = String(error?.message ?? error) }
-check('llrun-missing-refused', threw2.includes('not executable') && threw2.includes('fence: false'), threw2.slice(0, 120))
+check('llrun-missing-refused', threw2.includes('llrun was not found') && threw2.includes(LLRUN + '-nope') && threw2.includes('fence: false'), threw2.slice(0, 160))
 
 // F. workdir 走 -C（POSIX 路径）
 apply(ctxBase, { llrunPath: LLRUN })
@@ -143,6 +143,21 @@ check('empty-output', r.text.includes('no output') || r.text.trim() === '', JSON
 // J. timeout
 r = await run('sleep 5', { })
 check('no-timeout-by-default', r.text.trim() === '' || r.text.includes('exit code'), JSON.stringify(r.text).slice(0, 80))
+
+// K. 候选探测：不配 llrunPath 时按 $LLRUN 找到那份 llrun。
+// 探测脚本经 stdin 送入，所以这条同时钉住「bash.exe 不改写正文」——
+// 走 bash -c 的版本在这里会算出错误序号，报 /usr/local/bin/llrun: No such file or directory。
+const savedLlrun = process.env.LLRUN
+try {
+  process.env.LLRUN = LLRUN
+  apply(ctxBase, {})
+  r = await run('echo env-candidate')
+  check('llrun-env-candidate', r.text.includes('env-candidate'), JSON.stringify(r.text).slice(0, 120))
+} finally {
+  if (savedLlrun === undefined) delete process.env.LLRUN
+  else process.env.LLRUN = savedLlrun
+}
+apply(ctxBase, { llrunPath: LLRUN })
 
 console.log(results.join('\n'))
 console.log('TOTAL pass=' + results.filter((x) => x.startsWith('PASS')).length + ' fail=' + results.filter((x) => x.startsWith('FAIL')).length)

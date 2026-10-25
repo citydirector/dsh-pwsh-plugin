@@ -15,7 +15,9 @@
  *   bashPath        可执行文件：绝对路径，或 `bash`（经 PATH 解析）。默认 `bash`。
  *   timeoutMs       单次命令超时，默认 120000。超时会终止进程并返回已收集的输出。
  *   maxOutputBytes  stdout / stderr 各自的收集上限，默认 64000。
- *   llrunPath       WSL 侧的 llrun 二进制（POSIX 路径）。默认 /usr/local/bin/llrun。
+ *   llrunPath       WSL 侧的 llrun 二进制（POSIX 路径）。默认按顺序探测 $LLRUN、
+ *                   <DSH_HOME>/bin/llrun、/usr/local/bin/llrun、~/.local/bin/llrun，
+ *                   取第一个可执行的；探测结果缓存，装好即生效，不必重启。
  *   fence           是否按 sandbox 权限档挂围栏，默认 true。
  *
  * 沙箱（2026-10-23）
@@ -48,8 +50,52 @@ export const inject = ['subprocess', 'tools']
 
 const DEFAULT_TIMEOUT_MS = 120000
 const DEFAULT_MAX_OUTPUT_BYTES = 64000
-const DEFAULT_LLRUN_PATH = '/usr/local/bin/llrun'
 const PROBE_TIMEOUT_MS = 8000
+
+/**
+ * llrun 的候选位置。显式配置 llrunPath 时只用那一个；否则按顺序探测第一个可执行的。
+ * /usr/local/bin 在多数发行版属于 root，普通用户装不进去，所以用户可写的位置也要列上。
+ */
+function defaultLlrunCandidates() {
+  const candidates = []
+  const fromEnv = process.env.LLRUN ?? process.env.DSH_LLRUN
+  if (typeof fromEnv === 'string' && fromEnv.length > 0) candidates.push(fromEnv)
+  // DSH_HOME 是 Windows 路径，转成 WSL 视角后才能 test -x。
+  const posixHome = toWslPath(process.env.DSH_HOME)
+  if (posixHome !== undefined) candidates.push(posixHome + '/bin/llrun')
+  candidates.push('/usr/local/bin/llrun', '~/.local/bin/llrun')
+  return [...new Set(candidates)]
+}
+
+/**
+ * 构造探测脚本，经 stdin 送给 `bash -s`。
+ * 不能走 `bash -c`：Windows 上的 WSL 垫片 bash.exe 会把 `-c` 的正文里
+ * 单字母变量赋值 `x=abc` 整个吃掉（实测 `x=abc; echo "x=$x"` 输出 `x=`），
+ * 探测会因此算出错误的候选序号。走 stdin 完全避开这层改写。
+ * 结果只走退出码：0 = 一个都没有，N = 第 N 个候选可执行；不读 stdout，
+ * 因为收集缓冲区只在 stdio 声明为 collect 时才存在，不该把可用性押在它上面。
+ * 候选里的 ~ 在这里展开：用引号包起来的路径不会被 bash 做 tilde 展开。
+ */
+function llrunProbeScript(candidates) {
+  const lines = ['index=0']
+  for (const candidate of candidates) {
+    // ~ 在生成时展开成 $HOME，留给 bash 自己解析，不写死探测时的家目录。
+    const path = candidate.startsWith('~/') ? '$HOME/' + candidate.slice(2) : candidate
+    lines.push('index=$((index + 1))')
+    lines.push('if [ -x "' + path + '" ]; then exit "$index"; fi')
+  }
+  lines.push('exit 0')
+  return lines.join('\n')
+}
+
+/**
+ * 把命中路径变成可以安全跟在 `exec` 后面的词。
+ * `~/` 开头的候选由 bash 自己的 $HOME 展开，所以这一支不能加单引号。
+ */
+function llrunExecWord(path) {
+  if (path.startsWith('~/')) return '"$HOME/' + path.slice(2) + '"'
+  return shellQuote(path)
+}
 
 /** 面向模型的参数 schema。 */
 const commandSchema = {
@@ -89,23 +135,31 @@ export function apply(ctx, config) {
   const bashPath = typeof config?.bashPath === 'string' && config.bashPath.length > 0 ? config.bashPath : 'bash'
   const timeoutMs = Number.isSafeInteger(config?.timeoutMs) && config.timeoutMs > 0 ? config.timeoutMs : DEFAULT_TIMEOUT_MS
   const maxOutputBytes = Number.isSafeInteger(config?.maxOutputBytes) && config.maxOutputBytes > 0 ? config.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES
-  const llrunPath = typeof config?.llrunPath === 'string' && config.llrunPath.length > 0 ? config.llrunPath : DEFAULT_LLRUN_PATH
+  // 显式配置时只认那一个；否则探测候选。解析结果跨调用缓存，失败不缓存。
+  const configuredLlrun = typeof config?.llrunPath === 'string' && config.llrunPath.length > 0 ? config.llrunPath : undefined
+  const llrunCandidates = configuredLlrun === undefined ? defaultLlrunCandidates() : [configuredLlrun]
   const fenceEnabled = config?.fence !== false
 
-  /** llrun 可执行性探测。成功结果跨调用缓存；失败不缓存，下次调用重新探测。 */
-  let llrunReady = false
-  async function probeLlrun(shell, cwd) {
-    if (llrunReady) return true
+  /**
+   * llrun 解析：返回真正可执行的那个路径，探测不到返回 undefined。
+   * 成功结果跨调用缓存（同一进程里 llrun 不会凭空消失），失败不缓存，
+   * 这样用户装好之后下一次调用就能直接用，不必重启 DSH。
+   */
+  let resolvedLlrun
+  async function resolveLlrun(shell, cwd) {
+    if (resolvedLlrun !== undefined) return resolvedLlrun
     const handle = ctx.subprocess.spawn({
-      argv: [shell, '-c', `test -x ${shellQuote(llrunPath)}`],
+      argv: [shell, '-s'],
       ...cwd !== undefined ? { cwd } : {},
-      stdio: { stdin: 'ignore', stdout: { maxBytes: 4096 }, stderr: { maxBytes: 4096 } },
+      stdio: { stdin: { data: llrunProbeScript(llrunCandidates) }, stdout: { maxBytes: 4096 }, stderr: { maxBytes: 4096 } },
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
       graceMs: 3000,
     })
     const outcome = await handle.done.catch(() => undefined)
-    llrunReady = outcome?.exitCode === 0
-    return llrunReady
+    const index = outcome?.exitCode
+    if (!Number.isInteger(index) || index < 1 || index > llrunCandidates.length) return undefined
+    resolvedLlrun = llrunCandidates[index - 1]
+    return resolvedLlrun
   }
 
   ctx.tools.register({
@@ -157,16 +211,18 @@ export function apply(ctx, config) {
       let argv
       let script = args.command
       if (needFence) {
-        if (!await probeLlrun(shell, baseCwd)) {
-          throw new Error(`bash fence is required in ${mode} mode but llrun is not executable at ${llrunPath}`
-            + ' — deploy wsl/llrun there (see README), or disable the fence explicitly with the `fence: false` config.')
+        const llrunPath = await resolveLlrun(shell, baseCwd)
+        if (llrunPath === undefined) {
+          throw new Error(`bash fence is required in ${mode} mode but llrun was not found; looked for: ${llrunCandidates.join(', ')}`
+            + ' — deploy wsl/llrun to one of them (see README), set the `llrunPath` config, or disable the fence'
+            + ' explicitly with the `fence: false` config.')
         }
         const workspace = toWslPath(policy?.workspaceRoot) ?? toWslPath(baseCwd) ?? '-'
         const fenceArgs = []
         if (mode === 'read-only') fenceArgs.push('-r')
         if (posixDir !== undefined) fenceArgs.push('-C', shellQuote(posixDir))
         fenceArgs.push(shellQuote(workspace), '/bin/bash', '-s')
-        argv = [shell, '-c', `exec ${shellQuote(llrunPath)} ${fenceArgs.join(' ')}`]
+        argv = [shell, '-c', `exec ${llrunExecWord(llrunPath)} ${fenceArgs.join(' ')}`]
       } else {
         if (posixDir !== undefined) script = `cd ${shellQuote(posixDir)} && ${args.command}`
         argv = [shell, '-s']
