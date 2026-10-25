@@ -573,7 +573,7 @@ full-access 不挂围栏、流分离 + `exit code: 7`、2000 行大输出 ——
 | 源可覆盖 | `DSH_RAP_UPDATE_SOURCE`：`owner/repo` → GitHub；`git+<url>` → `git ls-remote` | `DSH_PWSH_UPDATE_SOURCE`，同名规则 |
 | 首次延迟 / 周期 | 5s 之后每 12h，timer 都 `.unref?.()` | 同 |
 | 失败不抛 | `state:'failed'` + 保留先前 `latest` + `stale:'available'` | 同，注释原话「一次网络抖动不该让已知的新版本消失」 |
-| **从不自己装** | 页面把钉了 tag 的 spec 交给 DSH 的 `plugin_manager` | 输出末尾挂一行，让模型去调 `plugin_manager` |
+| **从不自己装** | 页面把钉了 tag 的 spec 交给 DSH 的 `plugin_manager` | 输出末尾挂一行，写明 `dsh plugin` 的安装命令 |
 
 ### 改掉的两处
 
@@ -601,6 +601,8 @@ full-access 不挂围栏、流分离 + `exit code: 7`、2000 行大输出 ——
    **本机 profile 没有覆盖它 —— 所以这个工具在当前会话里不存在**（`Object.keys(tools).filter(/plugin/i)` 为空）。
    要用得先在 profile patch 里把它打开，并且它自己会走 `approveEscalation({requestedMode:'danger-full-access', …})`，
    等于每次装插件都要过一次 `danger-full-access` 审批。
+
+   正因为如此，升级提示行只写 CLI 命令，不写「让模型去调 `plugin_manager`」—— 在默认组合上那是句谎话。
 
 ### 陷阱：WSL 的 `bash` 工具里 `export DSH_PWSH_UPDATE_SOURCE=...` 是无效的
 

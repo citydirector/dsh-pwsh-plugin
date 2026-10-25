@@ -1,5 +1,5 @@
 /**
- * pwsh-run 的更新检查 —— 只查不发，安装交给 DSH 自己的插件管理器。
+ * pwsh-run 的更新检查 —— 只查不发，安装交给用户自己（sidepanel 或 `dsh plugin` CLI）。
  *
  * 为什么单独一个模块
  *   这个插件是纯宿主平面的工具插件，没有配置页面，也没有 client 入口。
@@ -10,8 +10,8 @@
  *   启动几秒后读一次发布源的 vX.Y.Z 标签，之后大约每 12 小时再读一次，
  *   与 package.json 里的版本比较。**从不自己安装**：发现新版本时只把
  *   版本号与 tag 钉住的安装规格（github:owner/repo#vX.Y.Z）记下来，
- *   由 DSH 的 plugin_manager 去装。一个 tag 一个规格，所以装新版本就是
- *   盖掉旧的，不需要额外逻辑。
+ *   由外部去装。一个 tag 一个规格，所以装新版本就是盖掉旧的，不需要额外逻辑。
+ *   这里刻意不调 plugin_manager：组合里它默认关着，调不存在的东西会让提示变成谎话。
  *
  * 发布源可覆盖
  *   DSH_PWSH_UPDATE_SOURCE 可以是 owner/repo，也可以是任意 git URL

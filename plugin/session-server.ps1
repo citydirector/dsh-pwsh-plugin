@@ -2,7 +2,7 @@
 #
 # 启动：pwsh -NoProfile -NonInteractive -EncodedCommand <base64(utf16le, 本文件)>
 #   - -EncodedCommand 而非 -File，是为了不落地临时脚本文件；
-#     启动字符串是 base64(UTF-16LE, 本文件)；命令行上限 32K，本文件换算后约 15K，安全在内。
+#     启动字符串是 base64(UTF-16LE, 本文件)；命令行上限 32K，本文件换算后约 16.6K，安全在内。
 #   - 不要用 -Command -：那是"读到 EOF 就退出"的一次性模式，无法常驻。
 #
 # 协议（客户端 → 服务端，每行一条）：

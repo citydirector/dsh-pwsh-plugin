@@ -10,8 +10,8 @@
  *
  * 本工具把脚本正文直接经 stdin 喂给一个常驻 pwsh 进程：
  *   - 零转义：不经过任何 shell，$ / 引号 / here-string / 中文原样送达
- *   - 无长度限制：单次脚本实测 67813 字符正常，20 万字符变量正常
- *   - 省启动：省掉每次约 300-500ms 的 pwsh 冷启动，往返实测 1-2ms
+ *   - 无长度限制：20 万字符的单次脚本实测跑通（原生工具在同一长度上必撞命令行上限）
+ *   - 省启动：原生 pwsh 每次冷启动实测约 730ms，这边热态往返约 8ms
  *   - 状态保留：变量、当前目录、$env:、已导入模块跨调用保留
  *
  * 与原生 pwsh 工具的关系：并存，不替换。原生工具继续负责需要逐次沙箱、
@@ -125,9 +125,9 @@ export function apply(ctx, config) {
   const idleMs = Number.isSafeInteger(config?.idleMs) && config.idleMs > 0 ? config.idleMs : DEFAULT_IDLE_MS
   const maxSessions = Number.isSafeInteger(config?.maxSessions) && config.maxSessions > 0 ? config.maxSessions : DEFAULT_MAX_SESSIONS
   const maxOutputBytes = Number.isSafeInteger(config?.maxOutputBytes) && config.maxOutputBytes > 0 ? config.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES
-  // 唯一一条「 knowingly 放弃边界」的开关：沙箱策略服务缺席时默认拒绝启动。
+  // 明确放弃边界的唯一开关：策略服务缺席时默认拒绝启动，只有这里能改主意。
   const allowUnconfined = config?.allowUnconfined === true
-  // 更新检查：只查不发。查到新版本时在工具描述里挂一句，安装仍交给 DSH 的 plugin_manager。
+  // 更新检查：只查不发。查到新版本时在当次调用的输出末尾挂一行，安装仍交给外部（CLI 或 plugin_manager）。
   const updateCheck = config?.updateCheck !== false
 
   // 沙箱服务每次启动会话时再取：插件 apply 可能早于沙箱服务挂载，
@@ -362,7 +362,7 @@ export function apply(ctx, config) {
       const fresh = checker?.announce
       if (fresh !== undefined) {
         notes.push('[a newer pwsh-run release exists: ' + fresh.latest + ' (running ' + String(checker?.version ?? '?') +
-          '). Install it with dsh plugin --profile <name> add "' + fresh.spec + '" or the plugin_manager tool. ' +
+          '). Install it with dsh plugin --profile <name> add "' + fresh.spec + '". ' +
           'Nothing is installed automatically.]')
       }
       const text = [body.join('\n')]

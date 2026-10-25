@@ -32,12 +32,11 @@
  *   非零退出码不抛异常，而是在输出末尾注明退出码（与官方 bash 工具一致）；
  *   只有进程根本起不来时才抛错。
  *
- * 修复记录（2026-10-17）
- *   - `timeoutMs` 以前被解析后从未使用，长命令会无限挂起；现在真正生效。
- *   - 头注释说「非零退出码不抛」，代码却 throw；现以注释为准，改为返回。
- *   - `workdir` 传 WSL 路径（/mnt/d/...）时，以前直接当 Windows cwd 交给 spawn 会失败；
- *     现在 POSIX 路径改为在命令前 `cd`（有围栏时用 llrun 的 `-C`），Windows 路径仍作为进程 cwd。
- *   - 默认工作目录改为从 workingDirectory 服务读取（会话中途切目录后 header.cwd 不更新）。
+ * 几处容易踩反的细节
+ *   - `timeoutMs` 必须真落成 timer：只解析不使用会让长命令无限挂住整个工具调用。
+ *   - POSIX 路径的 `workdir` 不能当 Windows 进程 cwd（spawn 直接失败）；
+ *     有围栏时交给 llrun 的 `-C`（在 landlock 之后 chdir），无围栏时退化为命令内 `cd`。
+ *   - 默认工作目录取自 workingDirectory 服务而非 header.cwd：会话中途切目录后 header 不更新。
  */
 
 import { resolveCwd } from './compaction-epoch.mjs'
