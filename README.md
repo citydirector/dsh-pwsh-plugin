@@ -64,8 +64,9 @@ Two things to know before you choose a spec:
   immediately (`fsutil hardlink list` shows both paths), at the cost of pinning an absolute path in
   `package.json`. Use `file:` while developing, `github:` for keeps.
 - **The bundle row cannot carry `?v=N`.** Its `name` must be the package name so it resolves from the
-  profile's `node_modules`. The `?v=N` URL-cache-buster trick that a hand-written `file:` row affords does
-  not exist here — after changing plugin code, restart DSH.
+  profile's `node_modules`, so there is no URL to change and ESM keeps serving the module it already cached.
+  Changing a file under `node_modules` is only picked up if the host happens to run a recomposition later;
+  that is not something to rely on while developing. Use the manual row below with a fresh `?v=N`, or restart.
 
 **Manual install**, if you would rather not take a dependency:
 

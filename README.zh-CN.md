@@ -59,8 +59,9 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 - **`github:` 是拷贝，`file:` 是硬链接。** `github:` 装的是那个 tag 的快照 —— 改检出不会生效，得重新 `add`。
   `file:` 直接硬链接检出，改完立刻生效（`fsutil hardlink list` 能看到两条路径），代价是 `package.json`
   里钉死了绝对路径。开发期用 `file:`，长期用 `github:`。
-- **bundle 那一行带不了 `?v=N`。** 它的 `name` 必须是包名，才能从 profile 的 `node_modules` 解析。
-  手写 `file:` 行那套「提版本号绕 ESM URL 缓存」的手法在这里不存在 —— 改完插件代码要重启 DSH。
+- **bundle 那一行带不了 `?v=N`。** 它的 `name` 必须是包名，才能从 profile 的 `node_modules` 解析，
+  因此没有 URL 可变，ESM 继续用它已经缓存的那个模块。改 `node_modules` 下的文件，只有等宿主碰巧跑一次
+  重组合才可能被换掉 —— 开发期不能指望这个，用下面那种手写行并把 `?v=N` 提一号，或者重启。
 
 **手写一行** —— 不想装成依赖时（开发期常用）：
 
