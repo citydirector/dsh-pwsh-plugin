@@ -48,7 +48,7 @@ It does **not** disable the stock `tool-bash`: that row already carries `disable
 $dsh = '<desktop install>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # the data root the desktop app itself uses
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.0'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.1'
 # or, from a local checkout
 & $dsh plugin --profile desktop add 'file:<path to checkout>'
 ```
@@ -162,7 +162,7 @@ Upgrades come from outside, either way:
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.0'
+& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.1'
 ```
 
 `plugin_manager` is **not** a stock DSH tool — the composition ships it disabled (`disabled: true` in
@@ -184,10 +184,10 @@ To rehearse locally, make a tagged repository and point the source at it:
 $root = Join-Path $env:TEMP ('pwsh-rel-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 git init -q -b main $root
 git -C $root -c user.email=t@l -c user.name=t commit -q --allow-empty -m release
-git -C $root tag v0.2.0
+git -C $root tag v0.2.1
 $env:DSH_PWSH_UPDATE_SOURCE = 'git+file:///' + ($root -replace '\\','/')
 node -e "import('./plugin/update-check.mjs').then(async (m) => console.log(JSON.stringify(await new m.UpdateChecker({ version: '0.1.0' }).check())))"
-# -> {"state":"available","latest":"v0.2.0","checkedAt":"..."}
+# -> {"state":"available","latest":"v0.2.1","checkedAt":"..."}
 Remove-Item -Recurse -Force $root
 ```
 

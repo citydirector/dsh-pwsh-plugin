@@ -45,7 +45,7 @@
 $dsh = '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.0'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.1'
 # 或者从本地检出装
 & $dsh plugin --profile desktop add 'file:<检出目录>'
 ```
@@ -145,7 +145,7 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.0'
+& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.1'
 ```
 
 `plugin_manager` 并**不是** DSH 自带的工具 —— 组合里它默认关着（`dsh-base/cordis.patch.yml` 里
@@ -166,10 +166,10 @@ $env:DSH_HOME = '<DSH_HOME>'
 $root = Join-Path $env:TEMP ('pwsh-rel-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 git init -q -b main $root
 git -C $root -c user.email=t@l -c user.name=t commit -q --allow-empty -m release
-git -C $root tag v0.2.0
+git -C $root tag v0.2.1
 $env:DSH_PWSH_UPDATE_SOURCE = 'git+file:///' + ($root -replace '\\','/')
 node -e "import('./plugin/update-check.mjs').then(async (m) => console.log(JSON.stringify(await new m.UpdateChecker({ version: '0.1.0' }).check())))"
-# → {"state":"available","latest":"v0.2.0","checkedAt":"..."}
+# → {"state":"available","latest":"v0.2.1","checkedAt":"..."}
 Remove-Item -Recurse -Force $root
 ```
 
