@@ -35,7 +35,7 @@
 $dsh = '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.1.1'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.1.2'
 # 或者从本地检出装
 & $dsh plugin --profile desktop add 'file:<检出目录>'
 ```
@@ -138,7 +138,8 @@ $env:DSH_HOME = '<DSH_HOME>'
 & '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.0'
 ```
 
-或者让模型调 `plugin_manager` 工具，`target` 传提示行里给的那个 spec。
+`plugin_manager` 并**不是** DSH 自带的工具 —— 组合里它默认关着（`dsh-base/cordis.patch.yml` 里
+`disabled: true`）。profile 若把它打开，模型可以用它跑同样的 `add`；没打开就用上面的 CLI。
 
 默认发布源是 `github:citydirector/dsh-pwsh-plugin`，读 `GET /repos/<repo>/tags`。标签必须匹配
 `^v\d+\.\d+\.\d+$`（预发布永不推送），取版本号最大的那个。
@@ -189,6 +190,7 @@ Remove-Item -Recurse -Force $root
 | 启动时 `tool "pwsh_run" is already registered` | profile 的 patch 文件里手写了 `id: pwsh-run`，**而且** bundle patch 又插了一条。删掉手写那条。 |
 | `refusing to start: ctx.sandboxPolicy is absent` | 组合里少了沙箱策略服务。补齐组合，或者确实要这样时设 `allowUnconfined: true`。 |
 | `refusing to start: read-only mode` | 预期行为。read-only 会话里用内置 `pwsh` 工具。 |
+| `could not confine the session: SetNamedSecurityInfoW failed (Win32 5)` | 工作区根目录的 DACL 没给你 `WRITE_DAC` + `WRITE_OWNER`（沙箱要在那里写 DACL 与完整性标签）。全控制权限两样都满足，`Modify` 不够。执行 `icacls "<根目录>" /grant "%USERNAME%":(OI)(CI)F`，或从用户目录下的目录起会话。 |
 | 内置工具能写的地方本工具写不进 | 确认 `session` 真的传到了 `sandboxPolicy.resolve`（见「沙箱」）；漏传会把边界静默挪到 profile 目录。 |
 | 永远看不到更新提示 | 源环境变量必须在 **Windows** 侧设；WSL 不透传 `DSH_*`。 |
 | 输出顺序看着不对 | stdout 与 stderr 按类型合并，不按时间。自己用 `2>&1` 合。 |
@@ -205,6 +207,14 @@ Remove-Item -Recurse -Force $root
 - **`[Console]::Error.WriteLine` 会被吞掉**（服务端为防协议污染把 `Console.Error` 指向内存流）。
   子进程的 stderr、`Write-Error`、`throw` 都正常回来。
 - **会话是串行的**：并发调用排成队列逐个执行（不会串输出，但也没有并行加速）。
+- **不依赖 WSL。** `pwsh_run` 全程不碰 WSL，只有 `wsl/custom-bash.mjs` 才碰。没有可用的 `bashPath` 时，
+  该预设照样加载成功（可执行文件是惰性解析的），`bash` 工具每次调用报
+  `command "<路径>" is not an executable file` —— 清晰失败，不会静默降级。
+- **UAC 开启时的行为与本机不同。** 本机实测环境是 UAC 关闭、进程提权。UAC 开着时会话是标准用户，
+  此时 ACL 沙箱要求工作区根目录的 DACL 给你 **`WRITE_DAC` 与 `WRITE_OWNER`** —— 全控制两者都满足
+  （它写的完整性标签在 SACL 里）。用户目录下的目录天然继承这两样；在盘符根新建的目录只继承
+  `Modify`，单靠 `Modify` 会以 `SetNamedSecurityInfoW failed (Win32 5)` 失败。属主不是决定因素：
+  `icacls <根目录> /grant "%USERNAME%":(OI)(CI)F` 能救。届时是 fail-closed 报错，不会退化成无边界。
 - 不支持交互式程序与 TTY。
 
 ## 开发
@@ -239,13 +249,13 @@ PWSH_BIN='pwsh' node test/itest.mjs          # 14：协议与会话本体
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15：插件完整路径
 node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
-node test/bashtest.mjs                       # 17：custom-bash 围栏分诊
+node test/bashtest.mjs                       # 18：custom-bash 围栏分诊
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
 node test/updatetest.mjs                     # 52：更新检查（只碰本地 git）
 node test/wiringtest.mjs                     #  9：更新提示接线
 ```
 
-八份脚本合计 **133 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+八份脚本合计 **134 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

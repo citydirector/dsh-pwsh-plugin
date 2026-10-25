@@ -883,3 +883,73 @@ bundle 模式给不出新 URL，所以 `dsh plugin add …#vX.Y.Z` 装新版本�
 
 同一实验也顺手确认了恢复路径：把文件写回原内容后，五个承重文件（`plugin/index.mjs`、`session.mjs`、
 `session-server.ps1`、`package.json`、`cordis.patch.yml`）与工作区 md5 全同。
+
+## 二十二、llrun 候选探测与两种「非本机」环境（2026-10-24）
+
+### 1. 默认路径改候选探测，且探测脚本必须走 stdin
+
+原来 `wsl/custom-bash.mjs` 把 `DEFAULT_LLRUN_PATH` 写死成一个路径，且 docs 教人装到另外两个位置，
+新用户第一条 `bash` 调用就会 fail-closed。现在按 `$LLRUN` / `$DSH_LLRUN` → `<DSH_HOME>/bin/llrun` →
+`/usr/local/bin/llrun` → `~/.local/bin/llrun` 探测第一个可执行的，结果跨调用缓存（失败不缓存，装好即生效）。
+
+落地时撞上一个**真坑**：探测脚本最初走 `bash -c <script>`，一直算出错误的候选序号。隔离实验：
+
+| 写在 `bash -c` 正文里 | 期望 | WSL 垫片 `bash.exe` 实得 |
+|---|---|---|
+| `x=abc; echo "x=$x"` | `x=abc` | **`x=`**（赋值整个被吃掉）|
+| `i=0; i=$((i+1)); echo "i=$i"` | `i=1` | **`i=`** |
+| `echo "sub=$(echo hi)"` | `sub=hi` | `sub=hi`（命令替换正常）|
+| `if [ -x "<path>" ]; then exit 1; fi; exit 0` | 1 | 1（控制流正常）|
+
+`C:\Windows\System32\bash.exe`（WSL 垫片）会改写 `-c` 的正文，原生 Linux `/bin/bash` 不会。
+同一层还有另一个症状：`bash -c 'echo "$@"' name a b` 在垫片下 `$@` 为空。
+
+**结论：不要用 `bash -c` 给 WSL 传脚本，一律 `bash -s` + stdin。** 这正是主执行路径早就采用的手法
+（头注释里记着「避开 bash.exe 的 argv 引号怪癖」），探测脚本只是漏用了。改成 stdin 后立刻正常。
+
+探测结果只走退出码（0 = 全无，N = 第 N 个候选可执行），不读 stdout —— 收集缓冲区只在 stdio 声明为
+collect 时才存在，不该把可用性押在它上面。
+
+### 2. 「没有 WSL」：清晰失败，不是静默降级
+
+`bashPath: 'C:/nonexistent/bash.exe'` 时 `apply()` 不抛错（可执行文件是惰性解析的），`bash` 工具照常注册；
+真调一次才报 `subprocess-local: command "C:/nonexistent/bash.exe" is not an executable file`，
+三种权限档一致。`pwsh_run` 本体全程不碰 WSL。
+
+### 3.「UAC 正常」：决定因素是 DACL 的两条权限位，不是属主
+
+本机 UAC 关闭（`EnableLUA = 0`），进程带完整令牌。用 `runas /trustlevel:0x20000` 造受限令牌
+（只剩 `SeChangeNotifyPrivilege`，等价于 UAC 开着的标准用户）做对照，三组目录各测一次 `confine`：
+
+| 目录 | 属主 | DACL（当前用户） | 受限令牌下 confine |
+|---|---|---|---|
+| `<drive>:\_uac_case_fresh`（新建成）| 当前用户 | 继承 `Modify` | **THREW** `SetNamedSecurityInfoW failed (Win32 5): grantWrite(...)` |
+| 同上 + `icacls /grant <user>:(OI)(CI)F` | 当前用户 | 全控制 | **OK**（`enforcement=partial`）|
+| `C:\Users\<user>\<dir>`（用户目录下）| 当前用户 | 继承 `FullControl` | **OK** |
+
+对照全令牌（本机现状）：三组都 OK，包括盘符根下只有 `Modify` 的目录 —— 完整令牌能自己改写 DACL，
+受限令牌不能。这就是「本机能跑不代表开了 UAC 也能跑」的全部原因。
+
+源码依据（`dsh-sandbox-windows-acl`）：`grantWrite` 用 `SetNamedSecurityInfoW(path, 1, 20, …)` 同时写
+DACL 与 SACL（低完整性标签），注释原文：`The directory must be owned by the caller AND grant
+WRITE_OWNER (the label lives in the SACL; owner-implicit rights cover only READ_CONTROL and WRITE_DAC)`。
+实测细化一句：**属主不是硬条件**（`icacls` 授权后属主仍是当前用户、但已能通过），真正卡住的是
+`WRITE_DAC` + `WRITE_OWNER` 两条 —— 全控制两样都有，`Modify` 两样都没有。
+
+受限令牌下的端到端复验（真 `LocalSubprocessRuntime` + 真 `LocalSandboxProvider` + 真插件 `apply`，
+workspace 取用户目录下的一个临时目录）：
+
+| 断言 | 结果 |
+|---|---|
+| 工作区内 `Set-Content` 后读回 | `"IN"`，磁盘 `inside=true` |
+| 盘符根下的 `<drive>:\_uac_out.txt` | `DENIED: UnauthorizedAccessException`，磁盘 `outside=false` |
+| `$global:uacz` 跨调用 | `7` |
+| `LanguageMode` | `FullLanguage` |
+
+### 4. confine 失败给可操作的错误
+
+原始错误只有一句 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<path>)`，看不出该改哪个目录、
+该给什么权限。`plugin/index.mjs` 现在把它翻成一段话：指出 workspace 根、说明需要 `WRITE_DAC` +
+`WRITE_OWNER`（全控制满足）、给出 `icacls "<root>" /grant "%USERNAME%":(OI)(CI)F` 或换到用户目录下的目录。
+`execute` 侧也不再套第二层 `pwsh_run could not start a session:` 前缀。
+

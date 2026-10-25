@@ -37,7 +37,7 @@ so installing it is all you do — you never edit your profile by hand.
 $dsh = '<desktop install>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # the data root the desktop app itself uses
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.1.1'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.1.2'
 # or, from a local checkout
 & $dsh plugin --profile desktop add 'file:<path to checkout>'
 ```
@@ -154,7 +154,9 @@ $env:DSH_HOME = '<DSH_HOME>'
 & '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.0'
 ```
 
-or ask the model to call the `plugin_manager` tool with the spec from the notice line.
+`plugin_manager` is **not** a stock DSH tool — the composition ships it disabled (`disabled: true` in
+`dsh-base/cordis.patch.yml`). If your profile turns it on, the model can run the same `add` through it; if
+not, use the CLI above.
 
 The default source is `github:citydirector/dsh-pwsh-plugin`, read via `GET /repos/<repo>/tags`. A tag must
 match `^v\d+\.\d+\.\d+$` (prereleases are never offered), and the highest version wins.
@@ -207,6 +209,7 @@ derives every path from its own location and re-checks the disk for leaks.
 | `Open DeepSeek Harness Desktop once to initialize its profile` | You are pointing `DSH_HOME` at the wrong place; set it to the data root the desktop app uses. |
 | `tool "pwsh_run" is already registered` at boot | Your profile patch file has a hand-written `id: pwsh-run` **and** the bundle patch inserts one. Delete the hand-written entry. |
 | `refusing to start: ctx.sandboxPolicy is absent` | The composition is missing the sandbox policy service. Fix the composition, or set `allowUnconfined: true` if you really mean it. |
+| `could not confine the session: SetNamedSecurityInfoW failed (Win32 5)` | The workspace root is not fully controlled by you. The sandbox writes a DACL + an integrity label there, which needs ownership plus `WRITE_DAC` and `WRITE_OWNER`. Take ownership and grant yourself full control: `icacls "<root>" /grant "%USERNAME%":(OI)(CI)F`, or start the session from a directory under your user profile. |
 | `refusing to start: read-only mode` | Expected. Use the built-in `pwsh` tool in read-only sessions. |
 | Script cannot write where the built-in tool can | Check that `session` reached `sandboxPolicy.resolve` (see [Sandbox](#sandbox)); a missing session silently moves the boundary to the profile directory. |
 | Update notice never appears | The source env var must be set on the **Windows** side; WSL does not forward `DSH_*`. |
@@ -226,6 +229,18 @@ derives every path from its own location and re-checks the disk for leaks.
   the protocol cannot be polluted). A child process's stderr, `Write-Error` and `throw` all come back fine.
 - **A session is serial**: concurrent calls queue up and run one at a time (no interleaved output, but no
   parallel speedup either).
+- **No WSL is required.** `pwsh_run` never touches WSL; only `wsl/custom-bash.mjs` does. Without a usable
+  `bashPath`, applying that preset still succeeds (the executable is resolved lazily) and the `bash` tool
+  fails per call with `command "<path>" is not an executable file` — a clear failure, not a silent
+  downgrade.
+- **UAC behaves differently from this machine.** These measurements come from a box with UAC off, where the
+  process runs elevated. With UAC on, sessions run as a standard user, and the ACL sandbox needs the
+  workspace root's DACL to give you **`WRITE_DAC` and `WRITE_OWNER`** — full control satisfies both, because
+  the integrity label it writes lives in the SACL. A directory under your user profile inherits exactly
+  that; a directory created at a drive root only inherits `Modify`, and `Modify` alone fails with
+  `SetNamedSecurityInfoW failed (Win32 5)`. Ownership is not the deciding factor: `icacls <root> /grant
+  "%USERNAME%":(OI)(CI)F` fixes a root you do not own. Confinement fails closed with that message instead of
+  running unconfined.
 - No interactive programs and no TTY.
 
 ## Development
@@ -260,13 +275,13 @@ PWSH_BIN='pwsh' node test/itest.mjs          # 14: protocol and session core
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15: full plugin path
 node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
-node test/bashtest.mjs                       # 17: custom-bash fence triage
+node test/bashtest.mjs                       # 18: custom-bash fence triage
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
 node test/updatetest.mjs                     # 52: update check, local git only
 node test/wiringtest.mjs                     #  9: update notice wiring
 ```
 
-Eight scripts, **133 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Eight scripts, **134 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.
