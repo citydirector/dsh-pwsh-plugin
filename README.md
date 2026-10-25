@@ -48,7 +48,7 @@ It does **not** disable the stock `tool-bash`: that row already carries `disable
 $dsh = '<desktop install>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # the data root the desktop app itself uses
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.2'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.3'
 # or, from a local checkout
 & $dsh plugin --profile desktop add 'file:<path to checkout>'
 ```
@@ -176,7 +176,7 @@ Without `pluginManager` — a profile where the `plugin-manager` service is disa
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.2'
+& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.3'
 ```
 
 Note that DSH's stock composition disables the *tool* `plugin_manager` while leaving the *service* running
@@ -257,6 +257,10 @@ derives every path from its own location and re-checks the disk for leaks.
   `FILE_FLAG_DELETE_ON_CLOSE` temp file truncated before every call. A grandchild that writes to inherited
   stdout can no longer inject a fake protocol line (measured: one `Write-Output '<<<BYE>>>'` from a child used
   to kill the session), and one that reads inherited stdin gets EOF instead of the caller's request.
+  The replacement handles are created **inheritable** (`SECURITY_ATTRIBUTES.bInheritHandle`): a handle made with
+  a `NULL` security descriptor only exists in this process, so a child that trusts `STARTUPINFO.hStdInput`
+  receives a bare handle *number* that means nothing over there — `GetFileType` reports `UNKNOWN`, and once in
+  a few dozen launches that number is recycled by an unrelated object and the read returns its bytes.
   stdout deliberately does **not** go to `NUL`: that is a character device, PowerShell then believes its output
   is not redirected and the sandbox denial changes into a useless `StandardOutputEncoding` message.
   If the temp directory is unwritable it falls back to `NUL` and says so once, in a warning on the first call.
@@ -306,7 +310,7 @@ FINDINGS.md          every measurement and the reasoning behind the design
 
 ```bash
 cd <checkout>
-PWSH_BIN='pwsh' node test/itest.mjs          # 15: protocol and session core
+PWSH_BIN='pwsh' node test/itest.mjs          # 16: protocol and session core
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15: full plugin path
 node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
@@ -317,7 +321,7 @@ node test/wiringtest.mjs                     #  9: update notice wiring
 node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
 ```
 
-Nine scripts, **161 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Nine scripts, **162 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.

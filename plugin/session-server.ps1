@@ -58,29 +58,56 @@ $K = $null
 $Drain = ''
 $hOut = [IntPtr]::Zero
 try {
+    # 句柄必须带 bInheritHandle 才交得给子进程。用 NULL 安全属性建的句柄不可继承，子进程按
+    # STARTUPINFO.hStdInput 拿到的就只是"父进程的句柄号"，在本进程里没有对应对象：
+    # GetFileType 报 UNKNOWN，偶尔这个编号还被别的对象复用，读出来是别人的字节（实测 20 次里有 1 次
+    # 读到一个 PE 头）。带上继承位之后 30 次全是字符设备、每次都读到 EOF。
     $Sig = @'
-    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    public static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
-    [DllImport("kernel32.dll", SetLastError=true)]
+using System;
+using System.Runtime.InteropServices;
+
+public static class PwshRunStdio {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SecurityAttributes {
+        public int nLength;
+        public IntPtr lpSecurityDescriptor;
+        public bool bInheritHandle;
+    }
+
+    /// <summary>结构体字节数。放在 C# 里算：PowerShell 会把 Marshal.SizeOf(type) 绑到 object 重载上并报错。</summary>
+    public static int SecurityAttributesSize { get { return Marshal.SizeOf(typeof(SecurityAttributes)); } }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateFileW(string n, uint a, uint s, ref SecurityAttributes sa, uint d, uint f, IntPtr t);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool SetStdHandle(int n, IntPtr h);
-    [DllImport("kernel32.dll", SetLastError=true)]
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     public static extern uint SetFilePointer(IntPtr h, int lo, IntPtr hi, uint method);
-    [DllImport("kernel32.dll", SetLastError=true)]
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool SetEndOfFile(IntPtr h);
+}
 '@
-    $K = Add-Type -MemberDefinition $Sig -Name StdioTakeover -Namespace PwshRun -PassThru -ErrorAction Stop
+    # -PassThru 给出的是类型数组，取 [0] 才是那个类；直接按名字拿更直白。
+    $null = Add-Type -TypeDefinition $Sig -ErrorAction Stop
+    $K = [PwshRunStdio]
+    $SA = [PwshRunStdio+SecurityAttributes]::new()
+    $SA.nLength = $K::SecurityAttributesSize
+    $SA.bInheritHandle = $true
     $Invalid = [IntPtr]::new(-1)
     # 0x40000000 GENERIC_WRITE / 0x80000000 GENERIC_READ / 0x3 share read+write / 0x3 OPEN_EXISTING
-    $NulR = $K::CreateFileW('NUL', [uint32]2147483648, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0, [IntPtr]::Zero)
+    $NulR = $K::CreateFileW('NUL', [uint32]2147483648, [uint32]3, [ref]$SA, [uint32]3, [uint32]0, [IntPtr]::Zero)
     if ($NulR -eq [IntPtr]::Zero -or $NulR -eq $Invalid) { throw 'CreateFileW(NUL, read) failed' }
     if (-not $K::SetStdHandle(-10, $NulR)) { throw 'SetStdHandle(stdin) failed' }
     # 0x2 CREATE_ALWAYS / 0x7 share read+write+delete / 0x04000000 FILE_FLAG_DELETE_ON_CLOSE
     $Drain = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'pwsh-run-drain-' + [Guid]::NewGuid().ToString('N') + '.log')
-    $hOut = $K::CreateFileW($Drain, [uint32]1073741824, [uint32]7, [IntPtr]::Zero, [uint32]2, [uint32]67108864, [IntPtr]::Zero)
+    $hOut = $K::CreateFileW($Drain, [uint32]1073741824, [uint32]7, [ref]$SA, [uint32]2, [uint32]67108864, [IntPtr]::Zero)
     if ($hOut -eq [IntPtr]::Zero -or $hOut -eq $Invalid) {
         # 临时目录不可写时退回 NUL：协议流仍然干净，只是 & exe 的报错文案会变成重定向那一句。
         $Drain = ''
-        $hOut = $K::CreateFileW('NUL', [uint32]1073741824, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0, [IntPtr]::Zero)
+        $hOut = $K::CreateFileW('NUL', [uint32]1073741824, [uint32]3, [ref]$SA, [uint32]3, [uint32]0, [IntPtr]::Zero)
         if ($hOut -eq [IntPtr]::Zero -or $hOut -eq $Invalid) { throw 'CreateFileW(stdout) failed' }
     }
     if (-not $K::SetStdHandle(-11, $hOut)) { throw 'SetStdHandle(stdout) failed' }

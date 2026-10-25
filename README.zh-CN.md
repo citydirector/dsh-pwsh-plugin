@@ -45,7 +45,7 @@
 $dsh = '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.2'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.3'
 # 或者从本地检出装
 & $dsh plugin --profile desktop add 'file:<检出目录>'
 ```
@@ -158,7 +158,7 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.2'
+& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.3'
 ```
 
 注意 DSH 的默认组合关掉的是**工具** `plugin_manager`，而桌面 profile 上的**服务** `plugin-manager`
@@ -236,6 +236,9 @@ Remove-Item -Recurse -Force $root
   stdin 接 `NUL`，stdout / stderr 接一个带 `FILE_FLAG_DELETE_ON_CLOSE` 的临时文件、每次调用前截回零。
   于是子进程往继承来的 stdout 写东西不会再伪造出协议行（实测：子进程一句 `Write-Output '<<<BYE>>>'`
   曾让会话当场死亡），读继承来的 stdin 也只会读到 EOF，而不是调用方的请求。
+  替上去的句柄必须是**可继承**的（`SECURITY_ATTRIBUTES.bInheritHandle`）：用 `NULL` 安全描述符建的句柄
+  只存在于本进程，子进程按 `STARTUPINFO.hStdInput` 拿到的只是一个在那边没有意义的句柄**编号** ——
+  `GetFileType` 报 `UNKNOWN`，几十次里还有一次那个编号被别的对象复用，读出来是别人的字节。
   stdout **故意不接 `NUL`**：那是字符设备，PowerShell 会认为输出没被重定向，沙箱拒绝的报错会变成一句
   没用的 `StandardOutputEncoding` 提示。临时目录不可写时退回 `NUL`，并在第一次调用的警告里说明一次。
 - **会话是串行的**：并发调用排成队列逐个执行（不会串输出，但也没有并行加速）。
@@ -279,7 +282,7 @@ FINDINGS.md          全部实测数据与设计理由
 
 ```bash
 cd <检出目录>
-PWSH_BIN='pwsh' node test/itest.mjs          # 15：协议与会话本体
+PWSH_BIN='pwsh' node test/itest.mjs          # 16：协议与会话本体
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15：插件完整路径
 node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
@@ -290,7 +293,7 @@ node test/wiringtest.mjs                     #  9：更新提示接线
 node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
 ```
 
-九份脚本合计 **161 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+九份脚本合计 **162 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

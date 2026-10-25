@@ -1224,3 +1224,46 @@ while ($null -ne $__e.InnerException) { $__e = $__e.InnerException }
 `Could not reach the release source, so whether a newer version exists is unknown.`
 并且这条分支上 `doc.spec` 是 `undefined`，只能给模板而不是插值。
 
+
+
+## 二十六、接管句柄必须是可继承的（2026-10-25）
+
+第二十四节那版接管（`CreateFileW` 传 `IntPtr.Zero` 作安全属性）只解决了一半问题：
+协议流干净了，但交接给子进程的句柄**在子进程里根本不存在**。
+
+### 现象
+
+`test/itest.mjs` 的 `child-stdio-detached` 用例十二连跑会红一次：
+
+    FAIL child-stdio-detached :: sentinel=ok out=["POST"] stole=CHILD-STOLE:MZ?  ?@  € ????L?This program cannot be run in DOS mode.
+
+`stole` 里是一个**PE 可执行头**。子进程读继承来的 stdin，读到的不是 EOF，而是别的对象的字节。
+
+### 探针结论（真实会话内，`Start-Process` 起子 pwsh 各 20–40 次）
+
+| 项目 | 旧写法（`NULL` 安全属性） | 新写法（`bInheritHandle = true`） |
+|---|---|---|
+| 父进程 `GetStdHandle(-10)` | `1448`，`GetFileType` = 2（字符设备）| 同左 |
+| 子进程 `GetStdHandle(-10)` | `1448`（**同一个编号**），`GetFileType` = **0（UNKNOWN）** | 同一个合法句柄，`GetFileType` = 2 |
+| 子进程 `GetHandleInformation` | `ok=True`，`flags=0`（inherit 位没置）| `ok=True`，`flags=1` |
+| 子进程读 stdin | 20 次里 **19 次 0 字节、1 次 1 字节** | 30 次、40 次全 0 |
+
+`GetFileType` 返回 `UNKNOWN` 是关键证据：句柄号在子进程里指向不到对象。Windows 只在
+`bInheritHandle` 为真时才把句柄复制进子进程的句柄表；用 `NULL` 安全属性建的句柄不可继承，
+于是子进程按 `STARTUPINFO.hStdInput` 拿到的是一个**悬空编号**，偶尔这个编号被别的对象（这里是某个
+已映射的可执行映像）复用，读出来就是别人的字节。
+
+### 两个 PowerShell 侧的坑（都让第一版改法直接报错）
+
+1. **`Marshal.SizeOf([type]'X+Y')` 会绑到 `SizeOf(object)` 重载**：
+   `Type 'System.RuntimeType' cannot be marshaled as an unmanaged structure; no meaningful size or offset can be computed.`
+   改法是把尺寸算在 C# 里：`public static int SecurityAttributesSize { get { return Marshal.SizeOf(typeof(SecurityAttributes)); } }`。
+2. **`Add-Type -PassThru` 返回的是类型数组**，`$K = Add-Type … -PassThru` 之后 `$K::CreateFileW` 报
+   `[System.Object[]] does not contain a method named 'CreateFileW'`。改成 `$null = Add-Type …` 再按名字取 `[PwshRunStdio]`。
+   这两处失败都不会让会话起不来 —— 接管段整体在 `try/catch` 里，只会在第一次调用时发一条 `W:` 警告。
+
+### 钉住
+
+`test/itest.mjs` 新增第 2 项 `std-handles-takeover`：起会话后第一次调用必须 `sentinel=ok` 且 **`warn` 为空**。
+它比 `child-stdio-detached` 更直接 —— 接管本身失败时立刻红，而不是等到那个万分之一的句柄复用。
+itest 15 → **16 项**，九份脚本合计 **162 项**。

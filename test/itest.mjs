@@ -36,8 +36,14 @@ const s = await startSession(subprocess, { executable: PWSH, serverSource: SERVE
 const bootMs = Date.now() - t0;
 check("boot", s.version !== undefined, "version=" + s.version + " bootMs=" + bootMs);
 
+// 0. std handle 接管必须真的做成：接管失败时服务端只会在第一次调用里发一条 W: 警告，
+//    而那条警告之后子进程就能自由污染协议流。这条用例把它变成硬断言 —— C# 类型加载、
+//    SecurityAttributes 字段布局、结构体尺寸这几处任何一处写错都会先在这里露头。
+let r = await s.run("Write-Output 'takeover-probe'", 10000);
+check("std-handles-takeover", r.sentinel === "ok" && r.warn.length === 0, "warn=" + JSON.stringify(r.warn));
+
 // 1. 本工具要解决的两件事：`$` 展开与 here-string
-let r = await s.run("$n='Skadi'\nWrite-Output \"hi $n\"\n$h=@'\nlit $n\n'@\nWrite-Output $h", 10000);
+r = await s.run("$n='Skadi'\nWrite-Output \"hi $n\"\n$h=@'\nlit $n\n'@\nWrite-Output $h", 10000);
 check("dollar+heredoc", r.out[0] === "hi Skadi" && r.out[1] === "lit $n" && r.sentinel === "ok", JSON.stringify(r.out));
 
 // 2. 流分离与顺序
