@@ -45,7 +45,7 @@
 $dsh = '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.1'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.2'
 # 或者从本地检出装
 & $dsh plugin --profile desktop add 'file:<检出目录>'
 ```
@@ -85,6 +85,8 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
 ## 工具接口
 
+`pwsh_run` 跑脚本；`pwsh_run_update` 查更新、必要时安装本插件的新版本 —— 见[自动更新检查](#自动更新检查)。
+
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `script` | 是 | PowerShell 脚本正文。**原样**送达 —— 不要转义 `$`，不要包 `pwsh -c`，不要加外层引号。 |
@@ -106,7 +108,7 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 | `maxSessions` | `4` | 同时存活的会话上限（每个 agent 工作区一个）。 |
 | `maxOutputBytes` | `8388608` | 单次调用的输出收集上限（8MB）。截断会明确报出来，不静默。 |
 | `allowUnconfined` | `false` | `true` = 沙箱策略服务缺席时也起会话。 |
-| `updateCheck` | `true` | 定期查发布标签（只查，从不自己安装）。 |
+| `updateCheck` | `true` | 定期查发布标签。查与装分开：这里只查，装由 `pwsh_run_update` 做。 |
 
 `allowUnconfined` 是唯一一条「明知故犯」的开关。正常部署下 `ctx.sandboxPolicy` 一定在；缺席说明组合
 不完整，这时插件**拒绝启动**，而不是悄悄跑一个不受约束的会话。
@@ -137,19 +139,32 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 
 ## 自动更新检查
 
-启动 5 秒后查一次发布标签，之后每 12 小时一次。**只查、只提示、从不自己安装** —— 查到新版本时在下次
-`pwsh_run` 输出末尾挂一行（每个进程生命周期只挂一次）。让插件自己动手等于在自己的尸体上开刀：热
-替换会 dispose 旧实例，`dispose` 一跑后半段代码就不再执行。
+启动 5 秒后查一次发布标签，之后每 12 小时一次。查到新版本时在下次 `pwsh_run` 输出末尾挂一行（每个
+进程生命周期只挂一次）。**它从不自己动手装东西** —— 插件替换自己的文件，等于在执行途中 dispose 掉
+正在跑的那个实例。
 
-升级从外面发起，两条路任选：
+安装是单独的一步，由 `pwsh_run_update` 工具承担：
+
+| `action` | 行为 |
+|---|---|
+| `check`（默认） | 读一次标签，报出 `state` / `running` / `newest release` / `install spec`。不装任何东西。 |
+| `install` | 把钉住 tag 的 `github:…#vX.Y.Z` 交给 `ctx.get('pluginManager')` —— 也就是「插件」页面用的那个服务 —— 由它跑 pnpm，失败时回滚 `package.json`。 |
+
+**装完仍然要重启。** bundle 行的 `name` 就是包名，装新版前后解析出同一个 module URL，而 ESM 按 URL
+缓存：不管 `application` 返回的是 `restart-required` 还是 `applied`，正在跑的进程里都还是旧模块。
+别把「装上了」读成「生效了」。
+
+若 profile 关掉了 `plugin-manager` 服务，`install` 会报 `no-manager`，改用终端升级：
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.1'
+& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.2'
 ```
 
-`plugin_manager` 并**不是** DSH 自带的工具 —— 组合里它默认关着（`dsh-base/cordis.patch.yml` 里
-`disabled: true`）。profile 若把它打开，模型可以用它跑同样的 `add`；没打开就用上面的 CLI。
+注意 DSH 的默认组合关掉的是**工具** `plugin_manager`，而桌面 profile 上的**服务** `plugin-manager`
+是活的 —— 两者不是一回事，这里只用服务。
+
+
 
 默认发布源是 `github:citydirector/dsh-pwsh-plugin`，读 `GET /repos/<repo>/tags`。标签必须匹配
 `^v\d+\.\d+\.\d+$`（预发布永不推送），取版本号最大的那个。
@@ -242,6 +257,7 @@ plugin/
   session.mjs         会话对象：分帧、队列、base64、启动 argv
   session-server.ps1  PowerShell 侧：runspace、流打标、哨兵
   update-check.mjs    发布标签查询与比较
+  update-apply.mjs    把钉住的规格交给 pluginManager，不自己下载
 test/
   support.mjs         定位 DSH 安装；Windows 路径转 /mnt 形式
   itest.mjs           协议与会话本体
@@ -250,7 +266,7 @@ test/
   sandboxtest.mjs     真 LocalSandboxProvider，边界 + fail-closed 用例
   bashtest.mjs        custom-bash 围栏分诊（mock runtime）
   bash-e2e.mjs        custom-bash 端到端（真 runtime + 真 llrun）
-  updatetest.mjs      更新检查（本地 git 仓库）
+  updatetest.mjs      更新检查与安装结果（本地 git 仓库）
   wiringtest.mjs      更新提示真的接到工具输出末尾
   denialtest.mjs      沙箱拒绝提示只在该触发的报错上触发
 wsl/
@@ -269,12 +285,12 @@ node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
 node test/bashtest.mjs                       # 19：custom-bash 围栏分诊
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
-node test/updatetest.mjs                     # 52：更新检查（只碰本地 git）
+node test/updatetest.mjs                     # 66：更新检查与安装结果（只碰本地 git）
 node test/wiringtest.mjs                     #  9：更新提示接线
-node test/denialtest.mjs                     #  9：沙箱拒绝提示（不起子进程，哪儿都能跑）
+node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
 ```
 
-九份脚本合计 **145 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+九份脚本合计 **161 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

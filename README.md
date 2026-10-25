@@ -48,7 +48,7 @@ It does **not** disable the stock `tool-bash`: that row already carries `disable
 $dsh = '<desktop install>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # the data root the desktop app itself uses
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.1'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.2'
 # or, from a local checkout
 & $dsh plugin --profile desktop add 'file:<path to checkout>'
 ```
@@ -93,7 +93,10 @@ Three constraints that cost real time to find:
 The three files in `plugin/` (`index.mjs`, `session.mjs`, `session-server.ps1`) must stay together —
 `index.mjs` reads the `.ps1` at load time and ships it to the child as `-EncodedCommand`.
 
-## The tool
+## The tools
+
+`pwsh_run` runs a script. `pwsh_run_update` checks for and optionally installs a newer release of this
+plugin — see [Update checks](#update-checks).
 
 | Argument | Required | Meaning |
 |---|---|---|
@@ -117,7 +120,7 @@ When order matters, merge them yourself: `2>&1` or `*>&1`.
 | `maxSessions` | `4` | How many sessions may live at once (one per agent workspace). |
 | `maxOutputBytes` | `8388608` | Output collection cap per call (8 MB). Truncation is reported honestly, never silently. |
 | `allowUnconfined` | `false` | `true` = start a session even when the sandbox policy service is missing. |
-| `updateCheck` | `true` | Look for release tags periodically (check only — it never installs). |
+| `updateCheck` | `true` | Look for release tags periodically. Checking and installing are separate: this only checks; `pwsh_run_update` does the install. |
 
 `allowUnconfined` is the one deliberate escape hatch. In a normal deployment `ctx.sandboxPolicy` is always
 present; when it is missing the composition is incomplete, and the plugin **refuses to start** rather than
@@ -153,21 +156,31 @@ runspace. The tool reports that clearly and points at the built-in `pwsh` tool, 
 
 ## Update checks
 
-Five seconds after start, then every 12 hours, the plugin fetches release tags. It **only checks,
-only tells, never installs** — a newer tag adds one line to the end of the next `pwsh_run` output (once
-per process lifetime). Having the plugin install itself would be operating on its own corpse: a hot
-replace disposes the old instance, and half the code would never run.
+Five seconds after start, then every 12 hours, the plugin fetches release tags. A newer tag adds one line
+to the end of the next `pwsh_run` output (once per process lifetime). It **never installs anything on its
+own** — a plugin replacing its own files disposes the instance that is executing it.
 
-Upgrades come from outside, either way:
+Installing is a separate, explicit step. The `pwsh_run_update` tool does both halves:
+
+| `action` | What happens |
+|---|---|
+| `check` (default) | Reads the tags once and reports `state` / `running` / `newest release` / `install spec`. Installs nothing. |
+| `install` | Hands the pinned `github:…#vX.Y.Z` spec to `ctx.get('pluginManager')` — the same service the Plugins page uses — which runs pnpm and rolls `package.json` back on failure. |
+
+**A restart is still required.** A bundle row names the package, so the module URL is identical before and
+after the swap and ESM caches by URL: the running process keeps the old modules no matter what
+`application` came back. Do not read "installed" as "in effect".
+
+Without `pluginManager` — a profile where the `plugin-manager` service is disabled — `install` reports
+`no-manager` and you upgrade from a terminal instead:
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.1'
+& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.2'
 ```
 
-`plugin_manager` is **not** a stock DSH tool — the composition ships it disabled (`disabled: true` in
-`dsh-base/cordis.patch.yml`). If your profile turns it on, the model can run the same `add` through it; if
-not, use the CLI above.
+Note that DSH's stock composition disables the *tool* `plugin_manager` while leaving the *service* running
+for desktop profiles; the two are different things, and only the service is used here.
 
 The default source is `github:citydirector/dsh-pwsh-plugin`, read via `GET /repos/<repo>/tags`. A tag must
 match `^v\d+\.\d+\.\d+$` (prereleases are never offered), and the highest version wins.
@@ -271,6 +284,7 @@ plugin/
   session.mjs         the session object: framing, queue, base64 encode, boot argv
   session-server.ps1  the PowerShell side: runspace, stream tagging, sentinels
   update-check.mjs    release tag lookup and comparison
+  update-apply.mjs    hands the pinned spec to pluginManager, never downloads
 test/
   support.mjs         locates a DSH install; converts Windows paths to /mnt form
   itest.mjs           protocol and session core
@@ -279,7 +293,7 @@ test/
   sandboxtest.mjs     real LocalSandboxProvider, boundary + fail-closed cases
   bashtest.mjs        custom-bash fence triage (mock runtime)
   bash-e2e.mjs        custom-bash end to end (real runtime + real llrun)
-  updatetest.mjs      update check against a local git repository
+  updatetest.mjs      update check against a local git repository, install outcomes
   wiringtest.mjs      the update notice really lands at the end of tool output
   denialtest.mjs      the sandbox-denial hint fires on the right messages only
 wsl/
@@ -298,12 +312,12 @@ node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
 node test/bashtest.mjs                       # 19: custom-bash fence triage
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
-node test/updatetest.mjs                     # 52: update check, local git only
+node test/updatetest.mjs                     # 66: update check + install outcomes, local git only
 node test/wiringtest.mjs                     #  9: update notice wiring
-node test/denialtest.mjs                     #  9: sandbox-denial hint (no spawn, runs anywhere)
+node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
 ```
 
-Nine scripts, **145 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Nine scripts, **161 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.
