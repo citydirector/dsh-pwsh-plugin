@@ -96,6 +96,23 @@ function psLiteral(value) {
   return "'" + String(value).replaceAll("'", "''") + "'"
 }
 
+/**
+ * confine 失败时把原始 Win32 错误翻译成能照着做的说明。
+ * 最常见的一种：工作区根的 DACL 没给 WRITE_DAC / WRITE_OWNER。沙箱要在目录上写 DACL 与
+ * SACL（低完整性标签），缺任一条就会以 Win32 5（拒绝访问）失败，而原始错误只有一句
+ * SetNamedSecurityInfoW failed，看不出该改哪个目录、该给什么权限。
+ */
+function describeConfineFailure(error, workspaceRoot) {
+  const raw = String(error?.message ?? error)
+  if (!/SetNamedSecurityInfoW/.test(raw)) return 'pwsh_run could not confine the session: ' + raw
+  const root = typeof workspaceRoot === 'string' ? workspaceRoot : '(unknown)'
+  return 'pwsh_run could not confine the session: ' + raw
+    + '. The sandbox writes a DACL and an integrity label on the workspace root, which needs its DACL to'
+    + ' grant the current user WRITE_DAC and WRITE_OWNER (full control satisfies both; Modify alone does not).'
+    + ' Workspace root was ' + root + ' — grant yourself full control (icacls "' + root + '" /grant "%USERNAME%":(OI)(CI)F)'
+    + ' or start the session from a directory under your user profile.'
+}
+
 /** 合并调用方取消信号与本地超时信号。 */
 function withTimeout(signal, timeoutMs) {
   const timeout = AbortSignal.timeout(timeoutMs)
@@ -181,7 +198,12 @@ export function apply(ctx, config) {
       }
       const sandbox = ctx.get('sandbox')
       if (sandbox === undefined) throw new Error('pwsh_run: ctx.sandbox is absent, so a persistent session cannot be confined. Mount @deepseek-ai/dsh-sandbox-local, or use the native pwsh tool.')
-      const confined = await sandbox.confine(plain, policy, signal)
+      let confined
+      try {
+        confined = await sandbox.confine(plain, policy, signal)
+      } catch (error) {
+        throw new Error(describeConfineFailure(error, policy.workspaceRoot))
+      }
       return await startSession(ctx.subprocess, { executable, argv: confined.argv, cwd, serverSource: SERVER_SOURCE, label: key, maxOutputBytes })
     })()
     pending.catch(() => sessions.delete(key))
@@ -284,7 +306,9 @@ export function apply(ctx, config) {
       try {
         session = await acquire(key, workdir, exec?.agent, exec?.signal)
       } catch (error) {
-        throw new Error('pwsh_run could not start a session: ' + String(error))
+        // acquire 里已经写好人话的错误（沙箱缺席、read-only、confine 失败）不再套第二层前缀。
+        const message = String(error?.message ?? error)
+        throw new Error(message.startsWith('pwsh_run ') ? message : 'pwsh_run could not start a session: ' + message)
       }
 
       const local = withTimeout(exec?.signal, requested + RESPONSE_GRACE_MS)
