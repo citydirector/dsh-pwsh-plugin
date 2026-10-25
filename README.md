@@ -48,7 +48,8 @@ It does **not** disable the stock `tool-bash`: that row already carries `disable
 $dsh = '<desktop install>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # the data root the desktop app itself uses
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.5'
+# <tag> is any released tag; the newest one is what the plugin itself would install
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#<tag>'
 # or, from a local checkout
 & $dsh plugin --profile desktop add 'file:<path to checkout>'
 ```
@@ -199,7 +200,7 @@ Without `pluginManager` — a profile where the `plugin-manager` service is disa
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.5'
+& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#<tag>'
 ```
 
 Note that DSH's stock composition disables the *tool* `plugin_manager` while leaving the *service* running

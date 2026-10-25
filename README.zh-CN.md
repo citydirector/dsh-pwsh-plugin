@@ -45,7 +45,8 @@
 $dsh = '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.5'
+# <tag> 是任意已发布的标签；最新的那个就是插件自己会装的那个
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#<tag>'
 # 或者从本地检出装
 & $dsh plugin --profile desktop add 'file:<检出目录>'
 ```
@@ -177,7 +178,7 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.5'
+& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#<tag>'
 ```
 
 注意 DSH 的默认组合关掉的是**工具** `plugin_manager`，而桌面 profile 上的**服务** `plugin-manager`
