@@ -45,7 +45,7 @@
 $dsh = '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.4'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.5'
 # 或者从本地检出装
 & $dsh plugin --profile desktop add 'file:<检出目录>'
 ```
@@ -147,9 +147,9 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 
 | 方式 | 行为 |
 |---|---|
-| 自动（`autoUpdate: true`，默认） | 查 → 装 → 就地生效。装失败按指数退避重试（5 分钟起、翻倍、封顶 2 小时）；装成功过的版本不再重试。宿主**没有** HMR 时它什么都不装，见下。 |
+| 自动（`autoUpdate: true`，默认） | 查 → 装 → 就地生效。装失败按指数退避重试（5 分钟起、翻倍、封顶 2 小时）；装成功过的版本不再重试。**有调用在跑时绝不装** —— 3 分钟后再看。宿主**没有** HMR 时它什么都不装，见下。 |
 | `pwsh_run_update` 的 `action: "check"` | 只读一次标签，报出 `state` / `running` / `newest release` / `install spec`。不装任何东西。 |
-| `pwsh_run_update` 的 `action: "install"` | 同一条安装路径，只是由人按下去而不是由时钟按下去。 |
+| `pwsh_run_update` 的 `action: "install"` | 同一条安装路径，只是由人按下去而不是由时钟按下去。有调用在跑时报 `install: postponed`。 |
 
 安装走 `ctx.get('pluginManager')` —— 也就是「插件」页面背后那个服务 —— 由它跑 pnpm，失败时回滚
 `package.json`。本插件**从不自己改自己的文件**：它是 profile 的 bundle 依赖，版本钉在
@@ -161,6 +161,11 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 先把上下文清空（`hmr.executing.run(undefined, …)`）再调，重组合才会真的发生；而磁盘上新装的文件与已
 加载的模块已经对不上，HMR 于是驱逐旧模块、import 新模块。实测：从触发到新代码应答 137 ms。
 
+**为什么非要等安静。** 安装会替换插件，而停掉本插件就要 dispose 掉它所有的常驻会话。若此刻有脚本正在
+跑，那与直接断电无异：输出写了一半、调用结束时拿不到状态、会话状态全失。所以更新器先问插件「现在有没有
+调用在跑」（与工具本身用同一套同步的检查加置位，中途塞不进新调用），有就整轮推迟。安装进行中到达的调用
+则等它装完，而不是跟它抢。
+
 宿主**没有** HMR 时，自动路径什么都不做。那种环境装下去只会「磁盘是新版、进程是旧版」—— 需要重启的
 自动更新不算更新，只是一个会说谎的版本号。（`pwsh_run_update` 的 `install` 在这种情况下照样装，因为
 是人按的、人能决定什么时候重启；结果里会诚实地写 `restart-required`。）
@@ -171,7 +176,7 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.4'
+& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.5'
 ```
 
 注意 DSH 的默认组合关掉的是**工具** `plugin_manager`，而桌面 profile 上的**服务** `plugin-manager`
@@ -264,11 +269,14 @@ Remove-Item -Recurse -Force $root
   `Modify`，单靠 `Modify` 会以 `SetNamedSecurityInfoW failed (Win32 5)` 失败。属主不是决定因素：
   `icacls <根目录> /grant "%USERNAME%":(OI)(CI)F` 能救。届时是 fail-closed 报错，不会退化成无边界。
 - 不支持交互式程序与 TTY。
-- **正在跑的会话不会挺过自动更新。** 替换插件会先把它停掉，而停掉本插件就会销毁它的会话 —— 所以真正
-  装上新版的那一次，常驻 pwsh 进程已经不在了，下次调用重新拉起。只存在于该会话里的东西（变量、
+- **升级会换掉会话，但绝不打断正在跑的调用。** 替换插件会先把它停掉，而停掉本插件就会销毁它的会话 ——
+  所以真正装上新版的那一次，常驻 pwsh 进程已经不在了，下次调用重新拉起。只存在于该会话里的东西（变量、
   `Set-Location` 过的目录、import 进来的模块）随之丢失。实测 v0.2.3 → v0.2.4 的一次安装：`$PID` 由
-  24820 变成 15632，安装前设的 `$global:` 变量读回来是空的。版本比会话状态值钱，但这并不等于「什么
-  都没发生」—— 别把不可重建的状态放在里面跨过升级。
+  24820 变成 15632，安装前设的 `$global:` 变量读回来是空的。更新器**不会**做的事是打断在跑的活：
+  自动循环与 `pwsh_run_update` 的 `install` 都会先问插件「现在有没有调用在跑」，有就整轮推迟
+  （循环 3 分钟后再看，工具报 `install: postponed` 且不动 profile），直到会话安静下来。安装进行中到达的
+  调用会先等它装完，而不是建一个马上要被销毁的会话。版本比会话状态值钱，但这并不等于「什么都没发生」
+  —— 别把不可重建的状态放在里面跨过升级。
 
 ## 开发
 
@@ -289,8 +297,8 @@ test/
   bashtest.mjs        custom-bash 围栏分诊（mock runtime）
   bash-e2e.mjs        custom-bash 端到端（真 runtime + 真 llrun）
   updatetest.mjs      更新检查与安装结果（本地 git 仓库）
-  autoupdatetest.mjs  自动更新循环、退避、以及它依赖的 HMR 上下文逃逸
-  wiringtest.mjs      更新提示真的接到工具输出末尾
+  autoupdatetest.mjs  自动更新循环、退避、空闲闸门，以及它依赖的 HMR 上下文逃逸
+  wiringtest.mjs      更新提示真的接到工具输出末尾、安装要等会话空闲
   denialtest.mjs      沙箱拒绝提示只在该触发的报错上触发
 wsl/
   llrun.c llrun      C 垫片与构建产物
@@ -309,12 +317,12 @@ node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-close
 node test/bashtest.mjs                       # 19：custom-bash 围栏分诊
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
 node test/updatetest.mjs                     # 66：更新检查与安装结果（只碰本地 git）
-node test/autoupdatetest.mjs                 # 26：自动安装、退避、HMR 上下文逃逸
-node test/wiringtest.mjs                     # 11：更新提示接线
+node test/autoupdatetest.mjs                 # 32：自动安装、退避、空闲闸门、HMR 上下文逃逸
+node test/wiringtest.mjs                     # 16：更新提示接线、安装等会话空闲
 node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
 ```
 
-十份脚本合计 **190 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十份脚本合计 **201 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

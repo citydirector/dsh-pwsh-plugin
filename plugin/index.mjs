@@ -172,6 +172,16 @@ export function apply(ctx, config) {
     return sandboxPolicy.resolve(session === undefined ? {} : { session })
   }
 
+  /**
+   * 安装闸门：自动更新与手动安装共用。
+   *
+   * 热替换会执行本插件的 effect 清理函数，那里 dispose 掉全部常驻会话——正在跑的脚本
+   * 会连人带马被掐断，与直接断电无异。所以安装前先确认没有调用在跑；置位与检查必须在
+   * 同一个同步块里完成，否则中间会挤进一条新调用。
+   */
+  let activeRuns = 0
+  let installing = false
+
   /** sessionId -> Promise<PwshSession>。用 Promise 占位，避免并发首调用各起一个进程。 */
   const sessions = new Map()
 
@@ -183,6 +193,33 @@ export function apply(ctx, config) {
   const evict = async (key, session) => {
     sessions.delete(key)
     if (session !== undefined && session !== null) await session.dispose()
+  }
+
+  /**
+   * 申请安装权：只有「没有调用在跑、也没有别人在装」时才拿得到。
+   *
+   * 检查与置位放在同一个同步块里，中间不会挤进新调用——否则就会出现
+   * 「刚判断空闲、一条调用起来、安装把它的会话掐掉」这种时序空档。
+   */
+  const beginInstall = () => {
+    if (installing || activeRuns > 0) return false
+    installing = true
+    return true
+  }
+  const endInstall = () => { installing = false }
+  /** 交给自动更新循环：忙就别装，推迟整轮。 */
+  const installGate = { tryAcquire: beginInstall, release: endInstall }
+
+  /**
+   * 安装进行中到达的调用先等着：此刻建出来的会话会在热替换那一刻被 dispose，
+   * 等于刚起就断。等到安装收尾再继续——之后的会话属于安装后的世界。
+   */
+  const waitForInstall = async () => {
+    const deadline = Date.now() + 120000
+    while (installing) {
+      if (Date.now() > deadline) throw new Error('pwsh_run: an update is being installed and has not finished; retry in a moment')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
   }
 
   /** 取一个活着的会话，必要时新建；超出上限淘汰最久未用的。 */
@@ -298,6 +335,7 @@ export function apply(ctx, config) {
     const stopAuto = autoUpdate && checker !== undefined
       ? startAutoUpdate(ctx, checker, {
           log: (line) => { try { ctx.logger?.info?.('pwsh-run: %s', line) } catch { /* 日志缺席不影响更新 */ } },
+          installGate,
           ...(Number.isSafeInteger(config?.autoUpdateDelayMs) && config.autoUpdateDelayMs >= 0 ? { firstDelayMs: config.autoUpdateDelayMs } : {}),
         })
       : undefined
@@ -331,6 +369,7 @@ export function apply(ctx, config) {
       '* action "install" hands the pinned tag spec to DSH\'s own plugin manager (the same service the Plugins page uses), which runs pnpm and rolls back on failure.',
       '* Installing writes the package to the profile. Where the host runs its HMR service, the new code is already live when this returns; otherwise the running process keeps the old modules until DSH restarts. The result says which of the two happened.',
       '* Only vX.Y.Z release tags are considered; pre-releases and branch heads are ignored.',
+      '* An install replaces this plugin in place, which terminates the persistent pwsh sessions. It is therefore refused while a pwsh_run call is running; retry after that call finishes (the automatic updater applies the same rule on its own).',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -382,13 +421,113 @@ export function apply(ctx, config) {
         lines.push('Run this again with action "install", or run: dsh plugin --profile <name> add "' + String(doc.spec) + '"')
         return { text: lines.join('\n') }
       }
-      const outcome = await installReleaseLive(ctx, String(doc.spec), { requestId: 'pwsh-run-update' })
+      // 安装会热替换本插件，从而 dispose 掉所有常驻会话。正有调用在跑时先不装：
+      // 掐断别人跑到一半的脚本，代价远大于晚几十秒。
+      if (!beginInstall()) {
+        lines.push('install: postponed')
+        lines.push('A pwsh_run call is running right now, and installing would terminate its session mid-script. '
+          + 'Retry once that call has finished; auto-update performs this same check on its own.')
+        return { text: lines.join('\n') }
+      }
+      let outcome
+      try {
+        outcome = await installReleaseLive(ctx, String(doc.spec), { requestId: 'pwsh-run-update' })
+      } finally {
+        endInstall()
+      }
       lines.push('install: ' + outcome.outcome)
       lines.push(outcome.text)
       if (outcome.ok !== true && doc.spec !== undefined) lines.push('Manual path: dsh plugin --profile <name> add "' + String(doc.spec) + '"')
       return { text: lines.join('\n') }
     },
   }), 'pwsh-run.update-tool')
+
+  /** 一条调用的实体；activeRuns 由注册处的 execute 在外面加减。 */
+  const runScript = async (args, exec) => {
+    await waitForInstall()
+    const requested = Number.isFinite(args?.timeoutMs) && args.timeoutMs > 0 ? Math.trunc(args.timeoutMs) : defaultTimeoutMs
+    const key = sessionKey(exec)
+    const workdir = typeof args?.workdir === 'string' && args.workdir.length > 0 ? args.workdir : undefined
+
+    // workdir 通过 Set-Location 生效（会话有状态，所以下一次调用会继承）。
+    const script = workdir === undefined
+      ? args.script
+      : 'Set-Location -LiteralPath ' + psLiteral(workdir) + " -ErrorAction Stop\n" + args.script
+
+    let session
+    try {
+      session = await acquire(key, workdir, exec?.agent, exec?.signal)
+    } catch (error) {
+      // acquire 里已经写好人话的错误（沙箱缺席、read-only、confine 失败）不再套第二层前缀。
+      // 用 \b 而不是 'pwsh_run '：几条自带文案是 'pwsh_run: ...' 冒号收尾，带空格的匹配会漏掉它们。
+      const message = String(error?.message ?? error)
+      throw new Error(/^pwsh_run\b/.test(message) ? message : 'pwsh_run could not start a session: ' + message)
+    }
+
+    const local = withTimeout(exec?.signal, requested + RESPONSE_GRACE_MS)
+    let expired = false
+    const onAbort = () => { expired = true }
+    local.addEventListener('abort', onAbort, { once: true })
+
+    let response = null
+    try {
+      response = await Promise.race([
+        session.run(script, requested),
+        new Promise((resolve) => {
+          local.addEventListener('abort', () => resolve(null), { once: true })
+        }),
+      ])
+    } catch (error) {
+      // 会话中途死亡：清掉，下一次调用自动重建。
+      await evict(key, session)
+      const message = String(error)
+      const note = session.dead ? '[' + message + '; a new session starts on the next call]' : '[' + message + ']'
+      return { text: note }
+    } finally {
+      local.removeEventListener('abort', onAbort)
+    }
+
+    const notes = []
+    if (response?.truncated === true) notes.push('[output truncated at ' + String(maxOutputBytes) + ' bytes; redirect to a file if you need it all]')
+    if (response === null || expired) {
+      // 服务端没能在预算内回话：整个进程杀掉重建，不让一条调用拖垮后续。
+      await evict(key, session)
+      notes.push(exec?.signal?.aborted === true
+        ? '[cancelled; the session was terminated and is rebuilt on the next call]'
+        : '[no response from the pwsh session within ' + String(Math.round(requested / 1000)) + 's; the session was terminated and is rebuilt on the next call]')
+    } else if (session.dead) {
+      await evict(key, session)
+      notes.push('[' + String(session.deathReason) + '; a new session starts on the next call]')
+    } else if (response.timedOut) {
+      // 服务端 Stop() 能打断脚本，但脚本内 Start-Process 起的子进程不会随之回收
+      // （实测子进程仍存活）。杀掉整个会话才能靠 Job Object 连带清干净。
+      await evict(key, session)
+      notes.push('[timed out after ' + String(Math.round(requested / 1000)) + 's; partial output above; the session was terminated and is rebuilt on the next call]')
+    }
+
+    const body = []
+    for (const line of response?.out ?? []) body.push(line)
+    for (const line of response?.warn ?? []) body.push('WARNING: ' + line)
+    for (const line of response?.verbose ?? []) body.push('VERBOSE: ' + line)
+    if (response?.sentinel === 'threw') body.push('[script threw]')
+    // 更新提示只在第一次查到新版本时挂一行，之后不再刷。自动更新关掉时给出可照做的命令，
+    // 打开时说清楚它自己会装——否则模型会把这个版本当成「需要人工干预」。
+    const fresh = checker?.announce
+    if (fresh !== undefined && autoUpdate === false) {
+      notes.push('[a newer pwsh-run release exists: ' + fresh.latest + ' (running ' + String(checker?.version ?? '?') +
+        '). Install it with dsh plugin --profile <name> add "' + fresh.spec + '". ' +
+        'Auto-update is off in this profile (config.autoUpdate: false).]')
+    }
+    const text = [body.join('\n')]
+      .concat(response?.err ?? [])
+      .concat(response?.exceptions ?? [])
+      .concat(response?.fatal ?? [])
+      .join('\n')
+    const denial = describeExecDenial(text)
+    if (denial !== null) notes.push(denial)
+    const all = [text].concat(notes).filter((part) => part.length > 0).join('\n')
+    return { text: all.length > 0 ? all : '(no output)' }
+  }
 
   // 工具注册也要挂到 effect 上：live patchReload 会重新 apply 本模块，
   // 旧注册不撤的话 ctx.tools.register 会抛 "already registered"。
@@ -416,88 +555,14 @@ export function apply(ctx, config) {
       render: (_args, value) => [{ type: 'text', text: value.text }],
     },
     async execute(args, exec) {
-      const requested = Number.isFinite(args?.timeoutMs) && args.timeoutMs > 0 ? Math.trunc(args.timeoutMs) : defaultTimeoutMs
-      const key = sessionKey(exec)
-      const workdir = typeof args?.workdir === 'string' && args.workdir.length > 0 ? args.workdir : undefined
-
-      // workdir 通过 Set-Location 生效（会话有状态，所以下一次调用会继承）。
-      const script = workdir === undefined
-        ? args.script
-        : 'Set-Location -LiteralPath ' + psLiteral(workdir) + " -ErrorAction Stop\n" + args.script
-
-      let session
+      // 自动更新与手动安装都要先看这个计数：热替换会 dispose 全部会话，
+      // 正跑着的脚本会被连人带马掐断。
+      activeRuns += 1
       try {
-        session = await acquire(key, workdir, exec?.agent, exec?.signal)
-      } catch (error) {
-        // acquire 里已经写好人话的错误（沙箱缺席、read-only、confine 失败）不再套第二层前缀。
-        // 用 \b 而不是 'pwsh_run '：几条自带文案是 'pwsh_run: ...' 冒号收尾，带空格的匹配会漏掉它们。
-        const message = String(error?.message ?? error)
-        throw new Error(/^pwsh_run\b/.test(message) ? message : 'pwsh_run could not start a session: ' + message)
-      }
-
-      const local = withTimeout(exec?.signal, requested + RESPONSE_GRACE_MS)
-      let expired = false
-      const onAbort = () => { expired = true }
-      local.addEventListener('abort', onAbort, { once: true })
-
-      let response = null
-      try {
-        response = await Promise.race([
-          session.run(script, requested),
-          new Promise((resolve) => {
-            local.addEventListener('abort', () => resolve(null), { once: true })
-          }),
-        ])
-      } catch (error) {
-        // 会话中途死亡：清掉，下一次调用自动重建。
-        await evict(key, session)
-        const message = String(error)
-        const note = session.dead ? '[' + message + '; a new session starts on the next call]' : '[' + message + ']'
-        return { text: note }
+        return await runScript(args, exec)
       } finally {
-        local.removeEventListener('abort', onAbort)
+        activeRuns -= 1
       }
-
-      const notes = []
-      if (response?.truncated === true) notes.push('[output truncated at ' + String(maxOutputBytes) + ' bytes; redirect to a file if you need it all]')
-      if (response === null || expired) {
-        // 服务端没能在预算内回话：整个进程杀掉重建，不让一条调用拖垮后续。
-        await evict(key, session)
-        notes.push(exec?.signal?.aborted === true
-          ? '[cancelled; the session was terminated and is rebuilt on the next call]'
-          : '[no response from the pwsh session within ' + String(Math.round(requested / 1000)) + 's; the session was terminated and is rebuilt on the next call]')
-      } else if (session.dead) {
-        await evict(key, session)
-        notes.push('[' + String(session.deathReason) + '; a new session starts on the next call]')
-      } else if (response.timedOut) {
-        // 服务端 Stop() 能打断脚本，但脚本内 Start-Process 起的子进程不会随之回收
-        // （实测子进程仍存活）。杀掉整个会话才能靠 Job Object 连带清干净。
-        await evict(key, session)
-        notes.push('[timed out after ' + String(Math.round(requested / 1000)) + 's; partial output above; the session was terminated and is rebuilt on the next call]')
-      }
-
-      const body = []
-      for (const line of response?.out ?? []) body.push(line)
-      for (const line of response?.warn ?? []) body.push('WARNING: ' + line)
-      for (const line of response?.verbose ?? []) body.push('VERBOSE: ' + line)
-      if (response?.sentinel === 'threw') body.push('[script threw]')
-      // 更新提示只在第一次查到新版本时挂一行，之后不再刷。自动更新关掉时给出可照做的命令，
-      // 打开时说清楚它自己会装——否则模型会把这个版本当成「需要人工干预」。
-      const fresh = checker?.announce
-      if (fresh !== undefined && autoUpdate === false) {
-        notes.push('[a newer pwsh-run release exists: ' + fresh.latest + ' (running ' + String(checker?.version ?? '?') +
-          '). Install it with dsh plugin --profile <name> add "' + fresh.spec + '". ' +
-          'Auto-update is off in this profile (config.autoUpdate: false).]')
-      }
-      const text = [body.join('\n')]
-        .concat(response?.err ?? [])
-        .concat(response?.exceptions ?? [])
-        .concat(response?.fatal ?? [])
-        .join('\n')
-      const denial = describeExecDenial(text)
-      if (denial !== null) notes.push(denial)
-      const all = [text].concat(notes).filter((part) => part.length > 0).join('\n')
-      return { text: all.length > 0 ? all : '(no output)' }
     },
   }), 'pwsh-run.tool')
 }

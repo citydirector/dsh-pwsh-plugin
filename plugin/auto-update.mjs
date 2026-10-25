@@ -17,6 +17,12 @@
  * 为什么不自己下载覆盖文件
  *   见 update-apply.mjs 的头注释：本插件是 profile 的 bundle 依赖，版本钉在
  *   package.json 与 pnpm-lock.yaml 里，绕开包管理器改文件会立刻让 lockfile 与磁盘不一致。
+ *
+ * 为什么必须等到「安静」才装
+ *   热替换会执行本插件的 effect 清理函数，那里要 dispose 掉所有常驻 pwsh 会话。
+ *   若此刻正有一条调用在跑，它会连带被掐断——脚本跑到一半、半截输出、会话状态全丢，
+ *   与直接断电没有区别。所以安装前要问宿主「现在安静吗」，忙就整个推迟，
+ *   而不是装完再说「可惜刚才那条被打断了」。
  */
 
 import { installRelease } from './update-apply.mjs'
@@ -27,6 +33,8 @@ const FIRST_DELAY_MS = 90 * 1000
 const INTERVAL_MS = 12 * 60 * 60 * 1000
 const RETRY_BASE_MS = 5 * 60 * 1000
 const RETRY_MAX_MS = 2 * 60 * 60 * 1000
+/** 查出有新版但有调用正跑着：过一会儿再看一眼，别等到下一轮 12 小时。 */
+const BUSY_RETRY_MS = 3 * 60 * 1000
 
 /**
  * 在 HMR 事务之外装一个发布。
@@ -74,12 +82,17 @@ export function startAutoUpdate(ctx, checker, options = {}) {
   const retryBaseMs = options.retryBaseMs ?? RETRY_BASE_MS
   const retryMaxMs = options.retryMaxMs ?? RETRY_MAX_MS
 
+  const installGate = options.installGate
+  const busyRetryMs = options.busyRetryMs ?? BUSY_RETRY_MS
+
   /** 已经自动装过的版本：同一个版本装成功过就不再装第二次。 */
   const attempted = new Set()
   let timer
   let stopped = false
   let running = false
   let failures = 0
+  /** 「忙，先不装」只记一次日志：每几分钟重复一行会把日志刷满。 */
+  let busyNoted = false
 
   const schedule = (delayMs) => {
     if (stopped) return
@@ -97,23 +110,37 @@ export function startAutoUpdate(ctx, checker, options = {}) {
         // 装上也换不掉正在跑的模块：留着提示那条路，别制造「装了但没生效」。
         log('auto update: ' + state.latest + ' is available, but this host runs no HMR — leaving it for a manual upgrade')
         failures = 0
-      } else if (state.state === 'available' && !attempted.has(state.latest)) {
-        const doc = checker.document()
-        const spec = doc.spec
-        if (typeof spec === 'string' && spec.length > 0) {
-          attempted.add(state.latest)
-          log('auto update: installing ' + state.latest + ' from ' + spec)
-          const outcome = await installReleaseLive(ctx, spec, { requestId: 'pwsh-run-auto-update', log })
-          log('auto update: ' + outcome.outcome + ' — ' + outcome.text)
-          if (outcome.ok !== true) {
-            // 装失败要能重来：把记录撤掉，交给退避后的下一轮。
-            attempted.delete(state.latest)
-            failures += 1
-            next = Math.min(retryMaxMs, retryBaseMs * 2 ** (failures - 1))
-          } else {
-            failures = 0
+      } else if (state.state === 'available' && !attempted.has(state.latest) && installGate?.tryAcquire() !== false) {
+        try {
+          const doc = checker.document()
+          const spec = doc.spec
+          if (typeof spec === 'string' && spec.length > 0) {
+            busyNoted = false
+            attempted.add(state.latest)
+            log('auto update: installing ' + state.latest + ' from ' + spec)
+            const outcome = await installReleaseLive(ctx, spec, { requestId: 'pwsh-run-auto-update', log })
+            log('auto update: ' + outcome.outcome + ' — ' + outcome.text)
+            if (outcome.ok !== true) {
+              // 装失败要能重来：把记录撤掉，交给退避后的下一轮。
+              attempted.delete(state.latest)
+              failures += 1
+              next = Math.min(retryMaxMs, retryBaseMs * 2 ** (failures - 1))
+            } else {
+              failures = 0
+            }
           }
+        } finally {
+          // 安装可能把本插件本身驱逐掉，于是这个 release 落在旧实例的闭包上，
+          // 只是把旧变量置回 false——新实例有它自己的闸门。
+          installGate?.release()
         }
+      } else if (state.state === 'available' && !attempted.has(state.latest)) {
+        // 有新版，但此刻有调用在跑：热替换会掐断它。整轮推迟，几分钟后再看。
+        if (!busyNoted) {
+          busyNoted = true
+          log('auto update: ' + state.latest + ' is available, but a call is running — postponing the install until the session is idle')
+        }
+        next = busyRetryMs
       } else if (state.state === 'failed') {
         failures += 1
         next = Math.min(retryMaxMs, retryBaseMs * 2 ** (failures - 1))

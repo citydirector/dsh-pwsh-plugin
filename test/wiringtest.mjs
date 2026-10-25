@@ -52,23 +52,26 @@ const subprocess = {
   },
 }
 
-/** 起一个插件实例，返回 { registration, dispose }。 */
-function boot(config) {
+/** 起一个插件实例，返回 { registration, update, dispose }。services 用来补 pluginManager 之类的服务。 */
+function boot(config, services = {}) {
   let registration = null
+  let update = null
   const disposers = []
   const ctx = {
     subprocess,
     tools: {
       register(def) {
-        registration = def
+        if (def?.name === 'pwsh_run_update') update = def
+        else registration = def
         return () => {
-          registration = null
+          if (def?.name === 'pwsh_run_update') update = null
+          else registration = null
         }
       },
     },
     get(name) {
       if (name === 'workingDirectory') return { async ensure() { return process.cwd() } }
-      return undefined
+      return services[name]
     },
     effect(fn) {
       const dispose = fn()
@@ -81,6 +84,7 @@ function boot(config) {
   apply(ctx, config)
   return {
     registration,
+    update,
     dispose() {
       for (const d of disposers) {
         try {
@@ -141,6 +145,34 @@ try {
   check('自动更新开着时不挂提示', !autoOut.text.includes('a newer pwsh-run release exists'), JSON.stringify(autoOut.text))
   check('脚本本体照常返回', autoOut.text === 'auto-line', JSON.stringify(autoOut.text))
   auto.dispose()
+
+  // ── 1c. 有调用在跑时，手动安装也要推迟：热替换会掐断那条调用 ─────────────
+  console.log('\n[1c] 调用在跑时推迟安装')
+  {
+    const attempts = []
+    const manager = {
+      async installBundle(spec, options) {
+        attempts.push({ spec, requestId: options?.requestId })
+        return { application: 'applied', version: '9.9.9' }
+      },
+    }
+    const gate = boot({ allowUnconfined: true, autoUpdate: false }, { pluginManager: manager })
+    await new Promise((resolve) => setTimeout(resolve, 3000))
+
+    // 一条跑到一半的调用：闸门应当把它算进去。
+    const slow = gate.registration.execute({ script: 'Start-Sleep -Milliseconds 1500' }, exec)
+    const postponed = await gate.update.execute({ action: 'install' })
+    check('忙时安装被推迟', /install: postponed/.test(postponed.text), JSON.stringify(postponed.text))
+    check('推迟时说明原因', /call is running right now/.test(postponed.text), JSON.stringify(postponed.text))
+    check('推迟时一次都没装', attempts.length === 0, 'attempts=' + attempts.length)
+    await slow
+
+    // 空闲下来之后同一条命令就该真的装上。
+    const done = await gate.update.execute({ action: 'install' })
+    check('闲时照常安装', /install: applied/.test(done.text), JSON.stringify(done.text))
+    check('闲时装了一次', attempts.length === 1, 'attempts=' + attempts.length)
+    gate.dispose()
+  }
 
   // ── 2. updateCheck: false 时完全不查 ────────────────────────────────────
   console.log('\n[2] updateCheck: false')

@@ -1358,7 +1358,8 @@ export async function installReleaseLive(ctx, spec, options = {}) {
 `autoUpdate: true` 时**不发**提示。
 
 十份脚本合计 **190 项**（itest 16 / plugintest 15 / e2e 8 / sandboxtest 7 / bashtest 19 / bash-e2e 11 /
-updatetest 66 / autoupdatetest 26 / wiringtest 11 / denialtest 11）。
+updatetest 66 / autoupdatetest 26 / wiringtest 11 / denialtest 11）。第二十八节加了两节共 11 项，
+当前总数以那一节为准。
 
 ### 没有 HMR 就完全不装
 
@@ -1396,3 +1397,76 @@ profile 的插件配置里写 `autoUpdate: false`，行为即回到第十九节�
 另有一条相关观察：插件在自己发起的重组合里被 stop 掉，`await` 它的 fiber 时并不会把调用方一起拖死
 （探针 111 ms 就返回了），因为 reconciler 停的是旧 fiber，而发起的代码属于被驱逐的旧模块，仍在
 旧的执行栈上跑完。
+
+## 二十八、自动更新不许打断正在跑的调用（2026-10-25）
+
+### 问题
+
+第二十七节把「无感」做实之后，出现一个新的危险：热替换会执行本插件注册的 effect 清理函数，
+而那里的第一件事是 `session.dispose()`。若此刻正有一条 `pwsh_run` 调用在跑，它会被连人带马掐断 ——
+脚本写了一半、调用结束时拿不到状态、会话里的变量与目录全失。用户的话说得很准：*「等于直接断电」*。
+
+### 解法：安装闸门
+
+`plugin/index.mjs` 里新增两个变量，作用域在 `apply` 内（热替换后是新实例，各有一份）：
+
+```js
+let activeRuns = 0
+let installing = false
+```
+
+`pwsh_run` 的注册体变成一层薄包装，只负责加减计数，实体挪到 `runScript`：
+
+```js
+async execute(args, exec) {
+  activeRuns += 1
+  try { return await runScript(args, exec) }
+  finally { activeRuns -= 1 }
+}
+```
+
+闸门本体：
+
+```js
+const beginInstall = () => {
+  if (installing || activeRuns > 0) return false
+  installing = true
+  return true
+}
+const endInstall = () => { installing = false }
+const installGate = { tryAcquire: beginInstall, release: endInstall }
+```
+
+检查与置位必须在同一个同步块里完成。若拆成「先问、await 点什么、再置位」，中间就能挤进一条新调用，
+于是刚判断完空闲就被打断 —— 这正是要防的时序空档。
+
+### 三条接线
+
+| 位置 | 行为 |
+|---|---|
+| 自动循环 `startAutoUpdate` | `installGate?.tryAcquire()` 返回 false 时整轮推迟，`busyRetryMs`（默认 3 分钟）后再看，而不是等 12 小时。「忙，先不装」只记一次日志。 |
+| `pwsh_run_update action: "install"` | 拿不到闸门就报 `install: postponed` 并说明原因，**不动 profile**。 |
+| 安装进行中到达的 `pwsh_run` | `waitForInstall()` 每 100 ms 轮询、最多等 120 秒；期间不会去建一个马上要被 dispose 的会话。 |
+
+`tryAcquire` 用可选链调用，缺省时（`options.installGate` 未传）视为「不设闸门」—— 只有测试与
+其它复用方会这么用。
+
+### 测试
+
+`test/autoupdatetest.mjs` 新增 [3b] 节 6 项：忙时一次都不装、日志说清在等安静、忙说明只记一次、
+闲下来就装、装了才拿到闸门、装完把闸门还回去 —— 其中 `installGate` 是记录 `acquired` / `released`
+的假闸门。26 → 32 项。
+
+`test/wiringtest.mjs` 新增 [1c] 节 5 项：用真 `pwsh` 起一条 `Start-Sleep -Milliseconds 1500` 的调用，
+在它跑着的时候按 `pwsh_run_update action: "install"`，断言 `install: postponed`、断言 profile
+一次都没被动过（假 `pluginManager` 的 `attempts` 为空）；等那条调用结束后再按一次，断言这次真装上了。
+`boot()` 因此扩了两个能力：可注入服务（`services`），以及同时抓取 `pwsh_run` 与 `pwsh_run_update`
+两个注册。11 → 16 项。
+
+回归：十份脚本合计 **201 项**（itest 16 / plugintest 15 / e2e 8 / sandboxtest 7 / bashtest 19 /
+bash-e2e 11 / updatetest 66 / autoupdatetest 32 / wiringtest 16 / denialtest 11）。
+
+### 为什么不用「先提示、再等下一次」那套
+
+那正是 `autoUpdate: false` 的行为，也正是用户不想要的那套：要人盯着、要人点。把「等安静」做进安装
+路径，既保住了无感，又不欠任何人一笔「刚才那条被打断了」的债。

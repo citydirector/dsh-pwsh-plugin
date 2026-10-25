@@ -147,6 +147,38 @@ try {
     check('停止后不再装', manager.attempts.length === after, 'attempts=' + manager.attempts.length)
   }
 
+  // ── 3b. 有调用在跑时先不装：热替换会掐断它 ────────────────────────────────
+  console.log('\n[3b] 忙时推迟安装')
+  {
+    const state = makeFakeHmr()
+    const manager = makeFakeManager(state, [{ application: 'applied', version: '0.0.2' }])
+    const ctx = { get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : undefined) }
+    const checker = new UpdateChecker({ source: { kind: 'git', url: release.url, spec: release.spec }, version: '0.0.1' })
+    let busy = true
+    let acquired = 0
+    let released = 0
+    const installGate = {
+      tryAcquire() {
+        if (busy) return false
+        acquired += 1
+        return true
+      },
+      release() { released += 1 },
+    }
+    const logs = []
+    const stop = startAutoUpdate(ctx, checker, { firstDelayMs: 5, intervalMs: 20, busyRetryMs: 25, installGate, log: (line) => logs.push(line) })
+    await waitFor(() => logs.some((line) => /postponing the install/.test(line)))
+    check('忙时一次都没装', manager.attempts.length === 0, 'attempts=' + manager.attempts.length)
+    check('日志说清在等安静', logs.some((line) => /a call is running — postponing/.test(line)), JSON.stringify(logs))
+    check('忙说明只记一次', logs.filter((line) => /postponing the install/.test(line)).length === 1, JSON.stringify(logs))
+    busy = false
+    await waitFor(() => manager.attempts.length >= 1)
+    check('闲下来就装', manager.attempts.length === 1, 'attempts=' + manager.attempts.length)
+    check('装了才拿到闸门', acquired === 1, 'acquired=' + acquired)
+    check('装完把闸门还回去', released >= 1, 'released=' + released)
+    stop()
+  }
+
   // ── 4. 装失败要撤记录并退避 ──────────────────────────────────────────────
   console.log('\n[4] 失败退避')
   {

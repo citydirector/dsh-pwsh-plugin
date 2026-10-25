@@ -48,7 +48,7 @@ It does **not** disable the stock `tool-bash`: that row already carries `disable
 $dsh = '<desktop install>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # the data root the desktop app itself uses
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.4'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.5'
 # or, from a local checkout
 & $dsh plugin --profile desktop add 'file:<path to checkout>'
 ```
@@ -164,9 +164,9 @@ tags, and a newer `vX.Y.Z` is installed on the spot. On a host that runs DSH's H
 
 | How | What happens |
 |---|---|
-| Automatic (`autoUpdate: true`, default) | Checks, installs, and takes effect in place. A failed install backs off exponentially (5 min doubling to 2 h) and tries again; a version that installed successfully is not retried. On a host **without** HMR it installs nothing — see below. |
+| Automatic (`autoUpdate: true`, default) | Checks, installs, and takes effect in place. A failed install backs off exponentially (5 min doubling to 2 h) and tries again; a version that installed successfully is not retried. **Never while a call is running** — it retries in 3 minutes. On a host **without** HMR it installs nothing — see below. |
 | `pwsh_run_update` `action: "check"` | Reads the tags once and reports `state` / `running` / `newest release` / `install spec`. Installs nothing. |
-| `pwsh_run_update` `action: "install"` | The same install, driven by hand instead of by the clock. |
+| `pwsh_run_update` `action: "install"` | The same install, driven by hand instead of by the clock. Reports `install: postponed` if a call is running. |
 
 The install goes through `ctx.get('pluginManager')` — the service behind the Plugins page — which runs pnpm
 and rolls `package.json` back on failure. The plugin never edits its own files: it is a bundle dependency
@@ -180,6 +180,12 @@ new files on disk, old modules running. Clearing the context first (`hmr.executi
 recomposition happen, and because the freshly installed files on disk no longer match what is loaded, HMR
 evicts the old modules and imports the new ones. Measured: 137 ms from the trigger to the new code answering.
 
+**Why it waits for an idle moment.** An install replaces the plugin, and stopping the plugin disposes every
+persistent session it owns. Done while a script is in flight, that is a power cut: half-written output, a call
+that ends with no exit status, session state gone. So the updater asks the plugin whether any call is running
+(same synchronous check-and-set the tool uses, so a call cannot slip in between), and postpones the whole
+attempt when one is. Calls that arrive mid-install wait for it instead of racing it.
+
 On a host **without** HMR the automatic path does nothing at all. Installing there would put the new files
 on disk while the running process keeps the old modules — an automatic update that needs a restart is not
 an update, it is a version number that lies. (`pwsh_run_update action: "install"` still installs in that
@@ -192,7 +198,7 @@ Without `pluginManager` — a profile where the `plugin-manager` service is disa
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.4'
+& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.5'
 ```
 
 Note that DSH's stock composition disables the *tool* `plugin_manager` while leaving the *service* running
@@ -295,13 +301,17 @@ derives every path from its own location and re-checks the disk for leaks.
   "%USERNAME%":(OI)(CI)F` fixes a root you do not own. Confinement fails closed with that message instead of
   running unconfined.
 - No interactive programs and no TTY.
-- **A running session does not survive an automatic update.** Replacing a plugin stops it, and stopping
-  this plugin disposes its sessions — so on the install that actually lands a new version, the persistent
-  pwsh process is gone and the next call rebuilds it. Anything held only in that session (variables,
-  `Set-Location`, imported modules) is lost. Measured across a v0.2.3 → v0.2.4 install: `$PID` changed from
-  24820 to 15632 and a `$global:` variable set before the install read back empty. The version is worth more
-  than the session state, but it is not "nothing happened" — do not hold unrecoverable state in it across
-  an upgrade.
+- **An update replaces the session, but never cuts a call short.** Replacing a plugin stops it, and stopping
+  this plugin disposes its sessions, so the install that lands a new version leaves the persistent pwsh
+  process gone and the next call rebuilds it: anything held only in that session (variables, `Set-Location`,
+  imported modules) is lost. Measured across a v0.2.3 → v0.2.4 install: `$PID` changed from 24820 to 15632 and a
+  `$global:` variable set before the install read back empty. What the updater does **not** do is interrupt
+  work in flight: both the automatic loop and `pwsh_run_update action: "install"` ask the plugin whether a call
+  is running, and if one is, the install is postponed (the loop retries in 3 minutes, the tool reports
+  `install: postponed` and leaves the profile untouched) until the session is idle. Calls that arrive while an
+  install is in progress wait for it to finish instead of starting a session that is about to be disposed.
+  The version is worth more than the session state, but it is not "nothing happened" — do not hold
+  unrecoverable state in it across an upgrade.
 
 ## Development
 
@@ -322,8 +332,8 @@ test/
   bashtest.mjs        custom-bash fence triage (mock runtime)
   bash-e2e.mjs        custom-bash end to end (real runtime + real llrun)
   updatetest.mjs      update check against a local git repository, install outcomes
-  autoupdatetest.mjs  the automatic loop, its back-off, and the HMR-context escape it depends on
-  wiringtest.mjs      the update notice really lands at the end of tool output
+  autoupdatetest.mjs  the automatic loop, its back-off, its idle gate, and the HMR-context escape it needs
+  wiringtest.mjs      the update notice lands at the end of tool output, and installs wait for an idle session
   denialtest.mjs      the sandbox-denial hint fires on the right messages only
 wsl/
   llrun.c llrun      the C shim and its build
@@ -342,12 +352,12 @@ node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-
 node test/bashtest.mjs                       # 19: custom-bash fence triage
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
 node test/updatetest.mjs                     # 66: update check + install outcomes, local git only
-node test/autoupdatetest.mjs                 # 26: automatic install, back-off, HMR-context escape
-node test/wiringtest.mjs                     # 11: update notice wiring
+node test/autoupdatetest.mjs                 # 32: automatic install, back-off, idle gate, HMR-context escape
+node test/wiringtest.mjs                     # 16: update notice wiring, installs wait for an idle session
 node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
 ```
 
-Ten scripts, **190 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Ten scripts, **201 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.
