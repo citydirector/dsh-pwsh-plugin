@@ -307,8 +307,9 @@ export function apply(ctx, config) {
         session = await acquire(key, workdir, exec?.agent, exec?.signal)
       } catch (error) {
         // acquire 里已经写好人话的错误（沙箱缺席、read-only、confine 失败）不再套第二层前缀。
+        // 用 \b 而不是 'pwsh_run '：几条自带文案是 'pwsh_run: ...' 冒号收尾，带空格的匹配会漏掉它们。
         const message = String(error?.message ?? error)
-        throw new Error(message.startsWith('pwsh_run ') ? message : 'pwsh_run could not start a session: ' + message)
+        throw new Error(/^pwsh_run\b/.test(message) ? message : 'pwsh_run could not start a session: ' + message)
       }
 
       const local = withTimeout(exec?.signal, requested + RESPONSE_GRACE_MS)

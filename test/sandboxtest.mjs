@@ -104,7 +104,8 @@ WS_POLICY.mode = 'workspace-write'
   try {
     await reg2.execute({ script: 'Write-Output 1' }, { agent: { session: { id: 'sbx-nopolicy', header: { cwd: WS } } }, signal: undefined })
   } catch (e) { errText = String(e?.message ?? e) }
-  check('policy-absent-refused', errText.includes('sandboxPolicy is absent') && errText.includes('allowUnconfined'), JSON.stringify(errText.slice(0, 80)))
+  check('policy-absent-refused', errText.includes('sandboxPolicy is absent') && errText.includes('allowUnconfined')
+    && !errText.includes('could not start a session: pwsh_run'), JSON.stringify(errText.slice(0, 80)))
   for (const d of disposed2.reverse()) if (typeof d === 'function') d()
 }
 
