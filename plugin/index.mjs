@@ -31,7 +31,7 @@
 
 import { readFileSync } from 'node:fs'
 import { DEFAULT_MAX_OUTPUT_BYTES, bootArgv, startSession } from './session.mjs'
-import { installRelease } from './update-apply.mjs'
+import { installReleaseLive, startAutoUpdate } from './auto-update.mjs'
 import { UpdateChecker } from './update-check.mjs'
 
 /** 加载器诊断里显示的插件名。 */
@@ -154,8 +154,11 @@ export function apply(ctx, config) {
   const maxOutputBytes = Number.isSafeInteger(config?.maxOutputBytes) && config.maxOutputBytes > 0 ? config.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES
   // 明确放弃边界的唯一开关：策略服务缺席时默认拒绝启动，只有这里能改主意。
   const allowUnconfined = config?.allowUnconfined === true
-  // 更新检查：查到新版本时在当次调用的输出末尾挂一行。装不装由用户显式调 pwsh_run_update 决定。
+  // 更新检查：查到新版本时在当次调用的输出末尾挂一行。
   const updateCheck = config?.updateCheck !== false
+  // 自动更新：查到新版本就自己装上，装上即生效（HMR 在场时无需重启）。默认开——
+  // 用户装这个插件图的是「命令不再被转义」，不该再手动盯版本。
+  const autoUpdate = config?.autoUpdate !== false
 
   // 沙箱服务每次启动会话时再取：插件 apply 可能早于沙箱服务挂载，
   // 而沙箱缺席时插件仍需能加载（启动会话时给出明确错误即可）。
@@ -289,9 +292,24 @@ export function apply(ctx, config) {
         },
       })
     : undefined
+  // 自动更新循环自成一个 effect：它比 checker 多一层「装上即生效」的动作，
+  // 失败要退避、要记装过的版本，这些都在 auto-update.mjs 里。
   ctx.effect(() => {
-    checker?.start()
-    return () => checker?.stop()
+    const stopAuto = autoUpdate && checker !== undefined
+      ? startAutoUpdate(ctx, checker, {
+          log: (line) => { try { ctx.logger?.info?.('pwsh-run: %s', line) } catch { /* 日志缺席不影响更新 */ } },
+          ...(Number.isSafeInteger(config?.autoUpdateDelayMs) && config.autoUpdateDelayMs >= 0 ? { firstDelayMs: config.autoUpdateDelayMs } : {}),
+        })
+      : undefined
+    return () => stopAuto?.()
+  }, 'pwsh-run.auto-update')
+
+  // 提示用的定时检查只在自动更新关闭时才起：自动更新的循环自己就会调 check()，
+  // 两边都开着等于每 12 小时查两次。
+  ctx.effect(() => {
+    if (checker === undefined || autoUpdate) return undefined
+    checker.start()
+    return () => checker.stop()
   }, 'pwsh-run.update')
 
   /**
@@ -311,7 +329,7 @@ export function apply(ctx, config) {
       'Check for, and optionally install, a newer release of the pwsh_run plugin.',
       '* action "check" reads the release tags once and reports the verdict; it never installs anything.',
       '* action "install" hands the pinned tag spec to DSH\'s own plugin manager (the same service the Plugins page uses), which runs pnpm and rolls back on failure.',
-      '* Installing writes the package to the profile. The running process keeps the old modules because a bundle row cannot carry a cache-busting URL — restart DSH to load the new code. The result says which of the two happened.',
+      '* Installing writes the package to the profile. Where the host runs its HMR service, the new code is already live when this returns; otherwise the running process keeps the old modules until DSH restarts. The result says which of the two happened.',
       '* Only vX.Y.Z release tags are considered; pre-releases and branch heads are ignored.',
     ].join('\n'),
     parameters: {
@@ -364,7 +382,7 @@ export function apply(ctx, config) {
         lines.push('Run this again with action "install", or run: dsh plugin --profile <name> add "' + String(doc.spec) + '"')
         return { text: lines.join('\n') }
       }
-      const outcome = await installRelease(ctx.get('pluginManager'), String(doc.spec), { requestId: 'pwsh-run-update' })
+      const outcome = await installReleaseLive(ctx, String(doc.spec), { requestId: 'pwsh-run-update' })
       lines.push('install: ' + outcome.outcome)
       lines.push(outcome.text)
       if (outcome.ok !== true && doc.spec !== undefined) lines.push('Manual path: dsh plugin --profile <name> add "' + String(doc.spec) + '"')
@@ -463,12 +481,13 @@ export function apply(ctx, config) {
       for (const line of response?.warn ?? []) body.push('WARNING: ' + line)
       for (const line of response?.verbose ?? []) body.push('VERBOSE: ' + line)
       if (response?.sentinel === 'threw') body.push('[script threw]')
-      // 更新提示只在第一次查到新版本时挂一行，之后不再刷。
+      // 更新提示只在第一次查到新版本时挂一行，之后不再刷。自动更新关掉时给出可照做的命令，
+      // 打开时说清楚它自己会装——否则模型会把这个版本当成「需要人工干预」。
       const fresh = checker?.announce
-      if (fresh !== undefined) {
+      if (fresh !== undefined && autoUpdate === false) {
         notes.push('[a newer pwsh-run release exists: ' + fresh.latest + ' (running ' + String(checker?.version ?? '?') +
           '). Install it with dsh plugin --profile <name> add "' + fresh.spec + '". ' +
-          'Nothing is installed automatically.]')
+          'Auto-update is off in this profile (config.autoUpdate: false).]')
       }
       const text = [body.join('\n')]
         .concat(response?.err ?? [])

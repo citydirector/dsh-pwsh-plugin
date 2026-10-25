@@ -45,7 +45,7 @@
 $dsh = '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.3'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.4'
 # 或者从本地检出装
 & $dsh plugin --profile desktop add 'file:<检出目录>'
 ```
@@ -108,7 +108,9 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 | `maxSessions` | `4` | 同时存活的会话上限（每个 agent 工作区一个）。 |
 | `maxOutputBytes` | `8388608` | 单次调用的输出收集上限（8MB）。截断会明确报出来，不静默。 |
 | `allowUnconfined` | `false` | `true` = 沙箱策略服务缺席时也起会话。 |
-| `updateCheck` | `true` | 定期查发布标签。查与装分开：这里只查，装由 `pwsh_run_update` 做。 |
+| `updateCheck` | `true` | 定期查发布标签。查与装分开：这里只查，装由 `pwsh_run_update` 与自动更新做。 |
+| `autoUpdate` | `true` | 自己装上更新，宿主有 HMR 时**不需要重启**即生效。 |
+| `autoUpdateDelayMs` | `90000` | 自动检查前的等待，避免与启动流程抢 pnpm。 |
 
 `allowUnconfined` 是唯一一条「明知故犯」的开关。正常部署下 `ctx.sandboxPolicy` 一定在；缺席说明组合
 不完整，这时插件**拒绝启动**，而不是悄悄跑一个不受约束的会话。
@@ -137,28 +139,39 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 **`read-only` 模式不启动。** 该模式下 pwsh 是 ConstrainedLanguage，连 runspace 都建不起来。工具会
 明确报错并提示改用内置 `pwsh` 工具（它在 read-only 下可用）。
 
-## 自动更新检查
+## 更新
 
-启动 5 秒后查一次发布标签，之后每 12 小时一次。查到新版本时在下次 `pwsh_run` 输出末尾挂一行（每个
-进程生命周期只挂一次）。**它从不自己动手装东西** —— 插件替换自己的文件，等于在执行途中 dispose 掉
-正在跑的那个实例。
+默认情况下插件自己升级：启动 90 秒后查一次发布标签，之后每 12 小时一次；查到更高的 `vX.Y.Z` 就直接
+装上。宿主跑着 DSH 的 HMR 服务时，**装上的那一刻新代码就已经在跑** —— 不用重启，不用弹窗，用户什么
+都不用做。
 
-安装是单独的一步，由 `pwsh_run_update` 工具承担：
-
-| `action` | 行为 |
+| 方式 | 行为 |
 |---|---|
-| `check`（默认） | 读一次标签，报出 `state` / `running` / `newest release` / `install spec`。不装任何东西。 |
-| `install` | 把钉住 tag 的 `github:…#vX.Y.Z` 交给 `ctx.get('pluginManager')` —— 也就是「插件」页面用的那个服务 —— 由它跑 pnpm，失败时回滚 `package.json`。 |
+| 自动（`autoUpdate: true`，默认） | 查 → 装 → 就地生效。装失败按指数退避重试（5 分钟起、翻倍、封顶 2 小时）；装成功过的版本不再重试。宿主**没有** HMR 时它什么都不装，见下。 |
+| `pwsh_run_update` 的 `action: "check"` | 只读一次标签，报出 `state` / `running` / `newest release` / `install spec`。不装任何东西。 |
+| `pwsh_run_update` 的 `action: "install"` | 同一条安装路径，只是由人按下去而不是由时钟按下去。 |
 
-**装完仍然要重启。** bundle 行的 `name` 就是包名，装新版前后解析出同一个 module URL，而 ESM 按 URL
-缓存：不管 `application` 返回的是 `restart-required` 还是 `applied`，正在跑的进程里都还是旧模块。
-别把「装上了」读成「生效了」。
+安装走 `ctx.get('pluginManager')` —— 也就是「插件」页面背后那个服务 —— 由它跑 pnpm，失败时回滚
+`package.json`。本插件**从不自己改自己的文件**：它是 profile 的 bundle 依赖，版本钉在
+`package.json` 与 `pnpm-lock.yaml` 里，绕开包管理器写文件会立刻让 lockfile 与磁盘对不上。
+
+**为什么能不重启就生效。** 插件的 `apply` 以及它起的定时器，都跑在 HMR 服务的事务上下文里
+（`AsyncLocalStorage`）。在那里直接调 `installBundle`，pnpm 会跑完、磁盘会换成新版，紧接着的重组合
+却被拒掉（`HMR transactions cannot be nested`），于是停在最难看清的状态：磁盘是新的、进程里是旧的。
+先把上下文清空（`hmr.executing.run(undefined, …)`）再调，重组合才会真的发生；而磁盘上新装的文件与已
+加载的模块已经对不上，HMR 于是驱逐旧模块、import 新模块。实测：从触发到新代码应答 137 ms。
+
+宿主**没有** HMR 时，自动路径什么都不做。那种环境装下去只会「磁盘是新版、进程是旧版」—— 需要重启的
+自动更新不算更新，只是一个会说谎的版本号。（`pwsh_run_update` 的 `install` 在这种情况下照样装，因为
+是人按的、人能决定什么时候重启；结果里会诚实地写 `restart-required`。）
+把自动路径关掉（`autoUpdate: false`）则在任何宿主上都回到旧行为：只查不装，在下次 `pwsh_run` 输出末尾
+挂一行，让人来定。
 
 若 profile 关掉了 `plugin-manager` 服务，`install` 会报 `no-manager`，改用终端升级：
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.3'
+& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.4'
 ```
 
 注意 DSH 的默认组合关掉的是**工具** `plugin_manager`，而桌面 profile 上的**服务** `plugin-manager`
@@ -261,6 +274,7 @@ plugin/
   session-server.ps1  PowerShell 侧：runspace、流打标、哨兵
   update-check.mjs    发布标签查询与比较
   update-apply.mjs    把钉住的规格交给 pluginManager，不自己下载
+  auto-update.mjs     自动路径：在 HMR 事务之外安装，失败退避
 test/
   support.mjs         定位 DSH 安装；Windows 路径转 /mnt 形式
   itest.mjs           协议与会话本体
@@ -270,6 +284,7 @@ test/
   bashtest.mjs        custom-bash 围栏分诊（mock runtime）
   bash-e2e.mjs        custom-bash 端到端（真 runtime + 真 llrun）
   updatetest.mjs      更新检查与安装结果（本地 git 仓库）
+  autoupdatetest.mjs  自动更新循环、退避、以及它依赖的 HMR 上下文逃逸
   wiringtest.mjs      更新提示真的接到工具输出末尾
   denialtest.mjs      沙箱拒绝提示只在该触发的报错上触发
 wsl/
@@ -289,11 +304,12 @@ node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-close
 node test/bashtest.mjs                       # 19：custom-bash 围栏分诊
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
 node test/updatetest.mjs                     # 66：更新检查与安装结果（只碰本地 git）
-node test/wiringtest.mjs                     #  9：更新提示接线
+node test/autoupdatetest.mjs                 # 26：自动安装、退避、HMR 上下文逃逸
+node test/wiringtest.mjs                     # 11：更新提示接线
 node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
 ```
 
-九份脚本合计 **162 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十份脚本合计 **190 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

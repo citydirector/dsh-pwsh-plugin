@@ -1267,3 +1267,110 @@ while ($null -ne $__e.InnerException) { $__e = $__e.InnerException }
 `test/itest.mjs` 新增第 2 项 `std-handles-takeover`：起会话后第一次调用必须 `sentinel=ok` 且 **`warn` 为空**。
 它比 `child-stdio-detached` 更直接 —— 接管本身失败时立刻红，而不是等到那个万分之一的句柄复用。
 itest 15 → **16 项**，九份脚本合计 **162 项**。
+
+## 二十七、无感自动更新：在 HMR 事务之外调 installBundle（2026-10-25）
+
+第十九节的结论是「只查、只提示、从不自己装」，理由是「插件替换自己的文件，等于在执行的途中 dispose
+掉正在跑的那个实例」。**这条结论已被推翻**：装确实会让旧实例停下来，但 HMR 会在同一次重组合里把新
+模块 import 进来重新 apply —— 用户看到的是「什么都没发生，但它已经是新版」。
+
+### 关键：上下文在 AsyncLocalStorage 里
+
+`@deepseek-ai/dsh-hmr` 的 `Hmr` 用 `executing = new AsyncLocalStorage()` 标记「当前是否在事务里」：
+
+```js
+runExclusive(operation) {
+  if (this.executing.getStore()) return Promise.reject(new Error('HMR transactions cannot be nested'))
+  return this.executing.run(true, operation)
+}
+```
+
+插件的 `apply` 是被 `reconcileProfile` 调起来的，本身就处在 `run(true, …)` 的异步延续里，所以
+**插件起的定时器里也带着这个标记**（探针实测：`apply store=true`、`tick store=true`）。于是从定时器
+里直接调 `installBundle` 会走到 `change()` → `runExclusive()`，被嵌套检查拒掉。
+
+最坏的地方在于**拒绝发生在 pnpm 已经跑完之后**：
+
+```
+install ms=2413 {"application":"failed","error":{"code":"operation-error",
+  "diagnostic":"HMR transactions cannot be nested"}}
+磁盘 dependencies: - dsh-pwsh-plugin 0.2.3   + dsh-pwsh-plugin 0.2.2
+```
+
+磁盘成了新版、进程里还是旧版，而且 `pwsh_run_update action=check` 报的是**磁盘版本**（`packageVersion()`
+按 `import.meta.url` 现读 package.json），看起来一切正常。这是本轮最容易骗过自己的一种状态。
+
+### 解法：先把上下文清空再调
+
+```js
+export async function installReleaseLive(ctx, spec, options = {}) {
+  const manager = ctx?.get?.('pluginManager')
+  const hmr = ctx?.get?.('hmr')
+  if (hmr === undefined || typeof hmr?.executing?.run !== 'function') {
+    return await installRelease(manager, spec, { ...options, live: false })
+  }
+  return await hmr.executing.run(undefined, () => installRelease(manager, spec, { ...options, live: true }))
+}
+```
+
+`AsyncLocalStorage.run(undefined, cb)` 把 store 置空，**而且这个清空会跟着异步延续走下去**（探针里
+`await` 之后 `store` 仍是 `undefined`）。installBundle 于是能自己拿 `runExclusive`，走完
+`publishAndReload` → `reconcileProfile`。
+
+重组合之所以真的换掉模块，是因为 `ModuleFiles.compare()` 拿 `inode:size:mtime` 与已加载的记录比对，
+新装的文件当然对不上 —— 与「bundle 行 URL 不变所以 ESM 缓存命中」无关，那一层判断在更前面就结束了。
+
+### 端到端实测（决定性）
+
+| 步骤 | 结果 |
+|---|---|
+| 在事务里直接调 `installBundle` | `application: failed`、`HMR transactions cannot be nested`，磁盘却已变 |
+| 在 `executing.run(undefined, …)` 里调 | `application: applied`、3558 ms 返回 |
+| 装完立即问新代码 | 装件 `index.mjs` 里人为加的 `HMRMARK` **出现在下一句输出里** |
+| 手工 `reconcileProfile` 路径 | `hmr.executing.run(undefined, () => hmr.runExclusive(() => hmr.reconcileProfile()))` → 137 ms，`{pending:[]}`，同样看到 `HMRMARK` |
+
+### 循环的形状
+
+`plugin/auto-update.mjs`：`FIRST_DELAY_MS = 90s`、`INTERVAL_MS = 12h`、`RETRY_BASE_MS = 5min`、
+`RETRY_MAX_MS = 2h`。一轮的动作是 `checker.check()` → `state === 'available'` → 用
+`checker.document().spec`（钉住 tag 的规格）装 → 成功清零退避、失败撤掉「装过」的记录并按
+`retryBaseMs * 2 ** (failures - 1)` 重排。
+
+两个必要的细节：
+
+1. **记住装过哪些版本**（`attempted` 这个 Set）。没有 HMR 的宿主上装完磁盘是新的、进程还是旧的，
+   下一轮照样报 `available`，不记就会每 12 小时重装一次同一个版本。
+2. **关掉「只提示」那条定时器**。`UpdateChecker.start()` 自带 12 小时周期，自动更新循环也自己调
+   `check()`，两边都开着等于每轮查两次。现在 `autoUpdate === true` 时不起 `checker.start()`。
+
+提示语也随之改了口径：只有 `autoUpdate === false` 时才在 `pwsh_run` 输出末尾挂「有新版本」那一行，
+文案改成 `Auto-update is off in this profile (config.autoUpdate: false).` —— 开着自动更新还提示，
+等于让模型以为要人工介入。
+
+### 测试
+
+`test/autoupdatetest.mjs`（新，26 项，纯 node、无网络）：发布源是临时目录里的 `git init` + `v0.0.1` /
+`v0.0.2` 两个 tag（`git+file://` 形态），假 HMR 用 `new AsyncLocalStorage()` 复刻嵌套检查，
+假 pluginManager 记录每次安装时 `executing.getStore()` 的值 —— 「事务里发起也必须清空上下文」这条
+行为因此被钉住，而不只是被注释声明。
+
+`test/wiringtest.mjs` 跟着改了语义：提示那一节现在显式 `autoUpdate: false`，另加一节断言
+`autoUpdate: true` 时**不发**提示。
+
+十份脚本合计 **190 项**（itest 16 / plugintest 15 / e2e 8 / sandboxtest 7 / bashtest 19 / bash-e2e 11 /
+updatetest 66 / autoupdatetest 26 / wiringtest 11 / denialtest 11）。
+
+### 没有 HMR 就完全不装
+
+第一版是无条件装的：没有 HMR 的宿主上，装完磁盘是新的、进程里仍是旧的，下一轮照样报 `available`，
+于是每 12 小时重装一次同一个版本（靠 `attempted` 这个 Set 挡住）。挡住之后仍然不对 ——
+`pwsh_run_update action=check` 报的是**磁盘**版本，用户会以为升级成功了。
+
+所以循环里加了一道门：`hmrIsLive(ctx)` 为假时只记一行日志、不装。判断条件与 `installReleaseLive` 用的
+是同一组（`ctx.get('hmr')` 存在且 `executing.run` 是函数），两处必须一致，否则会出现「循环以为装得上、
+安装却退回非 live」的错配。人手动按 `install` 时不做这道门 —— 人知道要重启。
+
+### 一条已知取舍
+
+自动更新一旦跑起来，就没有「先问问」这一步 —— 这是本设计的目的（给不盯版本的人用）。不想要的人在
+profile 的插件配置里写 `autoUpdate: false`，行为即回到第十九节描述的样子。

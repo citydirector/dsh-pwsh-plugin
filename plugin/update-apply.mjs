@@ -16,7 +16,7 @@
  */
 
 /** 安装后要把 application 这个枚举翻译成一句能照做的话。 */
-export function describeInstallOutcome(result) {
+export function describeInstallOutcome(result, options = {}) {
   const application = typeof result?.application === 'string' ? result.application : 'unknown'
   const error = result?.error
   if (application === 'failed' || application === 'cancelled') {
@@ -29,9 +29,17 @@ export function describeInstallOutcome(result) {
         + 'run the same command from a terminal to see the full output: ',
     }
   }
-  // 'applied' 也要说重启：这一行由 bundle patch 插入，name 就是包名，resolve 出来的
-  // module URL 装新版前后完全一样，而 ESM 按 URL 缓存 —— 行被「重新应用」也只是再 import
-  // 同一个 URL，拿到的是旧模块对象（实测过）。所以 application 的两种取值对这里没有区别。
+  // HMR 在场且安装是在它的事务之外发起时，application 仍是 'applied'，但这次是**真的**换掉了：
+  // HMR 重组合会驱逐本插件的模块、重新 import 并重新 apply（实测改文件后 137ms 生效）。
+  if (options?.live === true && application === 'applied') {
+    return {
+      ok: true,
+      text: 'The release is installed and the new code is already running (application: applied, '
+        + 'HMR replaced the plugin in place — no restart needed).',
+    }
+  }
+  // 没有 HMR，或安装是在 HMR 事务里发起的：磁盘是新版，进程里仍是旧模块。bundle 行给不出
+  // 新的 module URL，ESM 按 URL 缓存，重新 apply 也只是再 import 同一个 URL（实测过）。
   return {
     ok: true,
     text: 'The release is installed on disk (application: ' + application + '). Restart DSH to load it: a bundle row '
@@ -60,7 +68,7 @@ export async function installRelease(manager, spec, options = {}) {
   }
   try {
     const result = await manager.installBundle(spec, options.requestId === undefined ? {} : { requestId: options.requestId })
-    const described = describeInstallOutcome(result)
+    const described = describeInstallOutcome(result, { live: options.live === true })
     return {
       ok: described.ok,
       outcome: typeof result?.application === 'string' ? result.application : 'unknown',

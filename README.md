@@ -48,7 +48,7 @@ It does **not** disable the stock `tool-bash`: that row already carries `disable
 $dsh = '<desktop install>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # the data root the desktop app itself uses
 
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.3'
+& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.4'
 # or, from a local checkout
 & $dsh plugin --profile desktop add 'file:<path to checkout>'
 ```
@@ -96,7 +96,7 @@ The three files in `plugin/` (`index.mjs`, `session.mjs`, `session-server.ps1`) 
 ## The tools
 
 `pwsh_run` runs a script. `pwsh_run_update` checks for and optionally installs a newer release of this
-plugin — see [Update checks](#update-checks).
+plugin — see [Updates](#updates).
 
 | Argument | Required | Meaning |
 |---|---|---|
@@ -120,7 +120,9 @@ When order matters, merge them yourself: `2>&1` or `*>&1`.
 | `maxSessions` | `4` | How many sessions may live at once (one per agent workspace). |
 | `maxOutputBytes` | `8388608` | Output collection cap per call (8 MB). Truncation is reported honestly, never silently. |
 | `allowUnconfined` | `false` | `true` = start a session even when the sandbox policy service is missing. |
-| `updateCheck` | `true` | Look for release tags periodically. Checking and installing are separate: this only checks; `pwsh_run_update` does the install. |
+| `updateCheck` | `true` | Look for release tags periodically. Checking and installing are separate: this only checks; `pwsh_run_update` and auto-update do the install. |
+| `autoUpdate` | `true` | Install a newer release by itself, and — where the host runs HMR — take effect without a restart. |
+| `autoUpdateDelayMs` | `90000` | Wait before the first automatic check, so start-up is not competing with pnpm. |
 
 `allowUnconfined` is the one deliberate escape hatch. In a normal deployment `ctx.sandboxPolicy` is always
 present; when it is missing the composition is incomplete, and the plugin **refuses to start** rather than
@@ -154,29 +156,43 @@ Under `danger-full-access` nothing is confined, exactly like the built-in tool.
 **`read-only` does not start.** In that mode pwsh runs in ConstrainedLanguage and cannot even create a
 runspace. The tool reports that clearly and points at the built-in `pwsh` tool, which works there.
 
-## Update checks
+## Updates
 
-Five seconds after start, then every 12 hours, the plugin fetches release tags. A newer tag adds one line
-to the end of the next `pwsh_run` output (once per process lifetime). It **never installs anything on its
-own** — a plugin replacing its own files disposes the instance that is executing it.
+Left alone, the plugin upgrades itself: 90 seconds after start, then every 12 hours, it reads the release
+tags, and a newer `vX.Y.Z` is installed on the spot. On a host that runs DSH's HMR service the new code is
+**already live when the install returns** — no restart, no prompt, nothing for the user to do.
 
-Installing is a separate, explicit step. The `pwsh_run_update` tool does both halves:
-
-| `action` | What happens |
+| How | What happens |
 |---|---|
-| `check` (default) | Reads the tags once and reports `state` / `running` / `newest release` / `install spec`. Installs nothing. |
-| `install` | Hands the pinned `github:…#vX.Y.Z` spec to `ctx.get('pluginManager')` — the same service the Plugins page uses — which runs pnpm and rolls `package.json` back on failure. |
+| Automatic (`autoUpdate: true`, default) | Checks, installs, and takes effect in place. A failed install backs off exponentially (5 min doubling to 2 h) and tries again; a version that installed successfully is not retried. On a host **without** HMR it installs nothing — see below. |
+| `pwsh_run_update` `action: "check"` | Reads the tags once and reports `state` / `running` / `newest release` / `install spec`. Installs nothing. |
+| `pwsh_run_update` `action: "install"` | The same install, driven by hand instead of by the clock. |
 
-**A restart is still required.** A bundle row names the package, so the module URL is identical before and
-after the swap and ESM caches by URL: the running process keeps the old modules no matter what
-`application` came back. Do not read "installed" as "in effect".
+The install goes through `ctx.get('pluginManager')` — the service behind the Plugins page — which runs pnpm
+and rolls `package.json` back on failure. The plugin never edits its own files: it is a bundle dependency
+pinned in `package.json` and `pnpm-lock.yaml`, and writing files behind the package manager's back would
+leave the lockfile lying.
+
+**Why it can take effect without a restart.** A plugin's `apply` and any timer it starts run inside the HMR
+service's transaction context. Calling `installBundle` from there runs pnpm and lands the new files, then
+fails to recompose — `HMR transactions cannot be nested` — which leaves the worst possible state: new files
+new files on disk, old modules running. Clearing the context first (`hmr.executing.run(undefined, …)`) lets the
+recomposition happen, and because the freshly installed files on disk no longer match what is loaded, HMR
+evicts the old modules and imports the new ones. Measured: 137 ms from the trigger to the new code answering.
+
+On a host **without** HMR the automatic path does nothing at all. Installing there would put the new files
+on disk while the running process keeps the old modules — an automatic update that needs a restart is not
+an update, it is a version number that lies. (`pwsh_run_update action: "install"` still installs in that
+situation, because a human asked and can decide when to restart; the result says `restart-required`.)
+Turning the automatic path off (`autoUpdate: false`) restores the older behaviour everywhere: check only,
+and put one line at the end of the next `pwsh_run` output so a human decides.
 
 Without `pluginManager` — a profile where the `plugin-manager` service is disabled — `install` reports
 `no-manager` and you upgrade from a terminal instead:
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.3'
+& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#v0.2.4'
 ```
 
 Note that DSH's stock composition disables the *tool* `plugin_manager` while leaving the *service* running
@@ -289,6 +305,7 @@ plugin/
   session-server.ps1  the PowerShell side: runspace, stream tagging, sentinels
   update-check.mjs    release tag lookup and comparison
   update-apply.mjs    hands the pinned spec to pluginManager, never downloads
+  auto-update.mjs     the automatic path: install outside the HMR transaction, back off on failure
 test/
   support.mjs         locates a DSH install; converts Windows paths to /mnt form
   itest.mjs           protocol and session core
@@ -298,6 +315,7 @@ test/
   bashtest.mjs        custom-bash fence triage (mock runtime)
   bash-e2e.mjs        custom-bash end to end (real runtime + real llrun)
   updatetest.mjs      update check against a local git repository, install outcomes
+  autoupdatetest.mjs  the automatic loop, its back-off, and the HMR-context escape it depends on
   wiringtest.mjs      the update notice really lands at the end of tool output
   denialtest.mjs      the sandbox-denial hint fires on the right messages only
 wsl/
@@ -317,11 +335,12 @@ node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-
 node test/bashtest.mjs                       # 19: custom-bash fence triage
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
 node test/updatetest.mjs                     # 66: update check + install outcomes, local git only
-node test/wiringtest.mjs                     #  9: update notice wiring
+node test/autoupdatetest.mjs                 # 26: automatic install, back-off, HMR-context escape
+node test/wiringtest.mjs                     # 11: update notice wiring
 node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
 ```
 
-Nine scripts, **162 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Ten scripts, **190 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.

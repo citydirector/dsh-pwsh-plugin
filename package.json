@@ -1,6 +1,6 @@
 {
   "name": "dsh-pwsh-plugin",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "type": "module",
   "description": "Persistent pwsh session tool (pwsh_run) for DeepSeek Harness: run PowerShell scripts with zero escaping, no 32K command-line cap, and state that survives across calls.",
   "keywords": [
@@ -47,8 +47,8 @@
     "@deepseek-ai/dsh": ">=0.2.0-rc.2 <0.3.0"
   },
   "scripts": {
-    "test": "node test/itest.mjs && node test/plugintest.mjs && node test/updatetest.mjs && node test/wiringtest.mjs && node test/denialtest.mjs",
-    "test:all": "node test/itest.mjs && node test/plugintest.mjs && node test/e2e-real-subprocess.mjs && node test/sandboxtest.mjs && node test/bashtest.mjs && node test/bash-e2e.mjs && node test/updatetest.mjs && node test/wiringtest.mjs && node test/denialtest.mjs",
-    "test:update": "node test/updatetest.mjs && node test/wiringtest.mjs"
+    "test": "node test/itest.mjs && node test/plugintest.mjs && node test/updatetest.mjs && node test/autoupdatetest.mjs && node test/wiringtest.mjs && node test/denialtest.mjs",
+    "test:all": "node test/itest.mjs && node test/plugintest.mjs && node test/e2e-real-subprocess.mjs && node test/sandboxtest.mjs && node test/bashtest.mjs && node test/bash-e2e.mjs && node test/updatetest.mjs && node test/autoupdatetest.mjs && node test/wiringtest.mjs && node test/denialtest.mjs",
+    "test:update": "node test/updatetest.mjs && node test/autoupdatetest.mjs && node test/wiringtest.mjs"
   }
 }

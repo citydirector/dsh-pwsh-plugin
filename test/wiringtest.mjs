@@ -112,9 +112,10 @@ process.env.DSH_PWSH_UPDATE_DELAY_MS = '0'
 const exec = { agent: { session: { id: 'wiring-A', header: { cwd: process.cwd() } } } }
 
 try {
-  // ── 1. 新版本提示挂在输出末尾，且只挂一次 ──────────────────────────────
+  // ── 1. 自动更新关掉时，新版本提示挂在输出末尾，且只挂一次 ────────────────
+  // 自动更新开着时不发提示（它自己会装），所以这一节必须显式关掉它。
   console.log('\n[1] 提示出现在输出末尾（只一次）')
-  const plugin = boot({ allowUnconfined: true })
+  const plugin = boot({ allowUnconfined: true, autoUpdate: false })
   // 首次检查延迟 0，本地 git ls-remote 几十毫秒；给 3 秒余量。
   await new Promise((resolve) => setTimeout(resolve, 3000))
 
@@ -123,13 +124,23 @@ try {
   check('末尾有更新提示', first.text.includes('a newer pwsh-run release exists'), JSON.stringify(first.text))
   check('提示里带版本号', first.text.includes('v9.9.9'), JSON.stringify(first.text))
   check('提示里带钉了 tag 的安装规格', first.text.includes(source + '#v9.9.9'), JSON.stringify(first.text))
-  check('提示里说明不会自动安装', first.text.includes('Nothing is installed automatically'), JSON.stringify(first.text))
+  check('提示里说明自动更新已关', first.text.includes('Auto-update is off in this profile'), JSON.stringify(first.text))
 
   const second = await plugin.registration.execute({ script: "Write-Output 'again'" }, exec)
   check('第二次不再重复提示', !second.text.includes('a newer pwsh-run release exists'), JSON.stringify(second.text))
   check('第二次脚本本体正常', second.text === 'again', JSON.stringify(second.text))
 
   plugin.dispose()
+
+  // ── 1b. 自动更新开着时不再发提示（它自己会装，再提示就是噪音）─────────────
+  console.log('\n[1b] 自动更新开着时不发提示')
+  // mock ctx 没有 pluginManager，安装必然失败——这一节只看提示，不看安装结果。
+  const auto = boot({ allowUnconfined: true, autoUpdate: true, autoUpdateDelayMs: 0 })
+  await new Promise((resolve) => setTimeout(resolve, 3000))
+  const autoOut = await auto.registration.execute({ script: "Write-Output 'auto-line'" }, exec)
+  check('自动更新开着时不挂提示', !autoOut.text.includes('a newer pwsh-run release exists'), JSON.stringify(autoOut.text))
+  check('脚本本体照常返回', autoOut.text === 'auto-line', JSON.stringify(autoOut.text))
+  auto.dispose()
 
   // ── 2. updateCheck: false 时完全不查 ────────────────────────────────────
   console.log('\n[2] updateCheck: false')
