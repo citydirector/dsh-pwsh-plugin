@@ -295,6 +295,13 @@ derives every path from its own location and re-checks the disk for leaks.
   "%USERNAME%":(OI)(CI)F` fixes a root you do not own. Confinement fails closed with that message instead of
   running unconfined.
 - No interactive programs and no TTY.
+- **A running session does not survive an automatic update.** Replacing a plugin stops it, and stopping
+  this plugin disposes its sessions — so on the install that actually lands a new version, the persistent
+  pwsh process is gone and the next call rebuilds it. Anything held only in that session (variables,
+  `Set-Location`, imported modules) is lost. Measured across a v0.2.3 → v0.2.4 install: `$PID` changed from
+  24820 to 15632 and a `$global:` variable set before the install read back empty. The version is worth more
+  than the session state, but it is not "nothing happened" — do not hold unrecoverable state in it across
+  an upgrade.
 
 ## Development
 

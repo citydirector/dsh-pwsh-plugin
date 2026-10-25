@@ -264,6 +264,11 @@ Remove-Item -Recurse -Force $root
   `Modify`，单靠 `Modify` 会以 `SetNamedSecurityInfoW failed (Win32 5)` 失败。属主不是决定因素：
   `icacls <根目录> /grant "%USERNAME%":(OI)(CI)F` 能救。届时是 fail-closed 报错，不会退化成无边界。
 - 不支持交互式程序与 TTY。
+- **正在跑的会话不会挺过自动更新。** 替换插件会先把它停掉，而停掉本插件就会销毁它的会话 —— 所以真正
+  装上新版的那一次，常驻 pwsh 进程已经不在了，下次调用重新拉起。只存在于该会话里的东西（变量、
+  `Set-Location` 过的目录、import 进来的模块）随之丢失。实测 v0.2.3 → v0.2.4 的一次安装：`$PID` 由
+  24820 变成 15632，安装前设的 `$global:` 变量读回来是空的。版本比会话状态值钱，但这并不等于「什么
+  都没发生」—— 别把不可重建的状态放在里面跨过升级。
 
 ## 开发
 
