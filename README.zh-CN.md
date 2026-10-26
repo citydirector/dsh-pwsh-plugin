@@ -318,15 +318,33 @@ node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
 node test/bashtest.mjs                       # 19：custom-bash 围栏分诊
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
-node test/updatetest.mjs                     # 66：更新检查与安装结果（只碰本地 git）
+node test/updatetest.mjs                     # 69：更新检查与安装结果（只碰本地 git）
 node test/autoupdatetest.mjs                 # 32：自动安装、退避、空闲闸门、HMR 上下文逃逸
 node test/wiringtest.mjs                     # 16：更新提示接线、安装等会话空闲
 node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
 ```
 
-十份脚本合计 **201 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十份脚本合计 **204 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
+
+### 发版
+
+`package.json` 里的 version 是本仓库唯一写死的东西，而更新检查拿它跟已发布的标签比。只打 tag 不升版本，
+检查会永远报有新版：装上去的文件读到的还是旧数字，于是每轮都重装同一个 tag，退避一路爬到上限。
+`npm version` 一次完成「改版本 + 提交 + 打 annotated tag」，所以这三者不会漂开：
+
+```powershell
+npm version patch -m 'chore(release): %s'   # 改版本、提交、打 tag
+git push origin main <tag>
+```
+
+发版前跑一次 `node scripts/release-check.mjs`。工作区不干净、HEAD 上的 tag 与 `package.json` 对不上、
+tag 指向的提交里版本不同、或者要重指一个已存在的 tag（那会把已发布的版本挪到新内容上），它都会拒绝。
+HEAD 上还没有 tag 时，它把该打的标签名打印出来。
+
+npm 要用 Windows 侧那份。WSL 里 `/usr/local/bin/npm` 指向 bun 的软链，`npm version` 会报
+`Script not found "version"`。
 
 ## 许可
 

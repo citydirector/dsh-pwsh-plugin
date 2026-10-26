@@ -353,16 +353,37 @@ node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
 node test/bashtest.mjs                       # 19: custom-bash fence triage
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
-node test/updatetest.mjs                     # 66: update check + install outcomes, local git only
+node test/updatetest.mjs                     # 69: update check + install outcomes, local git only
 node test/autoupdatetest.mjs                 # 32: automatic install, back-off, idle gate, HMR-context escape
 node test/wiringtest.mjs                     # 16: update notice wiring, installs wait for an idle session
 node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
 ```
 
-Ten scripts, **201 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Ten scripts, **204 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.
+
+### Releasing
+
+The version in `package.json` is the one thing in this repository that is hard-coded, and the update check
+compares it against the published tags. Tag a commit without bumping it and the check reports a newer
+release forever: the installed files keep reading the old number, so every cycle reinstalls the same tag and
+the back-off climbs to its ceiling. `npm version` writes the version, commits, and tags in one step, which is
+why the three cannot drift apart:
+
+```powershell
+npm version patch -m 'chore(release): %s'   # bump, commit, annotated tag
+git push origin main <tag>
+```
+
+Run `node scripts/release-check.mjs` before publishing. It fails when the working tree is dirty, when HEAD
+carries a tag that disagrees with `package.json`, when the tagged commit declares a different version, and
+when you are about to re-point a tag that already exists (that would move an already-published version onto
+new content). With no tag on HEAD it prints the exact name to create.
+
+Use the Windows-side npm. In WSL, `/usr/local/bin/npm` resolves to a bun symlink and `npm version` fails
+with `Script not found "version"`.
 
 ## License
 
