@@ -51,7 +51,13 @@ const exact = git('describe', '--tags', '--exact-match')
 const expected = 'v' + version
 
 if (exact === undefined) {
-  // 还没有 tag：这正是「该打 tag 了」的状态，把该打的名字说出来。
+  // expected 这个 tag 已经用掉了，而 HEAD 又在它之后：说明 tag 之后还有未发版的提交。
+  // 这时候重打同名 tag 会把已发布的版本移到新提交上，下游拿到的「v0.2.5」就换了内容。
+  if (git('rev-parse', '--verify', '--quiet', 'refs/tags/' + expected) !== undefined) {
+    fail('tag ' + expected + ' 已经指向别的提交，而 HEAD 在它之后还有改动。'
+      + '先升版本：npm version patch -m "chore(release): %s"')
+  }
+  // 还没有这个 tag：这正是「该打 tag 了」的状态，把该打的名字说出来。
   console.log('release-check: HEAD 还没有 tag —— 该打的是 ' + expected + '（package.json 是 ' + version + '）')
   console.log('release-check: git tag -a ' + expected + ' -m "' + expected + '"')
   process.exit(0)
