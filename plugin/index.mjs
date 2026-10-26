@@ -32,6 +32,7 @@
 import { readFileSync } from 'node:fs'
 import { DEFAULT_MAX_OUTPUT_BYTES, bootArgv, startSession } from './session.mjs'
 import { installReleaseLive, startAutoUpdate } from './auto-update.mjs'
+import { preflightInstall } from './update-apply.mjs'
 import { UpdateChecker } from './update-check.mjs'
 
 /** 加载器诊断里显示的插件名。 */
@@ -419,6 +420,14 @@ export function apply(ctx, config) {
       }
       if (action === 'check') {
         lines.push('Run this again with action "install", or run: dsh plugin --profile <name> add "' + String(doc.spec) + '"')
+        return { text: lines.join('\n') }
+      }
+      // 装之前先问一句值不值得装：磁盘上已经是这个版本、或者这个 tag 的包根本没改过版本号，
+      // 装下去只会被 plugin-manager 判 already-installed。判掉后照实说清是哪一种。
+      const unnecessary = preflightInstall(ctx, checker, String(doc.spec))
+      if (unnecessary !== null) {
+        lines.push('install: ' + unnecessary.outcome)
+        lines.push(unnecessary.text)
         return { text: lines.join('\n') }
       }
       // 安装会热替换本插件，从而 dispose 掉所有常驻会话。正有调用在跑时先不装：

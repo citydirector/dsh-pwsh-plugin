@@ -22,7 +22,7 @@ import {
   updateSource,
   updateVerdict,
 } from '../plugin/update-check.mjs'
-import { installRelease } from '../plugin/update-apply.mjs'
+import { checkInstallNeed, installRelease, preflightInstall, readInstalledSpec, specTag } from '../plugin/update-apply.mjs'
 
 let pass = 0
 let fail = 0
@@ -236,6 +236,69 @@ try {
     check('live 装成功时 ok=true', inPlace.ok === true)
     check('live 不再要求重启', !inPlace.text.includes('Restart DSH'), inPlace.text)
     check('live 明确说已在跑', inPlace.text.includes('already running'), inPlace.text)
+
+    // 预检拦下来的 already-installed 也要按「已装好」表述，而不是一串 operation-error。
+    const refused = await installRelease({
+      async installBundle() { return { application: 'failed', changed: false, error: { code: 'already-installed' } } },
+    }, 'github:owner/repo#v1.0.1', { live: true })
+    check('already-installed 不再当成失败', refused.ok === true, JSON.stringify(refused))
+    check('already-installed 说的是已经装好了', refused.text.includes('already installed'), refused.text)
+    check('already-installed 不再印错误码', !refused.text.includes('could not install'), refused.text)
+  }
+
+  // ── 14. 装之前的预检 ────────────────────────────────────────────────────
+  // 这一节钉的是两种「装了也白装」：别人已经装好等重启、以及发版忘了升版本号。
+  console.log('\n[14] checkInstallNeed（装之前先问值不值得装）')
+  {
+    same('tag 解析：钉了 tag', specTag('github:owner/repo#v1.2.3'), 'v1.2.3')
+    same('tag 解析：没钉 tag', specTag('github:owner/repo'), undefined)
+    same('tag 解析：非字符串', specTag(null), undefined)
+
+    // 磁盘比最新旧：该装。
+    same('版本旧 → 该装', checkInstallNeed({ latest: 'v1.3.0', disk: '1.2.0', running: '1.2.0', spec: 'github:o/r#v1.3.0', installed: 'github:o/r#v1.2.0' }), null)
+    // 最新标签解析不出来：不判，交给下游。
+    same('latest 非法 → 不判', checkInstallNeed({ latest: 'nightly', disk: '1.2.0' }), null)
+    // 磁盘与运行都是最新：什么都不用做。
+    const current = checkInstallNeed({ latest: 'v1.3.0', disk: '1.3.0', running: '1.3.0' })
+    same('都最新 → already-current', current?.outcome, 'already-current')
+    check('都最新时 ok=true', current?.ok === true, JSON.stringify(current))
+    // 磁盘新、进程旧：别人装好了没重启。
+    const restart = checkInstallNeed({ latest: 'v1.3.0', disk: '1.3.0', running: '1.2.0' })
+    same('磁盘新进程旧 → restart-required', restart?.outcome, 'restart-required')
+    check('点出进程里还在跑哪个版本', restart?.text.includes('1.2.0'), String(restart?.text))
+    check('说清要重启', /restart/i.test(String(restart?.text)), String(restart?.text))
+    check('这时 ok 仍是 true（没坏，只是要重启）', restart?.ok === true, JSON.stringify(restart))
+    same('运行版本未知也能判', checkInstallNeed({ latest: 'v1.3.0', disk: '1.3.0' })?.outcome, 'restart-required')
+    // profile 已指向该 tag，而包内版本没变：发布本身坏了。
+    const broken = checkInstallNeed({ latest: 'v1.3.0', disk: '1.2.0', running: '1.2.0', spec: 'github:o/r#v1.3.0', installed: 'github:o/r#v1.3.0' })
+    same('tag 与版本号对不上 → broken-release', broken?.outcome, 'broken-release')
+    check('broken-release 时 ok=false', broken?.ok === false, JSON.stringify(broken))
+    check('指出是发了 tag 但没升版本', /not bumped|package\.json/.test(String(broken?.text)), String(broken?.text))
+    // profile 记录的规格与要装的不同：说明还没装过，照装不误。
+    same('profile 记录别的规格 → 该装', checkInstallNeed({ latest: 'v1.3.0', disk: '1.2.0', spec: 'github:o/r#v1.3.0', installed: 'github:o/r#v1.2.0' }), null)
+    // 读不到包内版本时不做「发布坏了」的判断：那是本插件的问题，不是发布的问题。
+    same('包内版本读不到 → 不判坏发布', checkInstallNeed({ latest: 'v1.3.0', disk: undefined, spec: 'github:o/r#v1.3.0', installed: 'github:o/r#v1.3.0' }), null)
+
+    // 真读一份 profile：依赖表里拿得到、读不到时安静返回 undefined。
+    const profileDir = join(sandbox, 'profile')
+    mkdirSync(profileDir, { recursive: true })
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'other-plugin': '^1.0.0', 'dsh-pwsh-plugin': 'github:o/r#v1.4.0' } }))
+    same('读到 profile 记的规格', readInstalledSpec(profileDir, 'dsh-pwsh-plugin'), 'github:o/r#v1.4.0')
+    same('没这条依赖时返回 undefined', readInstalledSpec(profileDir, 'absent-plugin'), undefined)
+    same('profile 目录不存在时返回 undefined', readInstalledSpec(join(sandbox, 'no-such-profile'), 'dsh-pwsh-plugin'), undefined)
+    same('profile 目录缺席时返回 undefined', readInstalledSpec(undefined, 'dsh-pwsh-plugin'), undefined)
+    writeFileSync(join(profileDir, 'package.json'), 'not json')
+    same('package.json 坏了也不抛', readInstalledSpec(profileDir, 'dsh-pwsh-plugin'), undefined)
+
+    // preflightInstall 把 ctx 与 checker 接起来：profile 指向该 tag 且版本没变 → 拦下来。
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': 'github:o/r#v1.3.0' } }))
+    const fakeCtx = { get: (name) => (name === 'profileContext' ? { dir: profileDir } : undefined) }
+    const fakeChecker = { version: '1.2.0' }
+    // 本包磁盘版本是测试自己的版本，与 v1.3.0 无关，所以这里撞的是 broken-release 分支。
+    same('preflight 接上 ctx 与 checker', preflightInstall(fakeCtx, fakeChecker, 'github:o/r#v1.3.0')?.outcome, 'broken-release')
+    // profile 指向别的 tag 时放行。
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': 'github:o/r#v1.0.0' } }))
+    same('profile 指向别的 tag → 放行', preflightInstall(fakeCtx, fakeChecker, 'github:o/r#v1.3.0'), null)
   }
 } finally {
   cleanup()

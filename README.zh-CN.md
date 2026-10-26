@@ -151,7 +151,7 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 |---|---|
 | 自动（`autoUpdate: true`，默认） | 查 → 装 → 就地生效。装失败按指数退避重试（5 分钟起、翻倍、封顶 2 小时）；装成功过的版本不再重试。**有调用在跑时绝不装** —— 3 分钟后再看。宿主**没有** HMR 时它什么都不装，见下。 |
 | `pwsh_run_update` 的 `action: "check"` | 只读一次标签，报出 `state` / `running` / `newest release` / `install spec`。不装任何东西。 |
-| `pwsh_run_update` 的 `action: "install"` | 同一条安装路径，只是由人按下去而不是由时钟按下去。有调用在跑时报 `install: postponed`。 |
+| `pwsh_run_update` 的 `action: "install"` | 同一条安装路径，只是由人按下去而不是由时钟按下去。有调用在跑时报 `install: postponed`；预检判定「装了也没用」时报 `install: restart-required` / `install: broken-release`（见下）。 |
 
 安装走 `ctx.get('pluginManager')` —— 也就是「插件」页面背后那个服务 —— 由它跑 pnpm，失败时回滚
 `package.json`。本插件**从不自己改自己的文件**：它是 profile 的 bundle 依赖，版本钉在
@@ -162,6 +162,20 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 却被拒掉（`HMR transactions cannot be nested`），于是停在最难看清的状态：磁盘是新的、进程里是旧的。
 先把上下文清空（`hmr.executing.run(undefined, …)`）再调，重组合才会真的发生；而磁盘上新装的文件与已
 加载的模块已经对不上，HMR 于是驱逐旧模块、import 新模块。实测：从触发到新代码应答 137 ms。
+
+**为什么先看一眼再装。** DSH 的插件管理器在跑 pnpm **之前**就会拒掉一类安装：要装的规格与 profile
+里为该包记下的规格完全一致 —— 也就是 `already-installed`。有两种情形会走到这一步，而这两种本来就不该
+发起安装：
+
+- 这个版本已经装好了（终端里的 `dsh plugin add`、或者「插件」页面），只是进程还没重启。文件是新的，
+  缺的只是一次重启。
+- 发版时忘了把 `package.json` 里的 `version` 抬上去。标签变了、声明的版本没变，于是每一次尝试装的都是
+  同一份字节、被同一句话拒掉 —— 一个永不结束、也从不吭声的循环。
+
+所以安装之前，更新器先比对手上已有的三个事实：profile 记下的规格、已装包自己声明的版本、运行中的进程
+报出的版本。磁盘上已经是新版的报 `install: restart-required`；标签存在但包内版本没抬的报
+`install: broken-release` 并直说原因。`scripts/release-check.mjs` 在推标签**之前**拦第二种，运行时这道
+预检则在**之后**、在每一台试图升级的机器上再拦一次。
 
 **为什么非要等安静。** 安装会替换插件，而停掉本插件就要 dispose 掉它所有的常驻会话。若此刻有脚本正在
 跑，那与直接断电无异：输出写了一半、调用结束时拿不到状态、会话状态全失。所以更新器先问插件「现在有没有
@@ -318,13 +332,13 @@ node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
 node test/bashtest.mjs                       # 19：custom-bash 围栏分诊
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
-node test/updatetest.mjs                     # 69：更新检查与安装结果（只碰本地 git）
-node test/autoupdatetest.mjs                 # 32：自动安装、退避、空闲闸门、HMR 上下文逃逸
-node test/wiringtest.mjs                     # 16：更新提示接线、安装等会话空闲
+node test/updatetest.mjs                     # 96：更新检查、安装结果、安装前预检（只碰本地 git）
+node test/autoupdatetest.mjs                 # 38：自动安装、退避、空闲闸门、安装前预检、HMR 上下文逃逸
+node test/wiringtest.mjs                     # 21：更新提示接线、空闲闸门、安装前预检的接线
 node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
 ```
 
-十份脚本合计 **204 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十份脚本合计 **242 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

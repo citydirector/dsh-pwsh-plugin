@@ -174,6 +174,41 @@ try {
     gate.dispose()
   }
 
+  // ── 1d. 装之前先问值不值得装：profile 已指向该 tag 而包内版本没变时不发起安装 ──
+  // 这条钉的是「发版忘了升版本号」在真机上造成的静默循环：每一轮都想装，每一轮都被
+  // plugin-manager 判 already-installed，用户什么也看不到。预检要在这里拦住它。
+  console.log('\n[1d] 预检拦下注定失败的安装')
+  {
+    const attempts = []
+    const manager = {
+      async installBundle(spec, options) {
+        attempts.push({ spec, requestId: options?.requestId })
+        return { application: 'applied', version: '9.9.9' }
+      },
+    }
+    // 假 profile：依赖里已经钉着 v9.9.9，而装件里的版本是测试自己的版本，两者对不上。
+    const profileDir = join(sandbox, 'profile')
+    mkdirSync(profileDir, { recursive: true })
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': source + '#v9.9.9' } }))
+    const gated = boot({ allowUnconfined: true, autoUpdate: false }, { pluginManager: manager, profileContext: { dir: profileDir } })
+    await new Promise((resolve) => setTimeout(resolve, 3000))
+
+    const refused = await gated.update.execute({ action: 'install' })
+    check('坏发布被预检拦下', /install: broken-release/.test(refused.text), JSON.stringify(refused.text))
+    check('一次都没去装', attempts.length === 0, 'attempts=' + attempts.length)
+    check('说清是 tag 存在但版本没升', /not bumped/.test(refused.text), JSON.stringify(refused.text))
+    gated.dispose()
+
+    // 同一条命令在 profile 记录的是别的 tag 时就该照常装上——预检不能把正常升级也挡了。
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': source + '#v0.0.1' } }))
+    const allowed = boot({ allowUnconfined: true, autoUpdate: false }, { pluginManager: manager, profileContext: { dir: profileDir } })
+    await new Promise((resolve) => setTimeout(resolve, 3000))
+    const installed = await allowed.update.execute({ action: 'install' })
+    check('正常升级照常安装', /install: applied/.test(installed.text), JSON.stringify(installed.text))
+    check('正常升级真的调了安装器', attempts.length === 1, 'attempts=' + attempts.length)
+    allowed.dispose()
+  }
+
   // ── 2. updateCheck: false 时完全不查 ────────────────────────────────────
   console.log('\n[2] updateCheck: false')
   const quiet = boot({ allowUnconfined: true, updateCheck: false })

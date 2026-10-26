@@ -168,7 +168,7 @@ tags, and a newer `vX.Y.Z` is installed on the spot. On a host that runs DSH's H
 |---|---|
 | Automatic (`autoUpdate: true`, default) | Checks, installs, and takes effect in place. A failed install backs off exponentially (5 min doubling to 2 h) and tries again; a version that installed successfully is not retried. **Never while a call is running** — it retries in 3 minutes. On a host **without** HMR it installs nothing — see below. |
 | `pwsh_run_update` `action: "check"` | Reads the tags once and reports `state` / `running` / `newest release` / `install spec`. Installs nothing. |
-| `pwsh_run_update` `action: "install"` | The same install, driven by hand instead of by the clock. Reports `install: postponed` if a call is running. |
+| `pwsh_run_update` `action: "install"` | The same install, driven by hand instead of by the clock. Reports `install: postponed` if a call is running, and `install: restart-required` / `install: broken-release` when a pre-flight check says installing would achieve nothing (see below). |
 
 The install goes through `ctx.get('pluginManager')` — the service behind the Plugins page — which runs pnpm
 and rolls `package.json` back on failure. The plugin never edits its own files: it is a bundle dependency
@@ -181,6 +181,22 @@ fails to recompose — `HMR transactions cannot be nested` — which leaves the 
 new files on disk, old modules running. Clearing the context first (`hmr.executing.run(undefined, …)`) lets the
 recomposition happen, and because the freshly installed files on disk no longer match what is loaded, HMR
 evicts the old modules and imports the new ones. Measured: 137 ms from the trigger to the new code answering.
+
+**Why it looks before it installs.** DSH's plugin manager refuses, before running pnpm, an install whose spec
+exactly matches what the profile already records — `already-installed`. Two situations reach that, and neither
+should be attempted at all:
+
+- Somebody already installed this version (a terminal `dsh plugin add`, the Plugins page) and the process was
+  not restarted yet. The files are current; a restart is all that is missing.
+- A release was tagged without bumping `version` in `package.json`. The tag changes, the declared version does
+  not, so every attempt installs the same bytes and is refused the same way — a silent loop that never ends
+  and never says anything.
+
+So before installing, the updater compares three facts it already has: the spec the profile records, the
+version the installed package declares, and the version the running process reports. A version already on disk
+reports `install: restart-required`; a tag whose package still declares the old version reports
+`install: broken-release` and says so plainly. `scripts/release-check.mjs` catches the second case before the
+tag is pushed; this check catches it afterwards, on every machine that tries to update.
 
 **Why it waits for an idle moment.** An install replaces the plugin, and stopping the plugin disposes every
 persistent session it owns. Done while a script is in flight, that is a power cut: half-written output, a call
@@ -353,13 +369,13 @@ node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
 node test/bashtest.mjs                       # 19: custom-bash fence triage
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
-node test/updatetest.mjs                     # 69: update check + install outcomes, local git only
-node test/autoupdatetest.mjs                 # 32: automatic install, back-off, idle gate, HMR-context escape
-node test/wiringtest.mjs                     # 16: update notice wiring, installs wait for an idle session
+node test/updatetest.mjs                     # 96: update check, install outcomes, pre-flight, local git only
+node test/autoupdatetest.mjs                 # 38: automatic install, back-off, idle gate, pre-flight, HMR-context escape
+node test/wiringtest.mjs                     # 21: update notice wiring, idle gate, pre-flight wiring
 node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
 ```
 
-Ten scripts, **204 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Ten scripts, **242 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.

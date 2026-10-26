@@ -15,7 +15,7 @@ import { join } from 'node:path'
 
 import { installReleaseLive, startAutoUpdate } from '../plugin/auto-update.mjs'
 import { describeInstallOutcome } from '../plugin/update-apply.mjs'
-import { UpdateChecker } from '../plugin/update-check.mjs'
+import { UpdateChecker, packageVersion } from '../plugin/update-check.mjs'
 
 let pass = 0
 let fail = 0
@@ -177,6 +177,59 @@ try {
     check('装了才拿到闸门', acquired === 1, 'acquired=' + acquired)
     check('装完把闸门还回去', released >= 1, 'released=' + released)
     stop()
+  }
+
+  // ── 3c. 装了也白装的两种情形：别去试，也别重试 ────────────────────────────
+  // 这一节钉的是真机上踩过的坑：dsh-plugin-manager 对「规格与 profile 记的完全相同」的安装
+  // 会在 pnpm 之前抛 already-installed，于是一个静默的「有新版、装不进去」循环就此成立。
+  console.log('\n[3c] 预检拦下的不装')
+  {
+    // 发布坏了：profile 已指向 v0.0.2，而磁盘上的包版本与 v0.0.2 对不上（发版忘了升版本号）。
+    const profileDir = mkdtempSync(join(tmpdir(), 'pwsh-run-profile-'))
+    const spec = release.spec + '#v0.0.2'
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': spec } }))
+    const state = makeFakeHmr()
+    const manager = makeFakeManager(state, [{ application: 'applied', version: '0.0.2' }])
+    const ctx = {
+      get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : name === 'profileContext' ? { dir: profileDir } : undefined),
+    }
+    const checker = new UpdateChecker({ source: { kind: 'git', url: release.url, spec: release.spec }, version: '0.0.1' })
+    const logs = []
+    const stop = startAutoUpdate(ctx, checker, { firstDelayMs: 5, intervalMs: 20, log: (line) => logs.push(line) })
+    await waitFor(() => logs.some((line) => /broken-release/.test(line)))
+    check('发布坏了就不去装', manager.attempts.length === 0, 'attempts=' + manager.attempts.length)
+    check('日志点明是发布本身的问题', logs.some((line) => /broken-release/.test(line) && /not bumped/.test(line)), JSON.stringify(logs))
+    await sleep(120)
+    check('发布坏了也不反复重试', logs.filter((line) => /broken-release/.test(line)).length === 1, JSON.stringify(logs))
+    stop()
+    rmSync(profileDir, { recursive: true, force: true })
+  }
+  {
+    // 别人已经装好了，只是进程还没重启：磁盘已等于最新，运行版本更旧。
+    const latest = 'v' + packageVersion()
+    const dir = mkdtempSync(join(tmpdir(), 'pwsh-run-latest-'))
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir })
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'release'], { cwd: dir })
+    execFileSync('git', ['tag', latest], { cwd: dir })
+    const url = 'file://' + dir.replace(/\\/g, '/')
+    const profileDir = mkdtempSync(join(tmpdir(), 'pwsh-run-profile-'))
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': 'git+' + url + '#' + latest } }))
+    const state = makeFakeHmr()
+    const manager = makeFakeManager(state, [{ application: 'applied' }])
+    const ctx = {
+      get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : name === 'profileContext' ? { dir: profileDir } : undefined),
+    }
+    const checker = new UpdateChecker({ source: { kind: 'git', url, spec: 'git+' + url }, version: '0.0.1' })
+    const logs = []
+    const stop = startAutoUpdate(ctx, checker, { firstDelayMs: 5, intervalMs: 20, log: (line) => logs.push(line) })
+    await waitFor(() => logs.some((line) => /restart-required/.test(line)))
+    check('磁盘已是最新就不装', manager.attempts.length === 0, 'attempts=' + manager.attempts.length)
+    check('说清要重启而不是再装一次', logs.some((line) => /restart-required/.test(line) && /Restart DSH/.test(line)), JSON.stringify(logs))
+    await sleep(120)
+    check('同一版本不重复试', logs.filter((line) => /restart-required/.test(line)).length === 1, JSON.stringify(logs))
+    stop()
+    rmSync(profileDir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
   }
 
   // ── 4. 装失败要撤记录并退避 ──────────────────────────────────────────────

@@ -25,7 +25,7 @@
  *   而不是装完再说「可惜刚才那条被打断了」。
  */
 
-import { installRelease } from './update-apply.mjs'
+import { installRelease, preflightInstall } from './update-apply.mjs'
 
 /** 首次检查前的等待：让启动流程先跑完，别跟它抢 pnpm。 */
 const FIRST_DELAY_MS = 90 * 1000
@@ -115,6 +115,18 @@ export function startAutoUpdate(ctx, checker, options = {}) {
           const doc = checker.document()
           const spec = doc.spec
           if (typeof spec === 'string' && spec.length > 0) {
+            // 装之前先问一句值不值得装，否则 already-installed 会以「失败」的姿态出现，
+            // 而它其实有两种含义完全不同的成因（别人装好了 / 发布忘了升版本）。
+            const unnecessary = preflightInstall(ctx, checker, spec)
+            if (unnecessary !== null) {
+              busyNoted = false
+              // 记下这个版本，别再排下一轮：三种成因都不会自己好转。
+              // 「别人装好了等重启」重启后会重建循环，那时代码已是最新，根本走不到这里。
+              attempted.add(state.latest)
+              log('auto update: ' + state.latest + ' — ' + unnecessary.outcome + ': ' + unnecessary.text)
+              if (unnecessary.ok === true) failures = 0
+              return
+            }
             busyNoted = false
             attempted.add(state.latest)
             log('auto update: installing ' + state.latest + ' from ' + spec)

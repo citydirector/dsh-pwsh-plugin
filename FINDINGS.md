@@ -1464,9 +1464,86 @@ const installGate = { tryAcquire: beginInstall, release: endInstall }
 两个注册。11 → 16 项。
 
 回归：十份脚本合计 **201 项**（itest 16 / plugintest 15 / e2e 8 / sandboxtest 7 / bashtest 19 /
-bash-e2e 11 / updatetest 66 / autoupdatetest 32 / wiringtest 16 / denialtest 11）。
+bash-e2e 11 / updatetest 66 / autoupdatetest 32 / wiringtest 16 / denialtest 11）；第二十九节又加了
+38 项，当前总数以那一节为准。
 
 ### 为什么不用「先提示、再等下一次」那套
 
 那正是 `autoUpdate: false` 的行为，也正是用户不想要的那套：要人盯着、要人点。把「等安静」做进安装
 路径，既保住了无感，又不欠任何人一笔「刚才那条被打断了」的债。
+
+## 二十九、装之前先看一眼：`already-installed` 的三种成因与预检（2026-10-25）
+
+### 症状
+
+`pwsh_run_update action: "install"` 有时会回一行 `install: failed` + `pwsh_run could not install the release
+(already-installed). …`。看着像出错，其实 profile 一个字节都没被改动 —— 这句来自 DSH 的插件管理器，
+不是本插件。
+
+### 源码位置（asar 提取，逐字）
+
+`@deepseek-ai/dsh-plugin-manager/lib/index.js:1991`：
+
+```js
+if (this.ownerContext.get("hmr") !== void 0 && known !== void 0 && Object.hasOwn(before, known)) throw new ManagementFailure("already-installed");
+```
+
+抛出点在 `pnpm` **之前**，紧跟 `const before = readProfileManifest("dsh", this.profile.dir).dependencies ?? {}`。
+同文件 `:1865` 与 `:1870` 是 `inspect()` 里同名的 `refused("already-installed", …)` 分支。
+判定用的是 `specPackageName()`（`:1373-1379`）—— 把要装的 spec 与 profile 里为该包记下的 spec
+（经 `dependencySpec()` 规范化，`:135-144`）逐字比对。**两者完全一致就拒**。
+
+### 三种成因（用真 `parseInstallSpec` 复刻过）
+
+| 场景 | profile 里记的 spec | 要装的 spec | 会被拒吗 |
+|---|---|---|---|
+| 正常升级：进程旧、磁盘也旧 | `#v0.2.4` | `#v0.2.6` | 否 |
+| 终端 `dsh plugin add` 装过、进程没重启 | `#v0.2.6` | `#v0.2.6` | **是** |
+| 发版忘了升 `package.json` 的 `version` | `#v0.2.7` | `#v0.2.7` | **是** |
+
+前两种都不该发起安装：第一种装完就会生效，第二种装了也是同一份字节。第三种最阴 —— 标签变了、声明
+的版本没变，于是每一轮检查都判 `available`、每一轮都想装、每一轮都被拒。`attempted` 这个「装过别
+再装」的集合建在 `startAutoUpdate()` 里，热替换重建后清空，所以退避会一路爬到 2 小时封顶，从此每 2 小时
+重装一次同样的字节，**且只写 `ctx.logger.info`** —— 本机 `data/logs` 里 2026-10-25 一条 pwsh-run 日志
+都没有落盘，对用户完全静默。
+
+### 解法：安装前拿三个已有的事实比对
+
+`plugin/update-apply.mjs` 新增纯函数 `checkInstallNeed({ latest, disk, running, spec, installed })`，
+`preflightInstall(ctx, checker, spec)` 负责从 `ctx.get("profileContext").dir` 读出 `installed`、
+从 `checker.version` 取 `running`、从 spec 的 `#` 之后取 `latest`。返回四种之一：
+
+| 返回 | 含义 | 动作 |
+|---|---|---|
+| `null` | 值得装 | 照常安装 |
+| `already-current`（`ok: true`） | 磁盘与进程都已是这一版 | 不装 |
+| `restart-required`（`ok: true`） | 磁盘已是这一版，进程还跑旧的 | 不装，直接说「重启就生效」 |
+| `broken-release`（`ok: false`） | 标签存在但包内版本没抬，profile 已指向该标签 | 不装，直接说「这个发布是坏的」 |
+
+`describeInstallOutcome` 的 `failed` 分支前面加了 `already-installed` 的兜底：即便预检漏网（例如别的会话
+抢先装好了），也不再报成失败，而是说「已经装好了，重启就能用」。
+
+### 三处接线与测试
+
+| 位置 | 做法 |
+|---|---|
+| `plugin/index.mjs` 的 `pwsh_run_update` install 分支 | 在 `beginInstall()` **之前**调 `preflightInstall`，非 `null` 就带着 `install: <outcome>` 直接返回 —— 连安装闸门都不碰 |
+| `plugin/auto-update.mjs` 的 tick | 预检非 `null` 时把该版本写进 `attempted`（这三种成因都不会自己好转），记一行日志，`ok === true` 时清空 `failures`，本轮结束 |
+| `describeInstallOutcome` | `already-installed` → `ok: true` 的措辞（兜底） |
+
+- `test/updatetest.mjs` 新增 [14] 节 27 项（tag 解析、四种返回与文案、`readInstalledSpec` 五种读法含坏
+  JSON、`preflightInstall` 的接线），69 → 96 项。
+- `test/autoupdatetest.mjs` 新增 [3c] 节 6 项（坏了不去装 / 日志点明 / 不反复重试；磁盘已是最新就不装 /
+  说清要重启 / 同一版本不重复试），32 → 38 项。
+- `test/wiringtest.mjs` 新增 [1d] 节 5 项（假 profile 钉着坏发布的 tag → `install: broken-release` 且
+  `attempts` 为 0；换成别的 tag → `install: applied` 且真调了一次安装器），16 → 21 项。
+
+回归：十份脚本合计 **242 项**（itest 16 / plugintest 15 / e2e 8 / sandboxtest 7 / bashtest 19 /
+bash-e2e 11 / updatetest 96 / autoupdatetest 38 / wiringtest 21 / denialtest 11）。
+
+### 两道防线，分工不同
+
+`scripts/release-check.mjs` 在**推标签之前**跑：工作区不干净、HEAD 的 tag 与 `package.json` 不符、tag
+指向的提交里版本不同、要重指一个已存在的 tag —— 四种都拒。运行时这道预检则在**之后**，在每一台试图
+升级的机器上再拦一次。前者防住自己，后者防住别人（也包括自己某次绕过检查直接 `git tag`）。
+
