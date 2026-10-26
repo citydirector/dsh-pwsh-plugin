@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Persistent pwsh (pwsh_run)",
+    "description": "Run PowerShell script text in a persistent pwsh 7 session: nothing is escaped on the way in, there is no 32K command-line cap, and variables, location, and loaded modules survive from one call to the next. Ships wsl/llrun, a write boundary for the bash tool."
+  }
+}

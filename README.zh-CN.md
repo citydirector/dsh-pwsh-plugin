@@ -10,6 +10,11 @@
 同一仓库还带 `wsl/llrun`：一个 C 垫片，给 WSL 里的 `bash` 工具补上真正的写边界。
 详见 [docs/llrun.md](docs/llrun.md)。
 
+插件页会显示本包自己的图标、本地化标题与简介；界面语言是中文时，简介下方读的是这份
+`README.zh-CN.md`，而不是英文那份。三处都声明在宿主真正去看的位置：图标走 `package.json` 的
+`icon` 字段（`icon.svg`），文字走 `locale/en.json` 与 `locale/zh.json` —— 文件名不叫 `README` 的文档
+只有靠 `meta.detail` 才读得到。
+
 需要 **DSH 0.2.0-rc.2 或更新**（在 0.2.0-rc.2 与 0.2.1-rc.2 上验过）与 **PowerShell 7**。
 
 ## 为什么需要它
@@ -316,6 +321,7 @@ test/
   autoupdatetest.mjs  自动更新循环、退避、空闲闸门，以及它依赖的 HMR 上下文逃逸
   wiringtest.mjs      更新提示真的接到工具输出末尾、安装要等会话空闲
   denialtest.mjs      沙箱拒绝提示只在该触发的报错上触发
+  metatest.mjs        插件页元数据：locale、icon，以及页面到底读哪份文档
 wsl/
   llrun.c llrun      C 垫片与构建产物
   custom-bash.mjs    bundle 接进组合的 bash 工具替代实现（仅 Windows）
@@ -336,9 +342,10 @@ node test/updatetest.mjs                     # 96：更新检查、安装结果�
 node test/autoupdatetest.mjs                 # 38：自动安装、退避、空闲闸门、安装前预检、HMR 上下文逃逸
 node test/wiringtest.mjs                     # 21：更新提示接线、空闲闸门、安装前预检的接线
 node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
+node test/metatest.mjs                       # 23：插件页元数据（不起子进程，哪儿都能跑）
 ```
 
-十份脚本合计 **243 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十一份脚本合计 **266 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

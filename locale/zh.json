@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "常驻 pwsh (pwsh_run)",
+    "description": "把 PowerShell 脚本正文送进一个常驻 pwsh 7 会话：路上不做任何转义、没有 32K 命令行上限，变量 / 当前目录 / 已加载模块跨调用保留。附带 wsl/llrun，为 bash 工具补上写边界。",
+    "detail": "README.zh-CN.md"
+  }
+}

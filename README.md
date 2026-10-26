@@ -11,6 +11,11 @@ It sits **next to** the built-in `pwsh` tool, it does not replace it.
 The same repository also carries `wsl/llrun`, a small C shim that gives the `bash` tool a real write
 boundary inside WSL. See [docs/llrun.md](docs/llrun.md).
 
+The plugin page shows this package's own icon, its localized title and summary, and — in a Chinese UI —
+`README.zh-CN.md` rather than the English one. Each piece is declared where the harness looks for it:
+`icon.svg` through `package.json`'s `icon` field, and the text through `locale/en.json` plus
+`locale/zh.json` (only `meta.detail` can reach a document whose name is not literally `README`).
+
 Requires **DSH 0.2.0-rc.2 or newer** (tested on 0.2.0-rc.2 and 0.2.1-rc.2) and **PowerShell 7**.
 
 ## Why you want it
@@ -353,6 +358,7 @@ test/
   autoupdatetest.mjs  the automatic loop, its back-off, its idle gate, and the HMR-context escape it needs
   wiringtest.mjs      the update notice lands at the end of tool output, and installs wait for an idle session
   denialtest.mjs      the sandbox-denial hint fires on the right messages only
+  metatest.mjs        the plugin-page metadata: locale, icon, and which document the page selects
 wsl/
   llrun.c llrun      the C shim and its build
   custom-bash.mjs    the bash tool replacement the bundle wires in (Windows only)
@@ -373,9 +379,10 @@ node test/updatetest.mjs                     # 96: update check, install outcome
 node test/autoupdatetest.mjs                 # 38: automatic install, back-off, idle gate, pre-flight, HMR-context escape
 node test/wiringtest.mjs                     # 21: update notice wiring, idle gate, pre-flight wiring
 node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
+node test/metatest.mjs                       # 23: plugin-page metadata (no spawn, runs anywhere)
 ```
 
-Ten scripts, **243 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Eleven scripts, **266 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.
