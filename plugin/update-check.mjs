@@ -137,7 +137,10 @@ export function updateVerdict(tags, current) {
   return { state: 'current', ...(latest !== undefined ? { latest } : {}) }
 }
 
-/** 本包自己的版本，每次都现读：热替换之后读到的就是新版本。 */
+/**
+ * 本包自己的版本。每次**调用**都现读 package.json —— 注意 UpdateChecker 只在构造时调一次，
+ * 所以实例上的版本是构造那一刻的磁盘值。热替换会重新 apply、重建实例，两者因此仍然对齐。
+ */
 export function packageVersion(fromUrl = import.meta.url) {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', fromUrl), 'utf8'))
@@ -157,7 +160,8 @@ export function packageVersion(fromUrl = import.meta.url) {
 export class UpdateChecker {
   /**
    * @param options - `{ env, api, delayMs, intervalMs, log, source, version }`。
-   *   `version` 缺省时读本包 package.json；`log` 是接受一行文本的日志函数。
+   *   `version` 缺省时在**构造这一刻**读一次本包 package.json，之后固定在实例上；
+   *   `log` 是接受一行文本的日志函数。
    */
   constructor(options = {}) {
     this.env = options.env ?? process.env

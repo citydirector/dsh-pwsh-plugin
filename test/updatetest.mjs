@@ -228,6 +228,14 @@ try {
     }, 'github:owner/repo#v1.0.1')
     same('抛错时 outcome=threw', threw.outcome, 'threw')
     check('抛错文案带上原始原因', threw.text.includes('profile is locked'), threw.text)
+
+    // HMR 在场且安装跑在它的事务之外：代码是真换过来了，这时再要求重启就是误报。
+    const inPlace = await installRelease({
+      async installBundle() { return { application: 'applied', changed: true } },
+    }, 'github:owner/repo#v1.0.1', { live: true })
+    check('live 装成功时 ok=true', inPlace.ok === true)
+    check('live 不再要求重启', !inPlace.text.includes('Restart DSH'), inPlace.text)
+    check('live 明确说已在跑', inPlace.text.includes('already running'), inPlace.text)
   }
 } finally {
   cleanup()
