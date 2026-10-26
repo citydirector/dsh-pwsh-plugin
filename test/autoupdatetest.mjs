@@ -299,7 +299,8 @@ try {
     const checker = new UpdateChecker({ source: { kind: 'git', url: release.url, spec: release.spec }, version: '0.0.1' })
     const logs = []
     const stop = startAutoUpdate(ctx, checker, { firstDelayMs: 5, intervalMs: 20, log: (line) => logs.push(line) })
-    await sleep(200)
+    // 这一轮的 check() 要起真 git 子进程量一次 tag，固定 sleep 会偶发假失败：等日志落地。
+    await waitFor(() => logs.length > 0, 8000)
     check('没有 HMR 就不装', manager.attempts.length === 0, 'attempts=' + manager.attempts.length)
     check('但要说清为什么', logs.some((line) => /no HMR/.test(line)), JSON.stringify(logs))
     stop()
