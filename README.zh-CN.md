@@ -15,7 +15,7 @@
 `icon` 字段（`icon.svg`），文字走 `locale/en.json` 与 `locale/zh.json` —— 文件名不叫 `README` 的文档
 只有靠 `meta.detail` 才读得到。
 
-需要 **DSH 0.2.0-rc.2 或更新**（在 0.2.0-rc.2 与 0.2.1-rc.2 上验过）与 **PowerShell 7**。
+需要 **DSH 0.2.0-rc.2 或更新**（在 0.2.0-rc.2 与 0.2.1-rc.3 上验过）与 **PowerShell 7**。
 
 ## 为什么需要它
 

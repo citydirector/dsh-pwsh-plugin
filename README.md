@@ -16,7 +16,7 @@ The plugin page shows this package's own icon, its localized title and summary, 
 `icon.svg` through `package.json`'s `icon` field, and the text through `locale/en.json` plus
 `locale/zh.json` (only `meta.detail` can reach a document whose name is not literally `README`).
 
-Requires **DSH 0.2.0-rc.2 or newer** (tested on 0.2.0-rc.2 and 0.2.1-rc.2) and **PowerShell 7**.
+Requires **DSH 0.2.0-rc.2 or newer** (tested on 0.2.0-rc.2 and 0.2.1-rc.3) and **PowerShell 7**.
 
 ## Why you want it
 
