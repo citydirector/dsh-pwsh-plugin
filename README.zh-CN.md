@@ -326,7 +326,7 @@ FINDINGS.md          全部实测数据与设计理由
 
 ```bash
 cd <检出目录>
-PWSH_BIN='pwsh' node test/itest.mjs          # 16：协议与会话本体
+PWSH_BIN='pwsh' node test/itest.mjs          # 17：协议与会话本体
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15：插件完整路径
 node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
@@ -338,7 +338,7 @@ node test/wiringtest.mjs                     # 21：更新提示接线、空闲�
 node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
 ```
 
-十份脚本合计 **242 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十份脚本合计 **243 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

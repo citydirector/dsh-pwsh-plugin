@@ -112,6 +112,17 @@ try { unlinkSync(stealFile); } catch {}
 check("child-stdio-detached", r.sentinel === "ok" && r.out.join("|") === "POST" && stole === "CHILD-EOF",
   "sentinel=" + r.sentinel + " out=" + JSON.stringify(r.out) + " stole=" + stole);
 
+// 9b. 子进程的 UTF-8 输出必须原样出来。PowerShell 用 Console.OutputEncoding 解码子进程的
+//     stdout，而这个值默认跟着系统 ANSI 代码页（中文 Windows 是 gb2312），于是 node / git / gh
+//     打的中文全变乱码 —— 同一个脚本走原生 pwsh 工具却正常。服务端现在显式设成 UTF-8，
+//     这条用例把「显式」钉死：改成 gb2312 的话，只有这一行会红。
+//    用测试自己的 node 可执行文件，免得依赖会话里的 PATH。
+const nodeExe = process.execPath.replace(/'/g, "''");
+r = await s.run("& '" + nodeExe + "' -e \"console.log('中文 / café')\"", 20000);
+const decoded = r.out.join("\n");
+check("child-utf8-output", r.sentinel === "ok" && decoded.includes("中文") && decoded.includes("café"),
+  "sentinel=" + r.sentinel + " out=" + JSON.stringify(decoded));
+
 // 10. 崩溃 → 会话死亡可见
 const before = s.dead;
 r = await s.run("[Environment]::Exit(9)", 10000).catch((e) => ({ rejected: String(e) }));

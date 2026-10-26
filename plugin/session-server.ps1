@@ -32,6 +32,12 @@
 
 $ErrorActionPreference = 'Continue'
 $Utf8 = [Text.UTF8Encoding]::new($false)
+# 子进程的 stdout 是按它自己的编码吐的（node / git / gh 都是 UTF-8），PowerShell 用
+# Console.OutputEncoding 去解码这些字节。这个值默认跟随系统 ANSI 代码页（本机是 gb2312），
+# 于是「node -e "console.log('中文')"」在常驻会话里全变成乱码——原生 pwsh 工具没这个问题，
+# 因为它的启动前导显式设了 UTF-8。这里补上同一句。
+[Console]::OutputEncoding = $Utf8
+$OutputEncoding = $Utf8
 # 原始 stdin 交给协议读取器独占；再把 Console.In 换成安全空流
 # 否则用户脚本一句 [Console]::In.ReadLine() 就会吃掉协议数据，整个会话失联（已实测）
 $ProtoIn = [IO.StreamReader]::new([Console]::OpenStandardInput(), $Utf8)

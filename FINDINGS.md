@@ -1538,8 +1538,9 @@ if (this.ownerContext.get("hmr") !== void 0 && known !== void 0 && Object.hasOwn
 - `test/wiringtest.mjs` 新增 [1d] 节 5 项（假 profile 钉着坏发布的 tag → `install: broken-release` 且
   `attempts` 为 0；换成别的 tag → `install: applied` 且真调了一次安装器），16 → 21 项。
 
-回归：十份脚本合计 **242 项**（itest 16 / plugintest 15 / e2e 8 / sandboxtest 7 / bashtest 19 /
-bash-e2e 11 / updatetest 96 / autoupdatetest 38 / wiringtest 21 / denialtest 11）。
+回归：十份脚本合计 **242 项**（itest 17 / plugintest 15 / e2e 8 / sandboxtest 7 / bashtest 19 /
+bash-e2e 11 / updatetest 96 / autoupdatetest 38 / wiringtest 21 / denialtest 11）；第三十节又加了 1 项，
+当前总数以那一节为准。
 
 ### 两道防线，分工不同
 
@@ -1547,3 +1548,50 @@ bash-e2e 11 / updatetest 96 / autoupdatetest 38 / wiringtest 21 / denialtest 11�
 指向的提交里版本不同、要重指一个已存在的 tag —— 四种都拒。运行时这道预检则在**之后**，在每一台试图
 升级的机器上再拦一次。前者防住自己，后者防住别人（也包括自己某次绕过检查直接 `git tag`）。
 
+
+## 三十、常驻会话里子进程的中文是乱码（2026-10-25）
+
+### 症状
+同一条命令在两个工具里结果不同：
+
+| 命令 | 原生 `pwsh` 工具 | `pwsh_run` |
+|---|---|---|
+| `node -e "console.log('中文 / café')"` | `中文 / café` | `涓枃 / caf茅` |
+| `cmd /c echo 中文` | `中文` | `中文` |
+
+只有 **UTF-8 输出的原生 exe**（node、git、gh、python）坏掉，`cmd` 的 GBK 输出反而正常 —— 这说明不是
+管道坏了，是**解码用的代码页选错了**。
+
+### 根因
+PowerShell 用 `[Console]::OutputEncoding` 解码原生 exe 的 stdout 字节。这个值默认跟随系统 ANSI 代码页，
+中文 Windows 上是 **gb2312 / 936**；而 node、git、gh 都按 UTF-8 写字节。原生的 `pwsh` 工具没这个问题，
+因为 `@deepseek-ai/dsh-pwsh-local/lib/index.js:100` 的 `ENCODING_PREAMBLE` 在每一行命令前塞了：
+
+```js
+"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+```
+
+常驻会话没有这句 —— `plugin/session-server.ps1` 只在协议流上用了 UTF-8（`$Utf8` 给 `StreamReader` /
+`StreamWriter`），从没碰过 `Console.OutputEncoding`。
+
+### 修法
+`plugin/session-server.ps1` 开头、`$Utf8` 定义之后加两句（外加一段说明为什么）：
+
+```powershell
+[Console]::OutputEncoding = $Utf8
+$OutputEncoding = $Utf8
+```
+
+安全：实测 `[Console]::SetOut($mem)` 之后设 `OutputEncoding` **不会**把 `Console.Out` 换回真 stdout
+（`ReferenceEquals($w1, $w3)` 为 `True`，`$mem.BaseStream.Length` 仍是 0）—— 第 2 条「Console 隔离」
+那层加固不受影响。
+
+### 测试
+`test/itest.mjs` 新增第 9b 项 `child-utf8-output`：用 `process.execPath`（测试自己的 node）跑
+`console.log('中文 / café')`，断言输出里两个串都在。把服务端那两句删掉，只有这一行会红。
+itest 16 → **17**，十份合计 **243 项**。
+
+### 一并记下的观察
+`[Console]::OutputEncoding` 在同一进程里被改过之后，改回来也没用 —— 会话是「设一次、全场生效」的模型，
+所以必须写在服务端启动处，不能靠每次调用前的前导。这与原生工具每行塞前导的做法不同：常驻会话只有一次
+启动机会，前导会跨调用累积副作用（第 5 条已知代价）。

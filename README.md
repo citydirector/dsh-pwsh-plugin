@@ -363,7 +363,7 @@ FINDINGS.md          every measurement and the reasoning behind the design
 
 ```bash
 cd <checkout>
-PWSH_BIN='pwsh' node test/itest.mjs          # 16: protocol and session core
+PWSH_BIN='pwsh' node test/itest.mjs          # 17: protocol and session core
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15: full plugin path
 node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
@@ -375,7 +375,7 @@ node test/wiringtest.mjs                     # 21: update notice wiring, idle ga
 node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
 ```
 
-Ten scripts, **242 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Ten scripts, **243 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.
