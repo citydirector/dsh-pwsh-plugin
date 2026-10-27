@@ -283,7 +283,11 @@ Remove-Item -Recurse -Force $root
 - **会话是串行的**：并发调用排成队列逐个执行（不会串输出，但也没有并行加速）。
 - **不依赖 WSL。** `pwsh_run` 全程不碰 WSL，只有 `wsl/custom-bash.mjs` 才碰。没有可用的 `bashPath` 时，
   该预设照样加载成功（可执行文件是惰性解析的），`bash` 工具每次调用报
-  `command "<路径>" is not an executable file` —— 清晰失败，不会静默降级。
+  `command "<路径>" is not an executable file` —— 清晰失败，不会静默降级。默认值是裸名 `bash`；
+  PATH 解不出来时，Windows 上会再试 `C:\Windows\System32\bash.exe`（同一个 WSL 垫片）才放弃。
+  设这道后备是因为进程可能继承到一份早于 PATH 修改的环境块，里面没有 `System32` ——
+  没有它就等于整个工具作废。显式写出的绝对 `bashPath` 只认那一个：写错了就该响亮地失败，
+  不该被悄悄换成另一份。
 - **UAC 开启时的行为与本机不同。** 本机实测环境是 UAC 关闭、进程提权。UAC 开着时会话是标准用户，
   此时 ACL 沙箱要求工作区根目录的 DACL 给你 **`WRITE_DAC` 与 `WRITE_OWNER`** —— 全控制两者都满足
   （它写的完整性标签在 SACL 里）。用户目录下的目录天然继承这两样；在盘符根新建的目录只继承
@@ -336,7 +340,7 @@ PWSH_BIN='pwsh' node test/itest.mjs          # 17：协议与会话本体
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15：插件完整路径
 node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
-node test/bashtest.mjs                       # 19：custom-bash 围栏分诊
+node test/bashtest.mjs                       # 22：custom-bash 围栏分诊、bash 后备
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
 node test/updatetest.mjs                     # 96：更新检查、安装结果、安装前预检（只碰本地 git）
 node test/autoupdatetest.mjs                 # 38：自动安装、退避、空闲闸门、安装前预检、HMR 上下文逃逸
@@ -345,7 +349,7 @@ node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起�
 node test/metatest.mjs                       # 23：插件页元数据（不起子进程，哪儿都能跑）
 ```
 
-十一份脚本合计 **266 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十一份脚本合计 **269 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

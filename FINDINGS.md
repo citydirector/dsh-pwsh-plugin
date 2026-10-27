@@ -1595,3 +1595,36 @@ itest 16 → **17**，十份合计 **243 项**。
 `[Console]::OutputEncoding` 在同一进程里被改过之后，改回来也没用 —— 会话是「设一次、全场生效」的模型，
 所以必须写在服务端启动处，不能靠每次调用前的前导。这与原生工具每行塞前导的做法不同：常驻会话只有一次
 启动机会，前导会跨调用累积副作用（第 5 条已知代价）。
+## 三十一、`bash` 的可执行文件要能在 PATH 坏掉时兜住（2026-10-26）
+
+### 症状
+进程继承到的环境块可能早于某次 PATH 修改（`explorer.exe` 起于 10-22 21:21:53，10-26 的误删事故之后没有重建过环境），
+于是 `process.env.PATH` 只有 **615 字符**：user PATH 20 项 + 一个 pwsh 目录，**整个 Machine PATH 都没进来**。
+`bash` 工具因此每次都报 `subprocess-local: command "bash" was not found on PATH`，而 `C:\Windows\System32\bash.exe` 本身是好的：
+
+```
+C:\Windows\System32\bash.exe -s  →  BASH-ABS-OK
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/usr/lib/wsl/lib:...
+```
+
+注册表里的 Machine PATH 是完好的（453 字符，含 system32）；`Start-Process -UseNewEnvironment` 从注册表重建后
+`len=1011 hasSystem32=True`，继承当前环境则是 `len=615 hasSystem32=False`。**坏的只有运行中进程的那份拷贝。**
+
+### 修法
+`bashPath` 默认仍是裸名 `bash`，但解不出来时按顺序再试 `C:\Windows\System32\bash.exe`。三条约束：
+
+1. **只在配置是裸名时启用后备。** 显式写了绝对 `bashPath` 就只认那一个 —— 写错了应当响亮地失败，不能被悄悄换成另一份。
+2. **成功才缓存，失败不缓存。** PATH 修好之后下一次调用立刻能用，不必重启 DSH。
+3. **裸名能解出来就不碰后备。** 多问一次会掩盖 PATH 的真实状态，也让「第一个胜出」这条语义变得不可测。
+
+### 钉住（`test/bashtest.mjs` 新增三条）
+
+| 断言 | 钉的是什么 |
+|---|---|
+| `bash-fallback-used` | 裸名失败 → 后备被调用 → 命令真的跑起来了 |
+| `bash-path-first` | 裸名成功时 `resolveExecutable` 只被问一次，值就是 `bash` |
+| `bash-explicit-not-fallback` | 显式绝对路径失败时直接抛错，且候选列表里只有它一个 |
+
+### 一条诚实说明
+这道后备只救 `bash` 工具。`cmd`、`fsutil` 这类靠 PATH 找的可执行文件依旧找不到 —— 它们没有写死的备选位置。
+真正的解法是重建 `explorer.exe` 的环境块（注销重新登录），那一步要用户挑时机。

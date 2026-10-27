@@ -183,5 +183,61 @@ try {
 }
 apply(ctxBase, { llrunPath: LLRUN })
 
+// M. bash 后备：PATH 上解不出 `bash` 时退回 System32 那个 WSL 垫片。
+// 进程 PATH 缺 System32 是真实会发生的（环境块停在旧快照上），
+// 那时整个 bash 工具会报 "not found on PATH" —— 后备只为这一种情况存在。
+const FALLBACK_BASH = 'C:\\Windows\\System32\\bash.exe'
+const makeCtx = (lookup) => {
+  let R = null
+  const ctx = {
+    subprocess: { ...subprocess, async resolveExecutable(command, env, signal) { return lookup(command, env, signal) } },
+    tools: { register(d) { R = d; return () => {} } },
+    get(name) { return ctxBase.get(name) },
+    effect(fn) { return fn() },
+    on() {},
+  }
+  return { ctx, get: () => R }
+}
+
+// 只有绝对路径能解出来：断言后备被用上，且命令真的跑起来了
+{
+  const seen = []
+  const { ctx, get } = makeCtx((command) => {
+    seen.push(command)
+    if (command === 'bash') throw new Error('subprocess-local: command "bash" was not found on PATH')
+    if (command === FALLBACK_BASH) return command
+    throw new Error('unexpected candidate ' + command)
+  })
+  apply(ctx, { llrunPath: LLRUN })
+  const out = await get().execute({ command: 'echo fallback-shell' }, exec)
+  check('bash-fallback-used', out.text.includes('fallback-shell') && seen.includes(FALLBACK_BASH), JSON.stringify(seen) + ' ' + JSON.stringify(out.text).slice(0, 80))
+}
+
+// 裸名能解出来时不该碰后备：多问一次会掩盖 PATH 的真实状态
+{
+  const seen = []
+  const { ctx, get } = makeCtx((command) => {
+    seen.push(command)
+    if (command === 'bash') return WSL_BASH
+    throw new Error('should not probe ' + command)
+  })
+  apply(ctx, { llrunPath: LLRUN })
+  await get().execute({ command: 'echo first-wins' }, exec)
+  check('bash-path-first', seen.length === 1 && seen[0] === 'bash', JSON.stringify(seen))
+}
+
+// 显式绝对路径只认那一个：配置写错时应当报错，而不是被悄悄换成能用的那份
+{
+  const seen = []
+  const { ctx, get } = makeCtx((command) => {
+    seen.push(command)
+    throw new Error('subprocess-local: command ' + JSON.stringify(command) + ' is not an executable file')
+  })
+  apply(ctx, { bashPath: 'C:\\nowhere\\bash.exe', llrunPath: LLRUN })
+  let msg = 'NO-ERROR'
+  try { await get().execute({ command: 'echo x' }, exec) } catch (error) { msg = String(error?.message ?? error) }
+  check('bash-explicit-not-fallback', msg.includes('is not an executable file') && seen.length === 1 && seen[0] === 'C:\\nowhere\\bash.exe', JSON.stringify(seen) + ' ' + msg.slice(0, 90))
+}
+
 console.log(results.join('\n'))
 console.log('TOTAL pass=' + results.filter((x) => x.startsWith('PASS')).length + ' fail=' + results.filter((x) => x.startsWith('FAIL')).length)

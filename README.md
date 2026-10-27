@@ -314,7 +314,11 @@ derives every path from its own location and re-checks the disk for leaks.
 - **No WSL is required.** `pwsh_run` never touches WSL; only `wsl/custom-bash.mjs` does. Without a usable
   `bashPath`, applying that preset still succeeds (the executable is resolved lazily) and the `bash` tool
   fails per call with `command "<path>" is not an executable file` — a clear failure, not a silent
-  downgrade.
+  downgrade. The default is the bare name `bash`; when PATH cannot resolve it, the Windows build retries
+  `C:\Windows\System32\bash.exe` (the same WSL shim) before giving up. That fallback exists because a
+  process can inherit an environment block that predates a PATH edit and then lacks `System32`, which
+  otherwise costs you the whole tool. An explicit absolute `bashPath` is honoured alone — a typo there
+  should fail loudly rather than be silently redirected.
 - **UAC behaves differently from this machine.** These measurements come from a box with UAC off, where the
   process runs elevated. With UAC on, sessions run as a standard user, and the ACL sandbox needs the
   workspace root's DACL to give you **`WRITE_DAC` and `WRITE_OWNER`** — full control satisfies both, because
@@ -373,7 +377,7 @@ PWSH_BIN='pwsh' node test/itest.mjs          # 17: protocol and session core
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15: full plugin path
 node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
-node test/bashtest.mjs                       # 19: custom-bash fence triage
+node test/bashtest.mjs                       # 22: custom-bash fence triage, bash fallback
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
 node test/updatetest.mjs                     # 96: update check, install outcomes, pre-flight, local git only
 node test/autoupdatetest.mjs                 # 38: automatic install, back-off, idle gate, pre-flight, HMR-context escape
@@ -382,7 +386,7 @@ node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn
 node test/metatest.mjs                       # 23: plugin-page metadata (no spawn, runs anywhere)
 ```
 
-Eleven scripts, **266 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Eleven scripts, **269 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.

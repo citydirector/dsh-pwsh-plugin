@@ -12,7 +12,9 @@
  *   组合里因此把 `bashPath` 指向 `C:\Windows\System32\bash.exe`，描述写明「WSL Debian」。
  *
  * 配置
- *   bashPath        可执行文件：绝对路径，或 `bash`（经 PATH 解析）。默认 `bash`。
+ *   bashPath        可执行文件：绝对路径，或 `bash`（经 PATH 解析）。默认 `bash`，
+ *                   解不到时再试 win32 上的 C:\Windows\System32\bash.exe（同一个 WSL 垫片），
+ *                   免得 PATH 少一项整个工具就废掉。显式给绝对路径则只认那一个。
  *   timeoutMs       单次命令超时，默认 120000。超时会终止进程并返回已收集的输出。
  *   maxOutputBytes  stdout / stderr 各自的收集上限，默认 64000。
  *   llrunPath       WSL 侧的 llrun 二进制（POSIX 路径）。默认按顺序探测 $LLRUN、
@@ -49,6 +51,14 @@ export const name = 'custom-bash'
 
 /** 注册前必须已有的服务。 */
 export const inject = ['subprocess', 'tools']
+
+/**
+ * `bash` 解不出来时的后备可执行文件。
+ * PATH 上缺 System32 是真实会发生的（进程环境块可能停在旧快照上），
+ * 而 WSL 垫片的位置是固定的，写死它比让整个工具报 "not found on PATH" 划算。
+ * 只在配置给的是裸名时启用；给了绝对路径就只认那一个。
+ */
+const WINDOWS_BASH_FALLBACKS = ['C:\\Windows\\System32\\bash.exe']
 
 const DEFAULT_TIMEOUT_MS = 120000
 const DEFAULT_MAX_OUTPUT_BYTES = 64000
@@ -153,12 +163,37 @@ function toWslPath(path) {
 
 export function apply(ctx, config) {
   const bashPath = typeof config?.bashPath === 'string' && config.bashPath.length > 0 ? config.bashPath : 'bash'
+  // 裸名才允许走后备：显式绝对路径是用户的明确选择，替他改路径反而掩盖配置错误。
+  const bashCandidates = bashPath === 'bash' && process.platform === 'win32'
+    ? ['bash', ...WINDOWS_BASH_FALLBACKS]
+    : [bashPath]
   const timeoutMs = Number.isSafeInteger(config?.timeoutMs) && config.timeoutMs > 0 ? config.timeoutMs : DEFAULT_TIMEOUT_MS
   const maxOutputBytes = Number.isSafeInteger(config?.maxOutputBytes) && config.maxOutputBytes > 0 ? config.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES
   // 显式配置时只认那一个；否则探测候选。解析结果跨调用缓存，失败不缓存。
   const configuredLlrun = typeof config?.llrunPath === 'string' && config.llrunPath.length > 0 ? config.llrunPath : undefined
   const llrunCandidates = configuredLlrun === undefined ? defaultLlrunCandidates() : [configuredLlrun]
   const fenceEnabled = config?.fence !== false
+
+  /**
+   * bash 解析：按 bashCandidates 顺序问 subprocess 服务，第一个解出来的胜出。
+   * 缓存成功结果、不缓存失败 —— PATH 修好之后下一次调用立刻能用，不必重启 DSH。
+   * 全都解不出来时把最后一个错误抛出去：它带的是 "was not found on PATH"，
+   * 只有一次 resolve 时也就是原来的行为，文案不变。
+   */
+  let resolvedShell
+  async function resolveShell(signal) {
+    if (resolvedShell !== undefined) return resolvedShell
+    let lastError
+    for (const candidate of bashCandidates) {
+      try {
+        resolvedShell = await ctx.subprocess.resolveExecutable(candidate, undefined, signal)
+        return resolvedShell
+      } catch (error) {
+        lastError = error
+      }
+    }
+    throw lastError
+  }
 
   /**
    * llrun 解析：返回真正可执行的那个路径，探测不到返回 undefined。
@@ -208,7 +243,7 @@ export function apply(ctx, config) {
     },
     async execute(args, exec) {
       const signal = withTimeout(exec?.signal, timeoutMs)
-      const shell = await ctx.subprocess.resolveExecutable(bashPath, undefined, exec?.signal)
+      const shell = await resolveShell(exec?.signal)
 
       // POSIX 路径（WSL 视角）不能作为 Windows 进程 cwd；
       // 有围栏时交给 llrun 的 `-C`（在 landlock 之后 chdir），无围栏时退化为命令内 cd。
