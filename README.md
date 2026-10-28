@@ -54,6 +54,12 @@ It does **not** disable the stock `tool-bash`: that row already carries `disable
 > pnpm's `minimumReleaseAge` defaults to 1440 minutes, so a version published today is not resolved
 today — pressing update installs the previous release. That is the supply-chain policy, not a failure.
 
+> For the first five minutes after `npm publish` the tarball URL still answers **404** from the CDN
+edge (`cache-control: public, max-age=300`) even though the version document and `dist-tags.latest` are
+already updated. Installing inside that window fails with `ERR_PNPM_FETCH_404 … .tgz: Not Found`, which
+reads like a permissions problem and is not one. Wait the five minutes out; a `?nocache=` query string
+bypasses the cache but neither npm nor pnpm will fetch that URL.
+
 **Sidebar.** Plugins → Add plugin → `https://github.com/citydirector/dsh-pwsh-plugin`, then switch it on.
 
 **CLI.** The `desktop` profile can only be managed by the desktop application's own CLI:

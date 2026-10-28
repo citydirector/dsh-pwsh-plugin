@@ -50,6 +50,8 @@
 
 > 注意 pnpm 的 `minimumReleaseAge` 默认 1440 分钟：刚发布的版本当天不会自动解析到，点「更新」会装到上一个版本。这是供应链策略，不是装错。
 
+> `npm publish` 之后的头五分钟里，tarball 地址在 CDN 边缘仍返回 **404**（`cache-control: public, max-age=300`），而版本文档和 `dist-tags.latest` 都已经是新值。在这段时间里安装会报 `ERR_PNPM_FETCH_404 … .tgz: Not Found`，看起来像权限问题，其实不是。等满五分钟即可；加 `?nocache=` 能绕过缓存，但 npm 和 pnpm 都不会去取那个地址。
+
 **侧栏。** Plugins → Add plugin → `https://github.com/citydirector/dsh-pwsh-plugin`，然后打开开关。
 
 **命令行。** `desktop` profile 只能由桌面端自带的 CLI 管：

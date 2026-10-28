@@ -1777,6 +1777,41 @@ workflow 文件有效的令牌）。仓库里不放 `NPM_TOKEN`。
 passkey（WebAuthn）、没有 TOTP 入口 —— 产不出 `--otp` 要的六位码。OIDC 把「谁能发」从「持有一个长期
 令牌的人」换成「这个仓库的这个 workflow」，同时消掉了令牌本身。
 
+#### 实测：OIDC 这条路当时走不通，0.2.13 是用 token 发的
+
+Trusted publisher 要在 npm 的 `/package/<name>/access` 页上绑定，提交表单后 npm 要求二次验证，
+而该账号的 2FA **只有 WebAuthn security key**（Bitwarden passkey），页面上只有一个 `Use security key`
+按钮；没有 TOTP 入口，也就没有可以填进 `--otp` 的六位码。**这一步需要人亲手碰钥匙，自动化在这里
+必须停手。**
+
+所以 0.2.13 走的是已经验证过的老路：从用户环境变量取 `NPM_TOKEN`，写一份临时 `.npmrc`
+（`//registry.npmjs.org/:_authToken=…`），`npm publish --access public`，发完立刻删掉 `.npmrc`。
+结果 `+ dsh-pwsh-plugin@0.2.13`、`http fetch PUT 202`、`exit 0`。**token 没有进对话，也没有留在磁盘。**
+
+顺带一条：`actions/setup-node` 一旦配了 `registry-url`，就会写一行空的
+`_authToken=${NODE_AUTH_TOKEN}`；npm 看到「有但为空」的凭据就不再走 OIDC，服务端把它映射成
+误导性的 `404 Not Found - PUT https://registry.npmjs.org/<pkg>`（provenance 都签成了、sigstore 也记了）。
+`0ae4bf5` 去掉 `registry-url` 并显式删掉这行，就是为了让 OIDC 接手。
+
+#### 实测：发布后头五分钟，tarball 在 CDN 上是 404
+
+`PUT 202` 返回时版本文档和 `dist-tags.latest` 已经是新值，但 tarball 地址
+`/-/dsh-pwsh-plugin-0.2.13.tgz` 仍回 **404**，响应头是 `cache-control: public, max-age=300`、
+`age: 179` —— Cloudflare 边缘缓存着一份「还没发布」时的 404。`pnpm add` 因此报：
+
+```
+[ERR_PNPM_FETCH_404] GET https://registry.npmjs.org/dsh-pwsh-plugin/-/dsh-pwsh-plugin-0.2.13.tgz:
+Not Found - 404
+No authorization header was set for the request.
+```
+
+看起来像权限问题，其实只是缓存。等满 300 秒后同一个 URL 立刻 200，`cache-control` 变成
+`immutable, max-age=31557600`。**没有捷径**：带 `?nocache=` 的地址能绕缓存，但 npm / pnpm 只会去取
+文档里那个裸 URL。实操口径于是写成「发布后等五分钟再装」。
+
+附带一个无害的副作用：安装失败那次已经把 `dsh-pwsh-plugin@0.2.13` 写进了 profile 的
+`pnpm-workspace.yaml` → `minimumReleaseAgeExclude`，重试时直接复用。
+
 ### 测试
 
 `test/support.mjs` 里加了 `startRegistry`：用 `node:http` 起一个本机假 registry，记录每次请求的
