@@ -13,6 +13,14 @@ name: Release
 #   workflow   release.yml
 #   environment (leave empty)
 # Until that is saved, this workflow fails with 403 and nothing else can fix it.
+#
+# setup-node is deliberately NOT given a registry-url, and the publish step deletes
+# any _authToken line from the npmrc. With registry-url set, setup-node writes
+# "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}"; this workflow has no such
+# secret, so the value is empty — and npm treats a present-but-empty _authToken as
+# the credential to use, never performing the OIDC exchange. The registry answers
+# that with a misleading 404 ("Not found"), not 401. Measured on the first run of
+# this file: provenance was signed, sigstore logged it, and the PUT still 404'd.
 
 on:
   push:
@@ -45,14 +53,23 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
 
-      # Trusted publishing needs npm 11.5.1 or newer; Node 24 ships 11.x but pin
-      # the floor rather than trust it.
-      - name: Check npm supports trusted publishing
+      # Trusted publishing needs npm 11.5.1 or newer, and it only takes effect when
+      # no _authToken is configured. Both are checked here rather than assumed: a
+      # stale npmrc turns the publish into an opaque 404 instead of an error that
+      # says what is wrong.
+      - name: Check the publish prerequisites
         run: |
           npm --version
           node -e "const [a,b,c]=require('child_process').execSync('npm --version').toString().trim().split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm 11.5.1 or newer is required'); process.exit(1) }"
+          if npm config get //registry.npmjs.org/:_authToken >/dev/null 2>&1; then
+            echo "removing a configured _authToken so trusted publishing is used"
+            npm config delete //registry.npmjs.org/:_authToken
+          fi
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NODE_AUTH_TOKEN is set; it would override trusted publishing" >&2
+            exit 1
+          fi
 
       # The version in package.json is what the update check compares against the
       # registry, so a mismatch here would publish a version nobody can upgrade to.
