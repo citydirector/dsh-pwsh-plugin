@@ -62,8 +62,8 @@ today — pressing update installs the previous release. That is the supply-chai
 $dsh = '<desktop install>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # the data root the desktop app itself uses
 
-# <tag> is any released tag; the newest one is what the plugin itself would install
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#<tag>'
+# <version> is any published version; the newest one is what the plugin itself would install
+& $dsh plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
 # or, from a local checkout
 & $dsh plugin --profile desktop add 'file:<path to checkout>'
 ```
@@ -74,10 +74,12 @@ back out. Verify with `--dump-config` on a non-reserved profile, where the row s
 
 Two things to know before you choose a spec:
 
-- **`github:` copies, `file:` hard-links.** A `github:` install is a snapshot of the tag — editing the checkout
-  changes nothing until you run `add` again. A `file:` install hard-links the checkout, so edits are live
-  immediately (`fsutil hardlink list` shows both paths), at the cost of pinning an absolute path in
-  `package.json`. Use `file:` while developing, `github:` for keeps.
+- **A registry spec copies, `file:` hard-links.** `dsh-pwsh-plugin@X.Y.Z` installs one copy of that release —
+  editing the checkout changes nothing until you run `add` again. A `file:` install hard-links the checkout,
+  so edits are live immediately (`fsutil hardlink list` shows both paths), at the cost of pinning an absolute
+  path in `package.json`. Use `file:` while developing, a registry spec for keeps.
+  `github:citydirector/dsh-pwsh-plugin#<tag>` still works and installs the same copy, but it goes around
+  pnpm's supply-chain policy.
 - **The bundle row cannot carry `?v=N`.** Its `name` must be the package name so it resolves from the
   profile's `node_modules`, so there is no URL to change and ESM keeps serving the module it already cached.
   Changing a file under `node_modules` is only picked up if the host happens to run a recomposition later;
@@ -136,7 +138,7 @@ When order matters, merge them yourself: `2>&1` or `*>&1`.
 | `maxSessions` | `4` | How many sessions may live at once (one per agent workspace). |
 | `maxOutputBytes` | `8388608` | Output collection cap per call (8 MB). Truncation is reported honestly, never silently. |
 | `allowUnconfined` | `false` | `true` = start a session even when the sandbox policy service is missing. |
-| `updateCheck` | `true` | Look for release tags periodically. Checking and installing are separate: this only checks; `pwsh_run_update` and auto-update do the install. |
+| `updateCheck` | `true` | Look for newer published versions periodically. Checking and installing are separate: this only checks; `pwsh_run_update` and auto-update do the install. |
 | `autoUpdate` | `true` | Install a newer release by itself, and — where the host runs HMR — take effect without a restart. |
 | `autoUpdateDelayMs` | `90000` | Wait before the first automatic check, so start-up is not competing with pnpm. |
 
@@ -174,14 +176,14 @@ runspace. The tool reports that clearly and points at the built-in `pwsh` tool, 
 
 ## Updates
 
-Left alone, the plugin upgrades itself: 90 seconds after start, then every 12 hours, it reads the release
-tags, and a newer `vX.Y.Z` is installed on the spot. On a host that runs DSH's HMR service the new code is
+Left alone, the plugin upgrades itself: 90 seconds after start, then every 12 hours, it reads the `latest`
+dist-tag from the npm registry, and a newer release is installed on the spot. On a host that runs DSH's HMR service the new code is
 **already live when the install returns** — no restart, no prompt, nothing for the user to do.
 
 | How | What happens |
 |---|---|
 | Automatic (`autoUpdate: true`, default) | Checks, installs, and takes effect in place. A failed install backs off exponentially (5 min doubling to 2 h) and tries again; a version that installed successfully is not retried. **Never while a call is running** — it retries in 3 minutes. On a host **without** HMR it installs nothing — see below. |
-| `pwsh_run_update` `action: "check"` | Reads the tags once and reports `state` / `running` / `newest release` / `install spec`. Installs nothing. |
+| `pwsh_run_update` `action: "check"` | Reads the registry once and reports `state` / `running` / `newest release` / `install spec`. Installs nothing. |
 | `pwsh_run_update` `action: "install"` | The same install, driven by hand instead of by the clock. Reports `install: postponed` if a call is running, and `install: restart-required` / `install: broken-release` when a pre-flight check says installing would achieve nothing (see below). |
 
 The install goes through `ctx.get('pluginManager')` — the service behind the Plugins page — which runs pnpm
@@ -230,39 +232,31 @@ Without `pluginManager` — a profile where the `plugin-manager` service is disa
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#<tag>'
+& '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
 ```
 
 Note that DSH's stock composition disables the *tool* `plugin_manager` while leaving the *service* running
 for desktop profiles; the two are different things, and only the service is used here.
 
-The default source is `github:citydirector/dsh-pwsh-plugin`, read via `GET /repos/<repo>/tags`. A tag must
-match `^v\d+\.\d+\.\d+$` (prereleases are never offered), and the highest version wins.
+The source is the npm registry entry for this package: `GET https://registry.npmjs.org/dsh-pwsh-plugin`
+with `accept: application/vnd.npm.install-v1+json`. Its `dist-tags.latest` is the release to offer; it must
+be a plain `X.Y.Z`. A `latest` marked `deprecated` is never offered, and without a `dist-tags` the check
+falls back to the highest stable version in the version list. A `404` is reported as "not published on
+<registry>" rather than "no newer release" — those are different facts, and only one of them is temporary.
+
+The install spec is the registry form, `dsh-pwsh-plugin@X.Y.Z`, so what the plugin asks for and what
+`dsh plugin add` accepts are the same string.
 
 | Environment variable | Effect |
 |---|---|
-| `DSH_PWSH_UPDATE_SOURCE` | `owner/repo` → GitHub; `git+<url>` → plain `git ls-remote --tags` (`git+file:///path` rehearses locally) |
-| `DSH_PWSH_UPDATE_API` | GitHub API base, default `https://api.github.com` |
+| `DSH_PWSH_UPDATE_REGISTRY` | Registry base URL, default `https://registry.npmjs.org`. Point it at a mirror, or at a local server to rehearse. |
 | `DSH_PWSH_UPDATE_DELAY_MS` | First check delay, default 5000 |
 
-To rehearse locally, make a tagged repository and point the source at it:
-
 ```powershell
-$root = Join-Path $env:TEMP ('pwsh-rel-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-git init -q -b main $root
-git -C $root -c user.email=t@l -c user.name=t commit -q --allow-empty -m release
-git -C $root tag v0.2.1
-$env:DSH_PWSH_UPDATE_SOURCE = 'git+file:///' + ($root -replace '\\','/')
-node -e "import('./plugin/update-check.mjs').then(async (m) => console.log(JSON.stringify(await new m.UpdateChecker({ version: '0.1.0' }).check())))"
-# -> {"state":"available","latest":"v0.2.1","checkedAt":"..."}
-Remove-Item -Recurse -Force $root
+& $dsh plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
 ```
 
-Rehearse on the **Windows** side (`pwsh_run` or the built-in `pwsh` tool). Exporting
-`DSH_PWSH_UPDATE_SOURCE` from a WSL `bash` call never reaches a Windows process — WSL only forwards the
-variables named in `WSLENV`, so every other `DSH_*` disappears and the plugin queries the default GitHub
-repository instead. Crossing over needs `WSLENV=DSH_PWSH_UPDATE_SOURCE`; do **not** add `/p`, which would
-rewrite `/tmp/...` into a `\\wsl.localhost\...` path and break it.
+Installing by hand is the same operation the plugin performs, with the same policy applied by pnpm.
 
 A failed query never throws into the tool call: it records `state: 'failed'`, logs one line through
 `ctx.logger`, and keeps an earlier `latest` as `stale: 'available'` — one network hiccup should not make a
@@ -361,7 +355,7 @@ plugin/
   index.mjs           tool registration, sandbox wiring, timeouts
   session.mjs         the session object: framing, queue, base64 encode, boot argv
   session-server.ps1  the PowerShell side: runspace, stream tagging, sentinels
-  update-check.mjs    release tag lookup and comparison
+  update-check.mjs    registry lookup and version comparison
   update-apply.mjs    hands the pinned spec to pluginManager, never downloads
   auto-update.mjs     the automatic path: install outside the HMR transaction, back off on failure
 test/
@@ -372,7 +366,7 @@ test/
   sandboxtest.mjs     real LocalSandboxProvider, boundary + fail-closed cases
   bashtest.mjs        custom-bash fence triage (mock runtime)
   bash-e2e.mjs        custom-bash end to end (real runtime + real llrun)
-  updatetest.mjs      update check against a local git repository, install outcomes
+  updatetest.mjs      update check against a local registry, install outcomes
   autoupdatetest.mjs  the automatic loop, its back-off, its idle gate, and the HMR-context escape it needs
   wiringtest.mjs      the update notice lands at the end of tool output, and installs wait for an idle session
   denialtest.mjs      the sandbox-denial hint fires on the right messages only
@@ -400,17 +394,24 @@ node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn
 node test/metatest.mjs                       # 23: plugin-page metadata (no spawn, runs anywhere)
 ```
 
-Eleven scripts, **272 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Eleven scripts, **305 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.
 
 ### Releasing
 
+Publishing from a tag is `[.github/workflows/release.yml](.github/workflows/release.yml)`: it runs
+`scripts/release-check.mjs`, then `npm publish --provenance` under npm's **trusted publishing**, which trades
+the runner's short-lived GitHub identity for a token scoped to this repository and this workflow file. No
+`NPM_TOKEN` secret exists, and none should be added. Two consequences worth knowing: the workflow file name is
+part of the trust contract (rename it and every publish fails with 403 until the npm setting is updated), and
+provenance is mandatory there, so the tarball carries a signed statement of which commit built it.
+
 The version in `package.json` is the one thing in this repository that is hard-coded, and the update check
-compares it against the published tags. Tag a commit without bumping it and the check reports a newer
-release forever: the installed files keep reading the old number, so every cycle reinstalls the same tag and
-the back-off climbs to its ceiling. `npm version` writes the version, commits, and tags in one step, which is
+compares it against the published version. Publish without bumping it and the check reports a newer
+release forever: the installed files keep reading the old number, so every cycle requests the same version
+and the back-off climbs to its ceiling. `npm version` writes the version, commits, and tags in one step, which is
 why the three cannot drift apart:
 
 ```powershell

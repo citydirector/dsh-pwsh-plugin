@@ -316,7 +316,7 @@ export function apply(ctx, config) {
     sessions.clear()
   }, 'pwsh-run.sessions')
 
-  // 更新检查：只读发布标签、只记判决，从不自己安装。
+  // 更新检查：只读 npm registry 的 dist-tags、只记判决，从不自己安装。
   // 发现新版本时不改工具描述（描述在注册时就固定了），而是把提示挂在每次调用的
   // 输出末尾一次——够模型看见，也不至于每次刷。
   const checker = updateCheck
@@ -366,10 +366,10 @@ export function apply(ctx, config) {
     name: 'pwsh_run_update',
     description: [
       'Check for, and optionally install, a newer release of the pwsh_run plugin.',
-      '* action "check" reads the release tags once and reports the verdict; it never installs anything.',
-      '* action "install" hands the pinned tag spec to DSH\'s own plugin manager (the same service the Plugins page uses), which runs pnpm and rolls back on failure.',
+      '* action "check" reads the npm registry dist-tags once and reports the verdict; it never installs anything.',
+      '* action "install" hands the pinned version spec (<package>@X.Y.Z) to DSH\'s own plugin manager (the same service the Plugins page uses), which runs pnpm and rolls back on failure.',
       '* Installing writes the package to the profile. Where the host runs its HMR service, the new code is already live when this returns; otherwise the running process keeps the old modules until DSH restarts. The result says which of the two happened.',
-      '* Only vX.Y.Z release tags are considered; pre-releases and branch heads are ignored.',
+      '* Only published stable versions are considered; pre-releases are never pushed. The version actually installed is read back from disk, because pnpm\'s minimumReleaseAge policy can install an older release than the one requested.',
       '* An install replaces this plugin in place, which terminates the persistent pwsh sessions. It is therefore refused while a pwsh_run call is running; retry after that call finishes (the automatic updater applies the same rule on its own).',
     ].join('\n'),
     parameters: {
@@ -413,8 +413,8 @@ export function apply(ctx, config) {
         }
         else {
           // 这条分支上 doc.spec 是 undefined，插值只会印出一个字面占位符，所以给模板。
-          lines.push('Could not reach the release source, so whether a newer version exists is unknown. '
-            + 'Run the check again later, or upgrade by hand: dsh plugin --profile <name> add "github:<owner>/<repo>#vX.Y.Z"')
+          lines.push('Could not reach the npm registry, so whether a newer version exists is unknown. '
+            + 'Run the check again later, or upgrade by hand: dsh plugin --profile <name> add "<package>@X.Y.Z"')
         }
         return { text: lines.join('\n') }
       }
@@ -446,6 +446,9 @@ export function apply(ctx, config) {
       }
       lines.push('install: ' + outcome.outcome)
       lines.push(outcome.text)
+      if (outcome.installedVersion !== undefined && outcome.installedVersion !== doc.latest) {
+        lines.push('Installed version on disk: ' + outcome.installedVersion + ' (requested ' + String(doc.latest) + ').')
+      }
       if (outcome.ok !== true && doc.spec !== undefined) lines.push('Manual path: dsh plugin --profile <name> add "' + String(doc.spec) + '"')
       return { text: lines.join('\n') }
     },

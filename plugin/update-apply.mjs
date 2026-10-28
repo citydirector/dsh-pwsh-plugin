@@ -9,6 +9,12 @@
  *   踩到脏状态。所以安装这一步交给 dsh-plugin-manager（Plugins 页面用的同一个服务），
  *   它自己跑 pnpm、自己回滚 package.json / lockfile。
  *
+ * 为什么装完必须回读磁盘版本
+ *   pnpm 有供应链冷却期（minimumReleaseAge，v11 起默认 1440 分钟）。请求 dsh-pwsh-plugin@0.2.13
+ *   而该版本刚发布几小时，pnpm 会装到它能接受的那个版本；installBundle 的返回值里没有版本号，
+ *   只有 application 这个枚举。所以「装了什么」只能从装完的 package.json 读回来 ——
+ *   把这里的判决当成既成事实去宣称，就是在说一句没人验证过的话。
+ *
  * 能不能不重启
  *   bundle 行的 name 是包名，拿不到 URL 上的缓存破坏参数，ESM 按 URL 缓存模块 —— 光重新 apply
  *   只是再 import 同一个 URL。但 installBundle 走 HMR 的 runExclusive，重组合会比对文件指纹
@@ -20,7 +26,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { packageVersion } from './update-check.mjs'
+import { compareVersions, packageVersion } from './update-check.mjs'
 
 /** 本包的包名：profile 的 dependencies 用它记录安装规格。 */
 const OWN_NAME = (() => {
@@ -33,9 +39,37 @@ const OWN_NAME = (() => {
 })()
 
 /** `v1.2.3` 与 `1.2.3` 是同一个版本；不是这个形态时返回 undefined。 */
-function bareVersion(value) {
+export function bareVersion(value) {
   const text = String(value ?? '').trim().replace(/^v/i, '')
-  return /^\d+\.\d+\.\d+$/.test(text) ? text : undefined
+  return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(text) ? text : undefined
+}
+
+/**
+ * 安装规格末尾钉的版本：`dsh-pwsh-plugin@1.2.3` → `1.2.3`。
+ *
+ * 只认包名之后的那一段：npm 规格里 @ 既是 scope 分隔符也是版本分隔符，
+ * 所以取**最后一个** @ 之后的部分，并对 `@scope/name@1.2.3` 同样成立。
+ */
+export function specVersion(spec) {
+  const text = typeof spec === 'string' ? spec.trim() : ''
+  const at = text.lastIndexOf('@')
+  if (at <= 0) return undefined
+  return bareVersion(text.slice(at + 1))
+}
+
+/**
+ * 从一份 package.json 里读版本号。
+ *
+ * @param path - package.json 的路径。
+ * @returns 版本号；文件不存在、坏 JSON、没有 version 字段时返回 undefined。
+ */
+export function readVersionAt(path) {
+  try {
+    const pkg = JSON.parse(readFileSync(path, 'utf8'))
+    return typeof pkg.version === 'string' ? pkg.version : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -61,16 +95,18 @@ export function readInstalledSpec(profileDir, packageName = OWN_NAME) {
  *
  * 为什么要有它
  *   dsh-plugin-manager 在 HMR 在场的宿主上，对「规格与 profile 里已记录的完全相同」的安装会在
- *   pnpm 之前直接抛 already-installed。有两种情形会撞上，而它们都不该真去装一次：
+ *   pnpm 之前直接抛 already-installed。有三种情形会撞上，而它们都不该真去装一次：
  *     1. 别人（终端 dsh plugin add、Plugins 页面）已经装好了，只是进程还没重启；
  *     2. 发版时打了 tag 却忘了改 package.json 的 version —— 装的永远是同一个包内版本，
- *        于是每一轮都「有新版、装不进去」，静默循环到天荒地老。
- *   两种都能用手里已有的事实判掉：profile 记的规格、磁盘上的包版本、进程里在跑的版本。
- *   判掉之后要能说清是哪一种 —— 一个要重启，另一个是发布本身有毛病。
+ *        于是每一轮都「有新版、装不进去」，静默循环到天荒地老；
+ *     3. pnpm 的冷却期让这次安装只会落到已经装好的那个版本上（见下面的 cooled 参数）。
+ *   都能用手里已有的事实判掉，判掉之后要能说清是哪一种。
  *
- * @param options - `{ spec, latest, disk, running, installed }`。
+ * @param options - `{ spec, latest, disk, running, installed, cooled }`。
  *   `disk` 缺省时现读本包 package.json；`running` 缺省时不比对运行版本。
- * @returns 该装时返回 null；否则返回 `{ ok, outcome, text }`——三种情形成因不同，都不该重试。
+ *   `cooled` 是「上一次安装实际落到的版本」——冷却期让这次不可能装到 latest 时，
+ *   调用方把它传进来，这里就不再发起注定落空的安装。
+ * @returns 该装时返回 null；否则返回 `{ ok, outcome, text }`——几种情形成因不同，都不该重试。
  */
 export function checkInstallNeed(options = {}) {
   const latest = bareVersion(options.latest)
@@ -81,6 +117,7 @@ export function checkInstallNeed(options = {}) {
   const running = bareVersion(options.running)
   const spec = typeof options.spec === 'string' ? options.spec.trim() : undefined
   const installed = typeof options.installed === 'string' ? options.installed.trim() : undefined
+  const cooled = bareVersion(options.cooled)
 
   if (disk === latest) {
     // 磁盘上已经是这个版本了，再装一次要么被拒，要么装个同样的东西。
@@ -103,25 +140,30 @@ export function checkInstallNeed(options = {}) {
   // 读不到包内版本时不做这个判断：那是「本插件自己的 package.json 有问题」，不是发布的问题，
   // 按未知处理比按坏发布处理安全。
   if (disk !== undefined && spec !== undefined && spec.length > 0 && installed === spec) {
-    // profile 已经指向这个 tag，而磁盘上的包仍报别的版本：tag 与 package.json 对不上。
+    // profile 已经指向这个版本，而磁盘上的包仍报别的版本：发布本身坏了。
     return {
       ok: false,
       outcome: 'broken-release',
-      text: 'The release tagged v' + latest + ' still declares version ' + disk
-        + ' in its package.json, and the profile already points at that tag. Every install attempt would be '
-        + 'refused as already-installed and could never change anything. This release is broken: the tag '
-        + 'exists but package.json was not bumped.',
+      text: 'The release ' + latest + ' still declares version ' + disk
+        + ' in its package.json, and the profile already points at that version. Every install attempt would be '
+        + 'refused as already-installed and could never change anything. This release is broken: it was published '
+        + 'without bumping package.json.',
+    }
+  }
+
+  // 冷却期：上一次装同一个包时落在 cooled 上，而这次的目标比它新 —— pnpm 会重演同一个决定。
+  // 说清是策略在拦，并给出越过它的唯一官方办法（显式指定版本仍会被拦，所以要靠卸载重装）。
+  if (cooled !== undefined && compareVersions(cooled, latest) < 0 && compareVersions(cooled, running ?? disk ?? '0.0.0') >= 0) {
+    return {
+      ok: true,
+      outcome: 'cooling-down',
+      text: 'pnpm\'s supply-chain policy (minimumReleaseAge) refuses releases younger than its window, so ' + latest
+        + ' cannot be installed yet; the previous install landed on ' + cooled + '. Wait for the window to pass '
+        + '(24 hours by default from the publish time), or install it by hand after disabling the policy.',
     }
   }
 
   return null
-}
-
-/** 安装规格末尾钉的 tag：`github:owner/repo#v1.2.3` → `v1.2.3`。 */
-export function specTag(spec) {
-  const text = typeof spec === 'string' ? spec.trim() : ''
-  const hash = text.lastIndexOf('#')
-  return hash === -1 ? undefined : text.slice(hash + 1)
 }
 
 /**
@@ -129,16 +171,18 @@ export function specTag(spec) {
  *
  * @param ctx - 插件上下文；profileContext 缺席时读不到已装规格（预检只剩版本比对）。
  * @param checker - UpdateChecker 实例，用来取进程里在跑的版本。
- * @param spec - 要装的规格，末尾钉着 tag。
+ * @param spec - 要装的规格，末尾钉着版本号。
+ * @param options - `{ cooled }`：上一次安装实际落到的版本。
  * @returns checkInstallNeed 的结果：null 表示该装。
  */
-export function preflightInstall(ctx, checker, spec) {
+export function preflightInstall(ctx, checker, spec, options = {}) {
   const profileDir = ctx?.get?.('profileContext')?.dir
   return checkInstallNeed({
     spec,
-    latest: specTag(spec),
+    latest: specVersion(spec),
     running: checker?.version,
     installed: readInstalledSpec(profileDir),
+    ...(options.cooled === undefined ? {} : { cooled: options.cooled }),
   })
 }
 
@@ -184,12 +228,13 @@ export function describeInstallOutcome(result, options = {}) {
 }
 
 /**
- * 装一个钉住 tag 的规格。
+ * 装一个钉住版本号的规格，然后回读磁盘上真正落地的版本。
  *
  * @param manager - ctx.get('pluginManager')；缺席时传 null。
- * @param spec - 例如 `github:owner/repo#v1.2.3`。
- * @param options - `{ requestId, signal, log }`。
- * @returns `{ ok, outcome, text, error }`，永不抛出：安装失败是正常结果，不是程序缺陷。
+ * @param spec - 例如 `dsh-pwsh-plugin@0.2.13`。
+ * @param options - `{ requestId, signal, log, live, profileDir }`。
+ *   `profileDir` 用来回读装完后的 package.json —— 冷却期会让实际装到的版本比 spec 旧。
+ * @returns `{ ok, outcome, text, error, installedVersion }`，永不抛出：安装失败是正常结果，不是程序缺陷。
  */
 export async function installRelease(manager, spec, options = {}) {
   if (manager === null || manager === undefined) {
@@ -204,11 +249,22 @@ export async function installRelease(manager, spec, options = {}) {
   }
   try {
     const result = await manager.installBundle(spec, options.requestId === undefined ? {} : { requestId: options.requestId })
+    // 返回值里没有版本号：装了哪个版本只能从装完的磁盘读回来。冷却期会让它与 spec 不同，
+    // 而「说装好了」这句话必须对着磁盘上的事实说。
+    const installedVersion = typeof options.profileDir === 'string' && options.profileDir.length > 0
+      ? readVersionAt(join(options.profileDir, 'node_modules', OWN_NAME, 'package.json'))
+      : undefined
     const described = describeInstallOutcome(result, { live: options.live === true })
+    const text = installedVersion !== undefined && described.ok === true && compareVersions(installedVersion, specVersion(spec) ?? '0') < 0
+      // 装到了别的版本：pnpm 的冷却期在起作用。必须说出来，否则用户会以为升级成功了。
+      ? described.text + ' pnpm installed ' + installedVersion + ' rather than ' + String(specVersion(spec))
+        + ': its minimumReleaseAge policy withholds versions that are too recent.'
+      : described.text
     return {
       ok: described.ok,
       outcome: typeof result?.application === 'string' ? result.application : 'unknown',
-      text: described.text,
+      text,
+      ...(installedVersion === undefined ? {} : { installedVersion }),
       ...(result?.error === undefined ? {} : { error: result.error }),
     }
   } catch (error) {

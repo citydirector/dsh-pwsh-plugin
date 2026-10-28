@@ -1,0 +1,70 @@
+name: Release
+
+# Publishes the package to npm from a tag, using npm's trusted publishing (OIDC).
+# No NPM_TOKEN secret exists anywhere: the runner exchanges its short-lived GitHub
+# identity for a token that npm scopes to this repository and this workflow file.
+#
+# Trusted publishing only authorizes a publish that carries provenance, so
+# --provenance is not optional here.
+#
+# One-time setup, on npmjs.com → the package → Settings → Trusted publisher:
+#   publisher  GitHub Actions
+#   repository citydirector/dsh-pwsh-plugin
+#   workflow   release.yml
+#   environment (leave empty)
+# Until that is saved, this workflow fails with 403 and nothing else can fix it.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish (e.g. v0.2.13)'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # the OIDC token trusted publishing is built on
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs npm 11.5.1 or newer; Node 24 ships 11.x but pin
+      # the floor rather than trust it.
+      - name: Check npm supports trusted publishing
+        run: |
+          npm --version
+          node -e "const [a,b,c]=require('child_process').execSync('npm --version').toString().trim().split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm 11.5.1 or newer is required'); process.exit(1) }"
+
+      # The version in package.json is what the update check compares against the
+      # registry, so a mismatch here would publish a version nobody can upgrade to.
+      - name: Verify the tag matches package.json
+        run: node scripts/release-check.mjs
+
+      - name: Publish
+        run: npm publish --provenance --access public
+
+      - name: Report what landed
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          echo "published $name@$version"
+          npm view "$name@$version" dist.tarball dist.integrity --json || true

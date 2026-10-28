@@ -58,8 +58,8 @@
 $dsh = '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd'
 $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
-# <tag> 是任意已发布的标签；最新的那个就是插件自己会装的那个
-& $dsh plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#<tag>'
+# <version> 是任意已发布版本；最新的那个就是插件自己会装的那个
+& $dsh plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
 # 或者从本地检出装
 & $dsh plugin --profile desktop add 'file:<检出目录>'
 ```
@@ -70,9 +70,11 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
 选 spec 之前要知道两件事：
 
-- **`github:` 是拷贝，`file:` 是硬链接。** `github:` 装的是那个 tag 的快照 —— 改检出不会生效，得重新 `add`。
-  `file:` 直接硬链接检出，改完立刻生效（`fsutil hardlink list` 能看到两条路径），代价是 `package.json`
-  里钉死了绝对路径。开发期用 `file:`，长期用 `github:`。
+- **registry 规格是拷贝，`file:` 是硬链接。** `dsh-pwsh-plugin@X.Y.Z` 装的是那次发布的一份拷贝 ——
+  改检出不会生效，得重新 `add`。`file:` 直接硬链接检出，改完立刻生效（`fsutil hardlink list` 能看到
+  两条路径），代价是 `package.json` 里钉死了绝对路径。开发期用 `file:`，长期用 registry 规格。
+  `github:citydirector/dsh-pwsh-plugin#<tag>` 仍然能装，效果与 registry 规格相同（都是拷贝），只是
+  绕开了 pnpm 的供应链策略。
 - **bundle 那一行带不了 `?v=N`。** 它的 `name` 必须是包名，才能从 profile 的 `node_modules` 解析，
   因此没有 URL 可变，ESM 继续用它已经缓存的那个模块。改 `node_modules` 下的文件，只有等宿主碰巧跑一次
   重组合才可能被换掉 —— 开发期不能指望这个，用下面那种手写行并把 `?v=N` 提一号，或者重启。
@@ -123,7 +125,7 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 | `maxSessions` | `4` | 同时存活的会话上限（每个 agent 工作区一个）。 |
 | `maxOutputBytes` | `8388608` | 单次调用的输出收集上限（8MB）。截断会明确报出来，不静默。 |
 | `allowUnconfined` | `false` | `true` = 沙箱策略服务缺席时也起会话。 |
-| `updateCheck` | `true` | 定期查发布标签。查与装分开：这里只查，装由 `pwsh_run_update` 与自动更新做。 |
+| `updateCheck` | `true` | 定期查有没有新发布的版本。查与装分开：这里只查，装由 `pwsh_run_update` 与自动更新做。 |
 | `autoUpdate` | `true` | 自己装上更新，宿主有 HMR 时**不需要重启**即生效。 |
 | `autoUpdateDelayMs` | `90000` | 自动检查前的等待，避免与启动流程抢 pnpm。 |
 
@@ -156,14 +158,14 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 
 ## 更新
 
-默认情况下插件自己升级：启动 90 秒后查一次发布标签，之后每 12 小时一次；查到更高的 `vX.Y.Z` 就直接
-装上。宿主跑着 DSH 的 HMR 服务时，**装上的那一刻新代码就已经在跑** —— 不用重启，不用弹窗，用户什么
+默认情况下插件自己升级：启动 90 秒后查一次 npm registry 的 `latest` 标签，之后每 12 小时一次；查到
+更高的版本就直接装上。宿主跑着 DSH 的 HMR 服务时，**装上的那一刻新代码就已经在跑** —— 不用重启，不用弹窗，用户什么
 都不用做。
 
 | 方式 | 行为 |
 |---|---|
 | 自动（`autoUpdate: true`，默认） | 查 → 装 → 就地生效。装失败按指数退避重试（5 分钟起、翻倍、封顶 2 小时）；装成功过的版本不再重试。**有调用在跑时绝不装** —— 3 分钟后再看。宿主**没有** HMR 时它什么都不装，见下。 |
-| `pwsh_run_update` 的 `action: "check"` | 只读一次标签，报出 `state` / `running` / `newest release` / `install spec`。不装任何东西。 |
+| `pwsh_run_update` 的 `action: "check"` | 只读一次 registry，报出 `state` / `running` / `newest release` / `install spec`。不装任何东西。 |
 | `pwsh_run_update` 的 `action: "install"` | 同一条安装路径，只是由人按下去而不是由时钟按下去。有调用在跑时报 `install: postponed`；预检判定「装了也没用」时报 `install: restart-required` / `install: broken-release`（见下）。 |
 
 安装走 `ctx.get('pluginManager')` —— 也就是「插件」页面背后那个服务 —— 由它跑 pnpm，失败时回滚
@@ -205,40 +207,29 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
-& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'github:citydirector/dsh-pwsh-plugin#<tag>'
+& '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
 ```
 
 注意 DSH 的默认组合关掉的是**工具** `plugin_manager`，而桌面 profile 上的**服务** `plugin-manager`
 是活的 —— 两者不是一回事，这里只用服务。
 
+发布源就是这个包在 npm registry 上的条目：`GET https://registry.npmjs.org/dsh-pwsh-plugin`，请求头带
+`accept: application/vnd.npm.install-v1+json`。它的 `dist-tags.latest` 就是要推的版本，必须是纯
+`X.Y.Z`；被标了 `deprecated` 的 `latest` 永不推送；没有 `dist-tags` 时回落到版本清单里的最高正式版。
+返回 `404` 时报的是「not published on <registry>」而不是「没有新版本」—— 这两件事不同，只有一件是临时的。
 
-
-默认发布源是 `github:citydirector/dsh-pwsh-plugin`，读 `GET /repos/<repo>/tags`。标签必须匹配
-`^v\d+\.\d+\.\d+$`（预发布永不推送），取版本号最大的那个。
+安装规格用 registry 形式 `dsh-pwsh-plugin@X.Y.Z`，所以插件请求的字符串与 `dsh plugin add` 接受的是同一个。
 
 | 环境变量 | 作用 |
 |---|---|
-| `DSH_PWSH_UPDATE_SOURCE` | `owner/repo` → GitHub；`git+<url>` → 直接 `git ls-remote --tags`（`git+file:///path` 可在本地预演） |
-| `DSH_PWSH_UPDATE_API` | GitHub API 基址，默认 `https://api.github.com` |
+| `DSH_PWSH_UPDATE_REGISTRY` | registry 基址，默认 `https://registry.npmjs.org`。可指向镜像，或指向本机服务做预演 |
 | `DSH_PWSH_UPDATE_DELAY_MS` | 首次检查延迟，默认 5000 |
 
-本地预演：先建一个带 tag 的仓库，再把源指过去 ——
-
 ```powershell
-$root = Join-Path $env:TEMP ('pwsh-rel-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-git init -q -b main $root
-git -C $root -c user.email=t@l -c user.name=t commit -q --allow-empty -m release
-git -C $root tag v0.2.1
-$env:DSH_PWSH_UPDATE_SOURCE = 'git+file:///' + ($root -replace '\\','/')
-node -e "import('./plugin/update-check.mjs').then(async (m) => console.log(JSON.stringify(await new m.UpdateChecker({ version: '0.1.0' }).check())))"
-# → {"state":"available","latest":"v0.2.1","checkedAt":"..."}
-Remove-Item -Recurse -Force $root
+& $dsh plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
 ```
 
-预演请走 **Windows 侧**（`pwsh_run` 或内置 `pwsh` 工具）。在 WSL 的 `bash` 调用里
-`export DSH_PWSH_UPDATE_SOURCE=...` 传不进 Windows 进程 —— WSL 只透传 `WSLENV` 里点名过的变量，其余
-`DSH_*` 到子进程就消失，表现是「明明设了源，却去查默认的 GitHub 仓库」。真要跨过去得写
-`WSLENV=DSH_PWSH_UPDATE_SOURCE`；**别加 `/p`**，那会把 `/tmp/...` 转成 `\\wsl.localhost\...` 路径，源就废了。
+手动安装与插件自己做的事是同一条路径，同样由 pnpm 施加同样的策略。
 
 查询失败不会抛进工具调用：记 `state: 'failed'`，经 `ctx.logger` 留一行，先前查到过的 `latest` 保留成
 `stale: 'available'` —— 一次网络抖动不该让已知的新版本消失。
@@ -322,7 +313,7 @@ plugin/
   index.mjs           工具注册、沙箱接线、超时
   session.mjs         会话对象：分帧、队列、base64、启动 argv
   session-server.ps1  PowerShell 侧：runspace、流打标、哨兵
-  update-check.mjs    发布标签查询与比较
+  update-check.mjs    registry 查询与版本比较
   update-apply.mjs    把钉住的规格交给 pluginManager，不自己下载
   auto-update.mjs     自动路径：在 HMR 事务之外安装，失败退避
 test/
@@ -361,14 +352,21 @@ node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起�
 node test/metatest.mjs                       # 23：插件页元数据（不起子进程，哪儿都能跑）
 ```
 
-十一份脚本合计 **272 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十一份脚本合计 **305 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 
 ### 发版
 
-`package.json` 里的 version 是本仓库唯一写死的东西，而更新检查拿它跟已发布的标签比。只打 tag 不升版本，
-检查会永远报有新版：装上去的文件读到的还是旧数字，于是每轮都重装同一个 tag，退避一路爬到上限。
+从 tag 发布由 [`.github/workflows/release.yml`](.github/workflows/release.yml) 负责：先跑
+`scripts/release-check.mjs`，再用 npm 的 **trusted publishing** 执行 `npm publish --provenance` ——
+runner 用自己那份短命的 GitHub 身份换一个只对「这个仓库 + 这个 workflow 文件」有效的令牌。仓库里没有
+`NPM_TOKEN`，也不该加。两个连带后果值得记住：workflow 的文件名是信任契约的一部分（改名后每次发布都会
+403，直到在 npm 上改设置）；provenance 在那里是强制的，所以 tarball 会带上「由哪个提交构建」的签名声明。
+
+`package.json` 里的 version 是本仓库唯一写死的东西，而更新检查拿它跟 registry 上的已发布版本比。
+不升版本就发版，检查会永远报有新版：装上去的文件读到的还是旧数字，于是每轮都请求同一个版本，
+退避一路爬到上限。
 `npm version` 一次完成「改版本 + 提交 + 打 annotated tag」，所以这三者不会漂开：
 
 ```powershell

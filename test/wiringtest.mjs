@@ -1,12 +1,15 @@
 // 钉住 plugin/index.mjs 里「更新提示 → 工具输出末尾」这条接线。
 // 更新检查本身在 updatetest.mjs 里测过；这里只验证它真的接到了 execute 的返回文本上。
+//
+// 发布源用本地假 registry（真 HTTP，见 test/support.mjs）：新机制读的是 npm 的 dist-tags，
+// 再拿一个 git 仓库当发布源就测不到它了。
 import { spawn } from 'node:child_process'
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { apply } from '../plugin/index.mjs'
+import { packageDocument, startRegistry } from './support.mjs'
 
 const PWSH = process.env.PWSH_BIN ?? 'pwsh'
 
@@ -98,19 +101,9 @@ function boot(config, services = {}) {
 }
 
 const sandbox = mkdtempSync(join(tmpdir(), 'pwsh-wiring-'))
-const repo = join(sandbox, 'release-repo')
-mkdirSync(repo, { recursive: true })
-const git = (...args) => execFileSync('git', ['-C', repo, ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
-git('init', '-q', '-b', 'main')
-git('config', 'user.email', 'test@local')
-git('config', 'user.name', 'test')
-writeFileSync(join(repo, 'payload.txt'), 'x\n')
-git('add', '.')
-git('commit', '-q', '-m', 'release')
-git('tag', 'v9.9.9')
-
-const source = 'git+file://' + repo.replace(/\\/g, '/')
-process.env.DSH_PWSH_UPDATE_SOURCE = source
+const NEWEST = '9.9.9'
+const registry = await startRegistry({ 'dsh-pwsh-plugin': packageDocument({ latest: NEWEST }, { '0.0.1': {}, [NEWEST]: {} }) })
+process.env.DSH_PWSH_UPDATE_REGISTRY = registry.url
 process.env.DSH_PWSH_UPDATE_DELAY_MS = '0'
 
 const exec = { agent: { session: { id: 'wiring-A', header: { cwd: process.cwd() } } } }
@@ -120,14 +113,15 @@ try {
   // 自动更新开着时不发提示（它自己会装），所以这一节必须显式关掉它。
   console.log('\n[1] 提示出现在输出末尾（只一次）')
   const plugin = boot({ allowUnconfined: true, autoUpdate: false })
-  // 首次检查延迟 0，本地 git ls-remote 几十毫秒；给 3 秒余量。
+  // 首次检查延迟 0，本地 HTTP 几十毫秒；给 3 秒余量。
   await new Promise((resolve) => setTimeout(resolve, 3000))
 
   const first = await plugin.registration.execute({ script: "Write-Output 'body-line'" }, exec)
   check('脚本本体照常返回', first.text.startsWith('body-line'), JSON.stringify(first.text))
   check('末尾有更新提示', first.text.includes('a newer pwsh-run release exists'), JSON.stringify(first.text))
-  check('提示里带版本号', first.text.includes('v9.9.9'), JSON.stringify(first.text))
-  check('提示里带钉了 tag 的安装规格', first.text.includes(source + '#v9.9.9'), JSON.stringify(first.text))
+  check('提示里带版本号', first.text.includes(NEWEST), JSON.stringify(first.text))
+  // 新机制下安装规格是 registry 的「包名@版本」，不再拼 git 地址。
+  check('提示里带 registry 安装规格', first.text.includes('dsh-pwsh-plugin@' + NEWEST), JSON.stringify(first.text))
   check('提示里说明自动更新已关', first.text.includes('Auto-update is off in this profile'), JSON.stringify(first.text))
 
   const second = await plugin.registration.execute({ script: "Write-Output 'again'" }, exec)
@@ -153,7 +147,7 @@ try {
     const manager = {
       async installBundle(spec, options) {
         attempts.push({ spec, requestId: options?.requestId })
-        return { application: 'applied', version: '9.9.9' }
+        return { application: 'applied' }
       },
     }
     const gate = boot({ allowUnconfined: true, autoUpdate: false }, { pluginManager: manager })
@@ -174,7 +168,7 @@ try {
     gate.dispose()
   }
 
-  // ── 1d. 装之前先问值不值得装：profile 已指向该 tag 而包内版本没变时不发起安装 ──
+  // ── 1d. 装之前先问值不值得装：profile 已指向该版本而包内版本没变时不发起安装 ──
   // 这条钉的是「发版忘了升版本号」在真机上造成的静默循环：每一轮都想装，每一轮都被
   // plugin-manager 判 already-installed，用户什么也看不到。预检要在这里拦住它。
   console.log('\n[1d] 预检拦下注定失败的安装')
@@ -183,30 +177,47 @@ try {
     const manager = {
       async installBundle(spec, options) {
         attempts.push({ spec, requestId: options?.requestId })
-        return { application: 'applied', version: '9.9.9' }
+        return { application: 'applied' }
       },
     }
-    // 假 profile：依赖里已经钉着 v9.9.9，而装件里的版本是测试自己的版本，两者对不上。
+    // 假 profile：依赖里已经钉着 9.9.9，而装件里的版本是测试自己的版本，两者对不上。
     const profileDir = join(sandbox, 'profile')
     mkdirSync(profileDir, { recursive: true })
-    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': source + '#v9.9.9' } }))
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': 'dsh-pwsh-plugin@' + NEWEST } }))
     const gated = boot({ allowUnconfined: true, autoUpdate: false }, { pluginManager: manager, profileContext: { dir: profileDir } })
     await new Promise((resolve) => setTimeout(resolve, 3000))
 
     const refused = await gated.update.execute({ action: 'install' })
     check('坏发布被预检拦下', /install: broken-release/.test(refused.text), JSON.stringify(refused.text))
     check('一次都没去装', attempts.length === 0, 'attempts=' + attempts.length)
-    check('说清是 tag 存在但版本没升', /not bumped/.test(refused.text), JSON.stringify(refused.text))
+    check('说清是发了版但没升版本', /without bumping package\.json/.test(refused.text), JSON.stringify(refused.text))
     gated.dispose()
 
-    // 同一条命令在 profile 记录的是别的 tag 时就该照常装上——预检不能把正常升级也挡了。
-    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': source + '#v0.0.1' } }))
+    // 同一条命令在 profile 记录的是别的版本时就该照常装上——预检不能把正常升级也挡了。
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': 'dsh-pwsh-plugin@0.0.1' } }))
     const allowed = boot({ allowUnconfined: true, autoUpdate: false }, { pluginManager: manager, profileContext: { dir: profileDir } })
     await new Promise((resolve) => setTimeout(resolve, 3000))
     const installed = await allowed.update.execute({ action: 'install' })
     check('正常升级照常安装', /install: applied/.test(installed.text), JSON.stringify(installed.text))
     check('正常升级真的调了安装器', attempts.length === 1, 'attempts=' + attempts.length)
     allowed.dispose()
+  }
+
+  // ── 1e. registry 上还没有这个包：说得清楚，不是「已是最新」────────────────
+  // 这条钉的是把一个失败的查询说成结论。查不到不等于没有新版本。
+  console.log('\n[1e] registry 上没有这个包')
+  {
+    const missing = await startRegistry({})
+    process.env.DSH_PWSH_UPDATE_REGISTRY = missing.url
+    const blind = boot({ allowUnconfined: true, autoUpdate: false })
+    await new Promise((resolve) => setTimeout(resolve, 3000))
+    const out = await blind.update.execute({ action: 'check' })
+    check('报出 failed 而不是 current', /state: failed/.test(out.text), JSON.stringify(out.text))
+    check('说清是还没发布', /not published on/.test(out.text), JSON.stringify(out.text))
+    check('不把它说成已是最新', !/No newer release/.test(out.text), JSON.stringify(out.text))
+    blind.dispose()
+    await missing.close()
+    process.env.DSH_PWSH_UPDATE_REGISTRY = registry.url
   }
 
   // ── 2. updateCheck: false 时完全不查 ────────────────────────────────────
@@ -218,8 +229,9 @@ try {
   check('脚本仍正常执行', silent.text === 'quiet', JSON.stringify(silent.text))
   quiet.dispose()
 } finally {
-  delete process.env.DSH_PWSH_UPDATE_SOURCE
+  delete process.env.DSH_PWSH_UPDATE_REGISTRY
   delete process.env.DSH_PWSH_UPDATE_DELAY_MS
+  await registry.close()
   try {
     rmSync(sandbox, { recursive: true, force: true })
   } catch {

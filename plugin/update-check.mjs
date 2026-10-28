@@ -3,136 +3,149 @@
  *
  * 为什么单独一个模块
  *   这个插件是纯宿主平面的工具插件，没有配置页面，也没有 client 入口。
- *   把「读发布标签 / 比版本 / 记状态」这几件事独立出来，就能在纯 node 里
+ *   把「读发布源 / 比版本 / 记状态」这几件事独立出来，就能在纯 node 里
  *   完整单测，不必起一个 DSH。
  *
+ * 发布源是 npm registry，不是 git 标签
+ *   早期版本读 GitHub 的 vX.Y.Z 标签，安装规格是 github:owner/repo#vX.Y.Z。
+ *   改到 registry 之后同一份发布既是 npm 包、也是 profile 里能被 pnpm 解析的依赖，
+ *   「装到的是哪个版本」由 pnpm 说了算，插件不必自己拼 git 规格。
+ *   更要紧的一条：pnpm 有供应链冷却期（minimumReleaseAge，默认 1440 分钟），
+ *   当天发布的版本当天可能解析不到 —— 于是「最新版」与「实际装到的版本」不是一回事。
+ *   检查阶段只认 registry 的 dist-tags，安装之后必须回读磁盘上的版本，
+ *   拿这里的判决去宣称装好了就是在说一句没人验证过的话。
+ *
  * 它做什么
- *   启动几秒后读一次发布源的 vX.Y.Z 标签，之后大约每 12 小时再读一次，
- *   与 package.json 里的版本比较。**从不自己安装**：发现新版本时只把
- *   版本号与 tag 钉住的安装规格（github:owner/repo#vX.Y.Z）记下来，
- *   由外部去装。一个 tag 一个规格，所以装新版本就是盖掉旧的，不需要额外逻辑。
- *   这里自己不动手：本模块只负责「读标签 → 比版本 → 记状态」，装与不装是另一个决定，
- *   由 pwsh_run_update 工具按用户的显式动作去做（见 update-apply.mjs）。
+ *   启动几秒后读一次 registry 的 dist-tags.latest，之后大约每 12 小时再读一次，
+ *   与 package.json 里的版本比较。**从不自己安装**：发现新版本时只把版本号与
+ *   安装规格（<package>@X.Y.Z）记下来。一个版本一个规格，所以装新版本就是盖掉旧的。
  *
  * 发布源可覆盖
- *   DSH_PWSH_UPDATE_SOURCE 可以是 owner/repo，也可以是任意 git URL
- *   （git+file:///…、git+https://…）。本地仓库预演发布就靠它。
- *   DSH_PWSH_UPDATE_API 覆盖 GitHub API 基址，DSH_PWSH_UPDATE_DELAY_MS
- *   覆盖首次检查的延迟（测试用）。
+ *   DSH_PWSH_UPDATE_REGISTRY 覆盖 registry 基址（测试与自建镜像靠它）。
+ *   DSH_PWSH_UPDATE_DELAY_MS 覆盖首次检查的延迟（测试用）。
  */
 
-import { execFile } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 
-/** 发布在哪：这个仓库的 vX.Y.Z 标签就是发布。 */
-export const UPDATE_REPOSITORY = 'citydirector/dsh-pwsh-plugin'
+/** 发布在哪：这个包名在 npm registry 上的 dist-tags 就是发布。 */
+export const UPDATE_PACKAGE = 'dsh-pwsh-plugin'
+
+/** 默认 registry。 */
+export const UPDATE_REGISTRY = 'https://registry.npmjs.org'
 
 /** 启动后先让启动流程跑完，再查更新。 */
 const UPDATE_DELAY_MS = 5000
 const UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000
 
-/** 一个发布标签：v + 三段数字，后面不能再有东西（预发布版本永不推送）。 */
-const RELEASE_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+/** 三段数字，可选预发布尾巴；npm 的版本号允许的形态。 */
+const RELEASE_VERSION = /^(?:v)?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$/
 
 /**
- * 读一个发布标签。
+ * 读一个版本号。
  *
- * @param tag - git 标签名。
- * @returns `[major, minor, patch]`；不是 vX.Y.Z 形态时返回 undefined。
+ * @param value - 版本号，可带 v 前缀与预发布尾巴（1.2.3 / v1.2.3 / 1.2.3-rc.1）。
+ * @returns `{ parts: [major, minor, patch], prerelease }`；不是版本形态时返回 undefined。
  */
-export function parseReleaseTag(tag) {
-  const match = RELEASE_TAG.exec(String(tag ?? '').trim())
-  return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3])]
+export function parseVersion(value) {
+  const match = RELEASE_VERSION.exec(String(value ?? '').trim())
+  if (match === null) return undefined
+  const prerelease = match[4] === undefined ? undefined : match[4]
+  return { parts: [Number(match[1]), Number(match[2]), Number(match[3])], prerelease }
 }
 
 /**
  * 比两个版本，写 X.Y.Z 或 vX.Y.Z 都行。
  *
+ * 预发布（1.2.3-rc.1）按 semver 的规矩排在对应的正式版**之下**：
+ * 否则一个 rc 会被当成「比 1.2.3 还新」，自动更新就会把用户推到预发布上。
+ *
  * @returns 像排序比较器那样返回负数、零或正数；解析不出来的版本排在所有能解析的之下。
  */
 export function compareVersions(a, b) {
-  const tag = (value) => (String(value ?? '').startsWith('v') ? String(value) : 'v' + String(value))
-  const pa = parseReleaseTag(tag(a))
-  const pb = parseReleaseTag(tag(b))
+  const pa = parseVersion(a)
+  const pb = parseVersion(b)
   if (pa === undefined || pb === undefined) return (pa === undefined ? 0 : 1) - (pb === undefined ? 0 : 1)
-  for (let i = 0; i < 3; i += 1) if (pa[i] !== pb[i]) return pa[i] - pb[i]
-  return 0
+  for (let i = 0; i < 3; i += 1) if (pa.parts[i] !== pb.parts[i]) return pa.parts[i] - pb.parts[i]
+  if (pa.prerelease === pb.prerelease) return 0
+  // 都没有预发布尾巴 → 相等（上面已处理）；一个有一个没有 → 有尾巴的那个更旧。
+  if (pa.prerelease === undefined) return 1
+  if (pb.prerelease === undefined) return -1
+  return pa.prerelease < pb.prerelease ? -1 : pa.prerelease > pb.prerelease ? 1 : 0
 }
 
 /**
- * 标签里的最新发布：只认 vX.Y.Z，按语义版本取最高（不是按日期或列表顺序）。
- *
- * @param tags - 标签名，顺序无所谓。
- * @returns 最新的发布标签；一个都没有时返回 undefined。
- */
-export function latestRelease(tags) {
-  let best
-  for (const tag of tags ?? []) {
-    if (parseReleaseTag(tag) === undefined) continue
-    if (best === undefined || compareVersions(tag, best) > 0) best = tag
-  }
-  return best
-}
-
-/**
- * 发布从哪来。默认是 GitHub 仓库；DSH_PWSH_UPDATE_SOURCE 可以指向另一个
- * GitHub 仓库（owner/repo）或任意 git URL，发布正式上线前先在本地仓库预演就靠它。
+ * 发布从哪来。默认是 npm 公共 registry；DSH_PWSH_UPDATE_REGISTRY 可以指向自建镜像
+ * 或测试用的本地服务器 —— 发布正式上线前先在本地预演就靠它。
  *
  * @param env - 要读的环境。
- * @returns `{ kind: 'github', repository, spec }` 或 `{ kind: 'git', url, spec }`；
- *   `spec` 是不带 #tag 的安装规格。
+ * @returns `{ kind: 'registry', registry, name, spec }`；`spec` 是不带版本的安装规格。
  */
 export function updateSource(env = process.env) {
-  const raw = String(env.DSH_PWSH_UPDATE_SOURCE ?? '').trim()
-  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw)) return { kind: 'github', repository: raw, spec: 'github:' + raw }
-  if (/^git(\+[a-z]+)?:\/\//i.test(raw)) return { kind: 'git', url: raw.replace(/^git\+/i, ''), spec: raw }
-  return { kind: 'github', repository: UPDATE_REPOSITORY, spec: 'github:' + UPDATE_REPOSITORY }
+  const raw = String(env.DSH_PWSH_UPDATE_REGISTRY ?? '').trim()
+  const registry = raw.length === 0 ? UPDATE_REGISTRY : raw.replace(/\/+$/, '')
+  return { kind: 'registry', registry, name: UPDATE_PACKAGE, spec: UPDATE_PACKAGE }
 }
 
-/** 一个发布的、钉住 tag 的安装规格：每个版本一个规格，DSH 会拿它盖掉旧的。 */
-export function releaseSpec(source, tag) {
-  return source.spec + '#' + tag
+/** 一个发布的、钉住版本号的安装规格：每个版本一个规格，DSH 会拿它盖掉旧的。 */
+export function releaseSpec(source, version) {
+  return source.name + '@' + String(version).replace(/^v/, '')
 }
 
 /**
- * 读发布源的全部标签。
+ * 读 registry 上的包摘要（abbreviated metadata）。
+ *
+ * 用 abbreviated 而不是完整文档：完整文档带每个版本的全部 package.json，动辄几百 KB，
+ * 而这里只需要 dist-tags 与版本清单。
  *
  * @param source - 由 updateSource() 给出。
- * @param options - `{ api, signal }`：GitHub API 基址、中止信号。
- * @returns 标签名（GitHub 侧是 API 列出的最新 100 个）。
+ * @param options - `{ fetch, signal }`：可替换的 fetch（测试用）与中止信号。
+ * @returns `{ latest, versions, deprecated }`：dist-tags.latest、版本清单、被废弃的版本集合。
  */
-export async function fetchReleaseTags(source, { api = 'https://api.github.com', signal } = {}) {
-  if (source.kind === 'git') {
-    const output = await new Promise((resolve, reject) => {
-      execFile('git', ['ls-remote', '--tags', '--', source.url], { timeout: 20000, signal, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (error, stdout) => {
-        if (error) reject(error)
-        else resolve(stdout)
-      })
-    })
-    return output.split('\n').map((line) => /refs\/tags\/([^\s^]+)$/.exec(line.trim())?.[1]).filter(Boolean)
-  }
-  const response = await fetch(api.replace(/\/+$/, '') + '/repos/' + source.repository + '/tags?per_page=100', {
-    headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-pwsh-plugin', 'x-github-api-version': '2022-11-28' },
+export async function fetchRegistry(source, { fetch: fetchImpl = globalThis.fetch, signal } = {}) {
+  const url = source.registry + '/' + encodeURIComponent(source.name)
+  const response = await fetchImpl(url, {
+    headers: { accept: 'application/vnd.npm.install-v1+json', 'user-agent': 'dsh-pwsh-plugin' },
     signal,
   })
   if (!response.ok) {
-    const limited = response.status === 403 || response.status === 429
-    throw new Error(limited ? 'GitHub rate limit (HTTP ' + response.status + ')' : 'GitHub answered HTTP ' + response.status)
+    // 404 是「这个包还不存在」，与「网络不通」必须分开说：前者重试一万次也不会好。
+    const reason = response.status === 404 ? 'not published on ' + source.registry : 'registry answered HTTP ' + response.status
+    throw new Error(reason)
   }
   const body = await response.json()
-  if (!Array.isArray(body)) throw new Error('GitHub answered something other than a tag list')
-  return body.map((item) => item?.name).filter((name) => typeof name === 'string')
+  if (body === null || typeof body !== 'object') throw new Error('registry answered something other than a package document')
+  const versions = Object.keys(body.versions ?? {})
+  const deprecated = new Set(versions.filter((version) => typeof body.versions[version]?.deprecated === 'string'))
+  const tagged = body['dist-tags']?.latest
+  return {
+    ...(typeof tagged === 'string' ? { latest: tagged } : {}),
+    versions,
+    deprecated,
+  }
 }
 
 /**
- * 拿标签表与正在跑的版本比一次。
+ * 拿 registry 的摘要与正在跑的版本比一次。
  *
- * @param tags - 发布源的标签名。
+ * dist-tags.latest 缺失时从版本清单里挑：只认正式版（预发布不自动推），取语义最高。
+ *
+ * @param document - fetchRegistry() 的返回。
  * @param current - 本包版本（X.Y.Z）。
  * @returns 有更新的发布时 `{ state: 'available', latest }`，否则 `{ state: 'current', latest? }`。
  */
-export function updateVerdict(tags, current) {
-  const latest = latestRelease(tags)
+export function updateVerdict(document, current) {
+  const versions = Array.isArray(document?.versions) ? document.versions : []
+  const deprecated = document?.deprecated instanceof Set ? document.deprecated : new Set()
+  let latest = typeof document?.latest === 'string' ? document.latest : undefined
+  if (latest === undefined) {
+    for (const version of versions) {
+      const parsed = parseVersion(version)
+      if (parsed === undefined || parsed.prerelease !== undefined || deprecated.has(version)) continue
+      if (latest === undefined || compareVersions(version, latest) > 0) latest = version
+    }
+  }
+  // 被标为 deprecated 的「最新版」不可信：那是发布者自己说的「别用这个」。
+  if (latest !== undefined && deprecated.has(latest)) return { state: 'current', deprecated: latest }
   if (latest !== undefined && compareVersions(latest, current) > 0) return { state: 'available', latest }
   return { state: 'current', ...(latest !== undefined ? { latest } : {}) }
 }
@@ -151,21 +164,21 @@ export function packageVersion(fromUrl = import.meta.url) {
 }
 
 /**
- * 一个更新检查器：定时读发布标签、记下判决、供工具层取用。
+ * 一个更新检查器：定时读 registry、记下判决、供工具层取用。
  *
  * 状态 `state`：off | pending | checking | current | available | failed。
- * 任何失败（断网、限流、没装 git）只记下来给调用方看，绝不抛出，也不提前重试：
+ * 任何失败（断网、镜像挂掉、包还没发布）只记下来给调用方看，绝不抛出，也不提前重试：
  * 下一轮定时检查会再试。
  */
 export class UpdateChecker {
   /**
-   * @param options - `{ env, api, delayMs, intervalMs, log, source, version }`。
+   * @param options - `{ env, fetch, delayMs, intervalMs, log, source, version }`。
    *   `version` 缺省时在**构造这一刻**读一次本包 package.json，之后固定在实例上；
    *   `log` 是接受一行文本的日志函数。
    */
   constructor(options = {}) {
     this.env = options.env ?? process.env
-    this.api = options.api ?? this.env.DSH_PWSH_UPDATE_API ?? undefined
+    this.fetch = options.fetch
     this.delayMs = options.delayMs
     this.intervalMs = options.intervalMs ?? UPDATE_INTERVAL_MS
     this.log = options.log ?? (() => undefined)
@@ -223,9 +236,9 @@ export class UpdateChecker {
     const previous = this.state
     this.state = { ...previous, state: 'checking' }
     const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(20000)])
-    this.checking = fetchReleaseTags(this.source, { api: this.api, signal })
-      .then((tags) => {
-        const verdict = updateVerdict(tags, this.version)
+    this.checking = fetchRegistry(this.source, { ...(this.fetch === undefined ? {} : { fetch: this.fetch }), signal })
+      .then((document) => {
+        const verdict = updateVerdict(document, this.version)
         this.state = { ...verdict, checkedAt: new Date().toISOString() }
         this.log('update check: ' + this.state.state + (this.state.latest === undefined ? '' : ' (newest ' + this.state.latest + ', running ' + this.version + ')'))
       }, (error) => {

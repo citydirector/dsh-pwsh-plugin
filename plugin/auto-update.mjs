@@ -23,9 +23,19 @@
  *   若此刻正有一条调用在跑，它会连带被掐断——脚本跑到一半、半截输出、会话状态全丢，
  *   与直接断电没有区别。所以安装前要问宿主「现在安静吗」，忙就整个推迟，
  *   而不是装完再说「可惜刚才那条被打断了」。
+ *
+ * 为什么要记住「上一次实际装到了哪个版本」
+ *   pnpm 的 minimumReleaseAge 会让「请求 0.2.13、装到 0.2.12」成为正常结果。若不留这个记忆，
+ *   下一轮还会请求 0.2.13、还会落回 0.2.12，被 plugin-manager 判 already-installed，
+ *   退避爬到上限，永远如此。记住之后就能认出「这是冷却期，不是故障」，直接等到期。
+ *
+ * 为什么冷却期落地之后要把目标版本从「装过」里撤出来
+ *   落到更旧的版本算成功，但它不是这次的目标：目标自己还要等窗口过去。若不当场撤掉，
+ *   这个版本就再也不会被尝试，等于把这个进程的生命周期钉死在旧版本上。
  */
 
 import { installRelease, preflightInstall } from './update-apply.mjs'
+import { compareVersions } from './update-check.mjs'
 
 /** 首次检查前的等待：让启动流程先跑完，别跟它抢 pnpm。 */
 const FIRST_DELAY_MS = 90 * 1000
@@ -35,24 +45,29 @@ const RETRY_BASE_MS = 5 * 60 * 1000
 const RETRY_MAX_MS = 2 * 60 * 60 * 1000
 /** 查出有新版但有调用正跑着：过一会儿再看一眼，别等到下一轮 12 小时。 */
 const BUSY_RETRY_MS = 3 * 60 * 1000
+/** 冷却期：pnpm 的窗口默认 24 小时，隔一小时再看一眼不浪费什么。 */
+const COOLDOWN_RETRY_MS = 60 * 60 * 1000
 
 /**
  * 在 HMR 事务之外装一个发布。
  *
  * @param ctx - 插件上下文，用来取 pluginManager 与 hmr。
- * @param spec - 钉住 tag 的安装规格，例如 github:owner/repo#v1.2.3。
+ * @param spec - 钉住版本号的安装规格，例如 dsh-pwsh-plugin@0.2.13。
  * @param options - { requestId, log }。
  * @returns 与 installRelease 相同的结果对象，永不抛出。
  */
 export async function installReleaseLive(ctx, spec, options = {}) {
   const manager = ctx?.get?.('pluginManager')
   const hmr = ctx?.get?.('hmr')
+  // 回读装完的版本需要 profile 目录；读不到就只报 application，不编一个版本号出来。
+  const profileDir = ctx?.get?.('profileContext')?.dir
+  const base = { ...options, ...(typeof profileDir === 'string' ? { profileDir } : {}) }
   if (hmr === undefined || typeof hmr?.executing?.run !== 'function') {
-    return await installRelease(manager, spec, { ...options, live: false })
+    return await installRelease(manager, spec, { ...base, live: false })
   }
   // 上下文清空后 installBundle 自己会拿 runExclusive；装完 HMR 重组合，
   // 本插件的模块被驱逐、新模块 import 进来重新 apply。
-  return await hmr.executing.run(undefined, () => installRelease(manager, spec, { ...options, live: true }))
+  return await hmr.executing.run(undefined, () => installRelease(manager, spec, { ...base, live: true }))
 }
 
 /**
@@ -72,7 +87,7 @@ function hmrIsLive(ctx) {
  *
  * @param ctx - 插件上下文。
  * @param checker - UpdateChecker 实例；它的 check() 重入安全，直接复用。
- * @param options - { log, firstDelayMs, intervalMs, retryBaseMs, retryMaxMs }。
+ * @param options - { log, firstDelayMs, intervalMs, retryBaseMs, retryMaxMs, cooldownRetryMs }。
  * @returns 停止函数；插件被卸载或热替换时由调用方停掉。
  */
 export function startAutoUpdate(ctx, checker, options = {}) {
@@ -81,12 +96,15 @@ export function startAutoUpdate(ctx, checker, options = {}) {
   const intervalMs = options.intervalMs ?? INTERVAL_MS
   const retryBaseMs = options.retryBaseMs ?? RETRY_BASE_MS
   const retryMaxMs = options.retryMaxMs ?? RETRY_MAX_MS
+  const cooldownRetryMs = options.cooldownRetryMs ?? COOLDOWN_RETRY_MS
 
   const installGate = options.installGate
   const busyRetryMs = options.busyRetryMs ?? BUSY_RETRY_MS
 
   /** 已经自动装过的版本：同一个版本装成功过就不再装第二次。 */
   const attempted = new Set()
+  /** 上一次安装实际落到的版本：冷却期会让它与请求的版本不同，用来认出「不是故障」。 */
+  let lastInstalled
   let timer
   let stopped = false
   let running = false
@@ -116,15 +134,20 @@ export function startAutoUpdate(ctx, checker, options = {}) {
           const spec = doc.spec
           if (typeof spec === 'string' && spec.length > 0) {
             // 装之前先问一句值不值得装，否则 already-installed 会以「失败」的姿态出现，
-            // 而它其实有两种含义完全不同的成因（别人装好了 / 发布忘了升版本）。
-            const unnecessary = preflightInstall(ctx, checker, spec)
+            // 而它其实有几种含义完全不同的成因（别人装好了 / 发布忘了升版本 / 冷却期未过）。
+            const unnecessary = preflightInstall(ctx, checker, spec, lastInstalled === undefined ? {} : { cooled: lastInstalled })
             if (unnecessary !== null) {
               busyNoted = false
-              // 记下这个版本，别再排下一轮：三种成因都不会自己好转。
-              // 「别人装好了等重启」重启后会重建循环，那时代码已是最新，根本走不到这里。
+              // 记下这个版本，别再排下一轮：这几种成因都不会在几分钟内自己好转。
+              // 冷却期例外——它是会到期的，所以单独按小时再看。
               attempted.add(state.latest)
               log('auto update: ' + state.latest + ' — ' + unnecessary.outcome + ': ' + unnecessary.text)
-              if (unnecessary.ok === true) failures = 0
+              if (unnecessary.outcome === 'cooling-down') {
+                attempted.delete(state.latest)
+                next = cooldownRetryMs
+              } else if (unnecessary.ok === true) {
+                failures = 0
+              }
               return
             }
             busyNoted = false
@@ -132,6 +155,15 @@ export function startAutoUpdate(ctx, checker, options = {}) {
             log('auto update: installing ' + state.latest + ' from ' + spec)
             const outcome = await installReleaseLive(ctx, spec, { requestId: 'pwsh-run-auto-update', log })
             log('auto update: ' + outcome.outcome + ' — ' + outcome.text)
+            if (outcome.installedVersion !== undefined) {
+              lastInstalled = outcome.installedVersion
+              // 落到更旧的版本是 pnpm 冷却期的正常结果，但目标版本还在窗口里：
+              // 撤掉这条记录，过一小时（窗口是 24 小时）再看，而不是等满 12 小时。
+              if (compareVersions(outcome.installedVersion, state.latest) < 0) {
+                attempted.delete(state.latest)
+                next = cooldownRetryMs
+              }
+            }
             if (outcome.ok !== true) {
               // 装失败要能重来：把记录撤掉，交给退避后的下一轮。
               attempted.delete(state.latest)

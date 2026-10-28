@@ -559,7 +559,12 @@ full-access 不挂围栏、流分离 + `exit code: 7`、2000 行大输出 ——
 
 ---
 
-## 十九、自动更新：只查、只提示、从不自己装
+## 十九、自动更新：只查、只提示、从不自己装（历史）
+
+> 本节记录的是 0.2.2 时期的形态：发布源是 GitHub 标签、装由人触发。第三十三节之后发布源换成
+> npm registry、自动路径会自己装，但下面的**判决逻辑与失败语义**（失败不抛、保留 stale、查与装分开的
+> 理由、`plugin_manager` 工具与服务的区别）仍然成立。文中出现的 `DSH_PWSH_UPDATE_SOURCE` / `github:` 规格
+> 与 WSLENV 陷阱都属于那一版，现已被 `DSH_PWSH_UPDATE_REGISTRY` 取代。
 
 参考同作者的 `dsh-remote-access-proxy`（v1.4 起有更新检查，1454 行里第 102-107 / 225-233 / 244 / 982 / 1010 行是全部相关代码）。
 本插件照搬了它的**判决逻辑与失败语义**，改掉了两处形态。
@@ -568,9 +573,9 @@ full-access 不挂围栏、流分离 + `exit code: 7`、2000 行大输出 ——
 
 | 设计 | 参考实现 | 本插件 |
 |---|---|---|
-| 标签契约 | `/^v(0\|\d*)\.(0\|\d*)\.(0\|\d*)$/`，预发布永不推送 | 同（`parseReleaseTag`）|
-| 安装规格 | `${source.spec}#${tag}` —— 一个 tag 一个规格，装新版就是盖掉旧的 | 同（`releaseSpec`）|
-| 源可覆盖 | `DSH_RAP_UPDATE_SOURCE`：`owner/repo` → GitHub；`git+<url>` → `git ls-remote` | `DSH_PWSH_UPDATE_SOURCE`，同名规则 |
+| 版本契约 | `/^v(0\|\d*)\.(0\|\d*)\.(0\|\d*)$/`，预发布永不推送 | 同（`parseVersion` / `updateVerdict`）|
+| 安装规格 | `${source.spec}#${tag}` —— 一个 tag 一个规格，装新版就是盖掉旧的 | `dsh-pwsh-plugin@X.Y.Z`（registry 形式，见第三十三节）|
+| 源可覆盖 | `DSH_RAP_UPDATE_SOURCE`：`owner/repo` → GitHub；`git+<url>` → `git ls-remote` | `DSH_PWSH_UPDATE_REGISTRY`，指 registry 基址（第三十三节已从 GitHub 标签改为 npm dist-tags）|
 | 首次延迟 / 周期 | 5s 之后每 12h，timer 都 `.unref?.()` | 同 |
 | 失败不抛 | `state:'failed'` + 保留先前 `latest` + `stale:'available'` | 同，注释原话「一次网络抖动不该让已知的新版本消失」 |
 | **查与装分开** | 页面把钉了 tag 的 spec 交给 DSH 的 `plugin_manager` | 输出末尾挂一行提示；装由 `pwsh_run_update` 显式触发，同样交给 `pluginManager` |
@@ -593,10 +598,10 @@ full-access 不挂围栏、流分离 + `exit code: 7`、2000 行大输出 ——
 
    ```powershell
    $env:DSH_HOME = '<DSH_HOME>'
-   & '<desktop cli>\dsh.cmd' plugin --profile desktop add 'github:<owner>/dsh-pwsh-plugin#v0.2.0'
+   & '<desktop cli>\dsh.cmd' plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
    ```
 
-2. **`pwsh_run_update` 工具**（0.2.2 起）：把钉住 tag 的 spec 交给 `ctx.get('pluginManager')`。
+2. **`pwsh_run_update` 工具**（0.2.2 起）：把钉住版本的 spec 交给 `ctx.get('pluginManager')`。
 
    这里要区分**工具**与**服务**，早前我把两者混为一谈：
    - 工具 `plugin_manager`：`dsh-base/cordis.patch.yml:15-17` 里 `tool-plugin-manager` 是 `disabled: true`，
@@ -1695,4 +1700,90 @@ if [ -f "<path>" ] && [ -O "<path>" ] && chmod +x "<path>" 2>/dev/null && [ -x "
 改成先自己试写一次，写不出去就 `SKIP`。
 
 ### 验收
-十一份脚本在 Windows node 下 **272 项全绿**；bashtest 在 WSL 侧另跑到 `TOTAL pass=20 fail=0`（四项按平台跳过）。
+十一份脚本在 Windows node 下 **305 项全绿**；bashtest 在 WSL 侧另跑到 `TOTAL pass=20 fail=0`（四项按平台跳过）。
+
+---
+
+## 三十三、发布与更新改走 npm registry（2026-10-28）
+
+### 为什么换
+
+原来更新检查读的是 GitHub 的 `GET /repos/<repo>/tags`，安装规格是 `github:owner/repo#vX.Y.Z`。
+包既然已经发在 npm 上（第三十二节之后），读 tag 就成了第二个真相源：同一个版本在两处分别可达，
+而两边谁先谁后没有任何约束。而且 `github:` 规格装的是仓库快照，不经过 pnpm 的供应链策略
+（`minimumReleaseAge`）—— 绕开安全网的路不该是默认路。
+
+现在只有一个真相源：`dist-tags.latest`。
+
+### 检查：读 abbreviated 文档
+
+`GET https://registry.npmjs.org/dsh-pwsh-plugin`，请求头 `accept: application/vnd.npm.install-v1+json`。
+实测这份文档 200 时形状是：
+
+```json
+{ "dist-tags": { "latest": "0.2.12" },
+  "versions": { "0.0.0-stage": {...}, "0.2.12": { "version": "0.2.12", "dist": { "shasum": "1ca2d9f0…" } } } }
+```
+
+三条判决规则：
+
+| 情形 | 判决 |
+|---|---|
+| `dist-tags.latest` 是纯 `X.Y.Z` 且高于当前 | `available` |
+| `dist-tags.latest` 被标了 `deprecated` | `current`，并把被废弃的版本报出来（不推一个官方已劝退的版本）|
+| 没有 `dist-tags` | 从版本清单里挑最高**正式版**（预发布跳过）|
+
+`404` 单独成一条文案：`not published on <registry>`。它不是「没有新版本」——一个是配置或发版出了问题，
+一个是正常工作状态，混在一起会把事故说成安静。
+
+**abbreviated 文档里没有 `time` 字段**（实测 `time keys` 为空），所以检查阶段无法得知发布时间；
+冷却期只能靠 pnpm 自己的策略，见下。
+
+### 安装：回读磁盘，不信返回值
+
+`installBundle` 的返回里**没有 version 字段**（`application` 只有
+`'applied' | 'restart-required' | 'failed' | 'cancelled'`）。装到哪个版本只能从
+`<profileDir>/node_modules/dsh-pwsh-plugin/package.json` 回读。
+
+这不是洁癖。pnpm 的 `minimumReleaseAge` 默认 1440 分钟（1 天，v11 起），今天发布的版本今天解析不到 ——
+于是「请求 0.2.13、装到 0.2.12」是**正常行为**，而 `installRelease` 若拿 `state.latest` 当结果，
+就会把一个没发生的事记成发生了。现在的做法：
+
+- 回读 `installedVersion`；
+- 若它低于请求的版本，输出末尾追加一句 `pnpm installed X rather than Y: its minimumReleaseAge policy
+  withholds versions that are too recent.`；
+- 自动路径把 `lastInstalled` 传进下一轮预检（`cooled`），若「冷却期落地的版本」仍低于 `latest`，
+  把它从 `attempted` 里撤出来并在 1 小时后重试 —— 否则这个进程的生命周期会被钉死在那个旧版本上，
+  而它明明已经装好了。
+
+预检 `checkInstallNeed` 的 `cooling-down` 判据是：
+`cooled < latest && cooled >= (running ?? disk ?? '0.0.0')`。换句话说，只有当**已经装上的东西**比目标旧、
+且不比运行中的更旧时，才值得再发一次安装请求。
+
+### 发布：OIDC trusted publishing
+
+`.github/workflows/release.yml` 在 tag 上跑 `scripts/release-check.mjs`，然后
+`npm publish --provenance`，凭 npm 的 trusted publishing（runner 用 OIDC 换一个只对本仓库 + 本
+workflow 文件有效的令牌）。仓库里不放 `NPM_TOKEN`。
+
+三点是实测/文档里挑出来的硬约束：
+
+1. **workflow 文件名是信任契约的一部分。** 在 npm 的 Trusted publisher 设置里填的是 `release.yml`，
+   改名或搬到子目录，每次发布都会 403，而且报错不会告诉你原因。
+2. **npm 11.5.1 起才支持。** Node 24 自带 11.x，workflow 里仍显式校验这条下限。
+3. **trusted publishing 只授权带 provenance 的发布**，所以 `--provenance` 不是可选项。
+
+为什么不是「发版时手动 `npm publish`」：手动发布需要一个 bypass-2FA 的 granular token，而账号只有
+passkey（WebAuthn）、没有 TOTP 入口 —— 产不出 `--otp` 要的六位码。OIDC 把「谁能发」从「持有一个长期
+令牌的人」换成「这个仓库的这个 workflow」，同时消掉了令牌本身。
+
+### 测试
+
+`test/support.mjs` 里加了 `startRegistry`：用 `node:http` 起一个本机假 registry，记录每次请求的
+`accept` 头，可随时 `set(name, doc)`。**每个响应都带 `connection: close`** —— undici 会为 keep-alive
+空闲连接挂一个解析器超时计时器，而退避测试要压缩全局 `setTimeout`，那个计时器会被提前触发并抛
+`TypeError: Cannot read properties of undefined (reading 'deref') at Timeout.onParserTimeout`。
+让连接短命是唯一不用改被测代码的解法。
+
+`updatetest` 118 项、`autoupdatetest` 46 项、`wiringtest` 24 项全部改走这个假 registry。
+

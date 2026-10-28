@@ -1,21 +1,21 @@
 #!/usr/bin/env node
 /**
- * 自动更新的单元测试 —— 纯 node，不需要 DSH、不需要网络。
+ * 自动更新的单元测试 —— 纯 node，不需要 DSH。
  *
- * 被替换下来的都是真对象：checker 是 UpdateChecker 的真实例（发布源指向本地 git 仓库），
+ * 被替换下来的都是真对象：checker 是 UpdateChecker 的真实例（发布源指向本地假 registry，真 HTTP），
  * hmr 用一个 AsyncLocalStorage 复刻真实服务的嵌套检查语义，pluginManager 用一个记账的假安装器。
  * 于是「在 HMR 上下文里调会失败、在外层调才会成功」这条实测结论也被钉住了。
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { installReleaseLive, startAutoUpdate } from '../plugin/auto-update.mjs'
 import { describeInstallOutcome } from '../plugin/update-apply.mjs'
-import { UpdateChecker, packageVersion } from '../plugin/update-check.mjs'
+import { UpdateChecker, packageVersion, updateSource } from '../plugin/update-check.mjs'
+import { packageDocument, startRegistry } from './support.mjs'
 
 let pass = 0
 let fail = 0
@@ -29,7 +29,7 @@ function check(label, ok, detail) {
 const realSetTimeout = globalThis.setTimeout
 const sleep = (ms) => new Promise((resolve) => realSetTimeout(resolve, ms))
 
-/** 等到条件成立或超时。定时循环里 check() 要起 git 子进程，固定 sleep 会假失败。 */
+/** 等到条件成立或超时。定时循环里有真 HTTP 往返，固定 sleep 会假失败。 */
 async function waitFor(predicate, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -39,32 +39,13 @@ async function waitFor(predicate, timeoutMs = 8000) {
   return predicate()
 }
 
-/** 本地 git 仓库当发布源：造 v0.0.1 / v0.0.2 两个 tag，不需要网络。 */
-function makeReleaseRepo() {
-  const dir = mkdtempSync(join(tmpdir(), 'pwsh-run-auto-'))
-  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir })
-  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'first'], { cwd: dir })
-  execFileSync('git', ['tag', 'v0.0.1'], { cwd: dir })
-  writeFileSync(join(dir, 'next.txt'), 'x')
-  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'add', '-A'], { cwd: dir })
-  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'second'], { cwd: dir })
-  execFileSync('git', ['tag', 'v0.0.2'], { cwd: dir })
-  const gitUrl = 'file://' + dir.replace(/\\/g, '/')
-  return { dir, url: gitUrl, spec: 'git+' + gitUrl, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
-}
-
 /** 复刻 HMR 的 executing 语义：run(undefined, cb) 在异步延续里都清空 store。 */
 function makeFakeHmr() {
   const executing = new AsyncLocalStorage()
-  const calls = []
-  const hmr = {
-    executing,
-    runExclusive(operation) {
-      if (executing.getStore()) return Promise.reject(new Error('HMR transactions cannot be nested'))
-      return Promise.resolve().then(() => executing.run(true, operation))
-    },
-  }
-  return { hmr, calls, executing }
+  return { hmr: { executing, runExclusive(operation) {
+    if (executing.getStore()) return Promise.reject(new Error('HMR transactions cannot be nested'))
+    return Promise.resolve().then(() => executing.run(true, operation))
+  } }, executing }
 }
 
 /** 假 pluginManager：记录每次 installBundle 时 HMR 上下文的样子。 */
@@ -83,7 +64,21 @@ function makeFakeManager(hmrState, results) {
   }
 }
 
-const release = makeReleaseRepo()
+/** 造一份装好的 profile：package.json 记着安装规格，node_modules 里躺着真装件的 package.json。 */
+function makeProfile(dependency, installedVersion) {
+  const dir = mkdtempSync(join(tmpdir(), 'pwsh-run-profile-'))
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ dependencies: dependency === undefined ? {} : { 'dsh-pwsh-plugin': dependency } }))
+  if (installedVersion !== undefined) {
+    const pkgDir = join(dir, 'node_modules', 'dsh-pwsh-plugin')
+    mkdirSync(pkgDir, { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: 'dsh-pwsh-plugin', version: installedVersion }))
+  }
+  return dir
+}
+
+const registry = await startRegistry({ 'dsh-pwsh-plugin': packageDocument({ latest: '0.0.2' }, { '0.0.1': {}, '0.0.2': {} }) })
+const source = updateSource({ DSH_PWSH_UPDATE_REGISTRY: registry.url })
+
 try {
   // ── 1. describeInstallOutcome 的两种语义 ─────────────────────────────────
   console.log('\n[1] describeInstallOutcome')
@@ -101,10 +96,10 @@ try {
   console.log('\n[2] installReleaseLive')
   {
     const state = makeFakeHmr()
-    const manager = makeFakeManager(state, [{ application: 'applied', version: '0.0.2' }])
+    const manager = makeFakeManager(state, [{ application: 'applied' }])
     const ctx = { get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : undefined) }
     // 模拟插件的真实处境：调用点自己在 HMR 事务里。
-    const inside = await state.executing.run(true, () => installReleaseLive(ctx, 'github:o/r#v0.0.2'))
+    const inside = await state.executing.run(true, () => installReleaseLive(ctx, 'dsh-pwsh-plugin@0.0.2'))
     check('事务里发起也成功', inside.ok === true, inside.text)
     check('安装时上下文已清空', manager.attempts[0]?.store === undefined, String(manager.attempts[0]?.store))
     check('结果按 live 措辞', /already running/.test(inside.text), inside.text)
@@ -112,13 +107,13 @@ try {
   {
     const manager = makeFakeManager({ executing: new AsyncLocalStorage() }, [{ application: 'applied' }])
     const ctx = { get: (name) => (name === 'pluginManager' ? manager : undefined) }
-    const noHmr = await installReleaseLive(ctx, 'github:o/r#v0.0.3')
+    const noHmr = await installReleaseLive(ctx, 'dsh-pwsh-plugin@0.0.3')
     check('没有 HMR 时仍能装', noHmr.ok === true, noHmr.text)
     check('没有 HMR 时要求重启', /Restart DSH/.test(noHmr.text), noHmr.text)
   }
   {
     const ctx = { get: () => undefined }
-    const noManager = await installReleaseLive(ctx, 'github:o/r#v0.0.3')
+    const noManager = await installReleaseLive(ctx, 'dsh-pwsh-plugin@0.0.3')
     check('没有 pluginManager 时 ok=false', noManager.ok === false, noManager.text)
     check('没有 pluginManager 时给出 no-manager', noManager.outcome === 'no-manager', noManager.outcome)
   }
@@ -127,16 +122,17 @@ try {
   console.log('\n[3] startAutoUpdate 正常一轮')
   {
     const state = makeFakeHmr()
-    const manager = makeFakeManager(state, [{ application: 'applied', version: '0.0.2' }])
+    const manager = makeFakeManager(state, [{ application: 'applied' }])
     const ctx = { get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : undefined) }
-    const checker = new UpdateChecker({ source: { kind: 'git', url: release.url, spec: release.spec }, version: '0.0.1' })
+    const checker = new UpdateChecker({ source, version: '0.0.1' })
     const logs = []
     const stop = startAutoUpdate(ctx, checker, { firstDelayMs: 5, intervalMs: 20, log: (line) => logs.push(line) })
     await waitFor(() => manager.attempts.length >= 1)
     check('装了一次', manager.attempts.length === 1, 'attempts=' + manager.attempts.length)
-    check('装的是钉住 tag 的规格', String(manager.attempts[0]?.spec).endsWith('#v0.0.2'), String(manager.attempts[0]?.spec))
+    // 装的是「包名@版本」，不是 git 规格：新机制下 profile 里记的就是这一串。
+    check('装的是钉住版本的 registry 规格', manager.attempts[0]?.spec === 'dsh-pwsh-plugin@0.0.2', String(manager.attempts[0]?.spec))
     check('requestId 标明来源', manager.attempts[0]?.requestId === 'pwsh-run-auto-update', String(manager.attempts[0]?.requestId))
-    check('日志提到在装', logs.some((line) => /installing v0\.0\.2/.test(line)), JSON.stringify(logs))
+    check('日志提到在装', logs.some((line) => /installing 0\.0\.2/.test(line)), JSON.stringify(logs))
     // 装完运行版本仍是 0.0.1（真机上 HMR 会换掉模块，这里换不掉），第二轮查到的还是同一个版本。
     check('同一版本不重复装', manager.attempts.length === 1, 'attempts=' + manager.attempts.length)
     await sleep(120)
@@ -151,9 +147,9 @@ try {
   console.log('\n[3b] 忙时推迟安装')
   {
     const state = makeFakeHmr()
-    const manager = makeFakeManager(state, [{ application: 'applied', version: '0.0.2' }])
+    const manager = makeFakeManager(state, [{ application: 'applied' }])
     const ctx = { get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : undefined) }
-    const checker = new UpdateChecker({ source: { kind: 'git', url: release.url, spec: release.spec }, version: '0.0.1' })
+    const checker = new UpdateChecker({ source, version: '0.0.1' })
     let busy = true
     let acquired = 0
     let released = 0
@@ -184,21 +180,19 @@ try {
   // 会在 pnpm 之前抛 already-installed，于是一个静默的「有新版、装不进去」循环就此成立。
   console.log('\n[3c] 预检拦下的不装')
   {
-    // 发布坏了：profile 已指向 v0.0.2，而磁盘上的包版本与 v0.0.2 对不上（发版忘了升版本号）。
-    const profileDir = mkdtempSync(join(tmpdir(), 'pwsh-run-profile-'))
-    const spec = release.spec + '#v0.0.2'
-    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': spec } }))
+    // 发布坏了：profile 已指向 0.0.2，而磁盘上的包版本与它不同（发版忘了升版本号）。
+    const profileDir = makeProfile('dsh-pwsh-plugin@0.0.2', '0.0.1')
     const state = makeFakeHmr()
-    const manager = makeFakeManager(state, [{ application: 'applied', version: '0.0.2' }])
+    const manager = makeFakeManager(state, [{ application: 'applied' }])
     const ctx = {
       get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : name === 'profileContext' ? { dir: profileDir } : undefined),
     }
-    const checker = new UpdateChecker({ source: { kind: 'git', url: release.url, spec: release.spec }, version: '0.0.1' })
+    const checker = new UpdateChecker({ source, version: '0.0.1' })
     const logs = []
     const stop = startAutoUpdate(ctx, checker, { firstDelayMs: 5, intervalMs: 20, log: (line) => logs.push(line) })
     await waitFor(() => logs.some((line) => /broken-release/.test(line)))
     check('发布坏了就不去装', manager.attempts.length === 0, 'attempts=' + manager.attempts.length)
-    check('日志点明是发布本身的问题', logs.some((line) => /broken-release/.test(line) && /not bumped/.test(line)), JSON.stringify(logs))
+    check('日志点明是发布本身的问题', logs.some((line) => /broken-release/.test(line) && /without bumping package\.json/.test(line)), JSON.stringify(logs))
     await sleep(120)
     check('发布坏了也不反复重试', logs.filter((line) => /broken-release/.test(line)).length === 1, JSON.stringify(logs))
     stop()
@@ -206,20 +200,16 @@ try {
   }
   {
     // 别人已经装好了，只是进程还没重启：磁盘已等于最新，运行版本更旧。
-    const latest = 'v' + packageVersion()
-    const dir = mkdtempSync(join(tmpdir(), 'pwsh-run-latest-'))
-    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir })
-    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'release'], { cwd: dir })
-    execFileSync('git', ['tag', latest], { cwd: dir })
-    const url = 'file://' + dir.replace(/\\/g, '/')
-    const profileDir = mkdtempSync(join(tmpdir(), 'pwsh-run-profile-'))
-    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: { 'dsh-pwsh-plugin': 'git+' + url + '#' + latest } }))
+    const latest = packageVersion()
+    const previous = { latest: '0.0.2' }
+    registry.set('dsh-pwsh-plugin', packageDocument({ latest }, { [latest]: {} }))
+    const profileDir = makeProfile('dsh-pwsh-plugin@' + latest, latest)
     const state = makeFakeHmr()
     const manager = makeFakeManager(state, [{ application: 'applied' }])
     const ctx = {
       get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : name === 'profileContext' ? { dir: profileDir } : undefined),
     }
-    const checker = new UpdateChecker({ source: { kind: 'git', url, spec: 'git+' + url }, version: '0.0.1' })
+    const checker = new UpdateChecker({ source, version: '0.0.1' })
     const logs = []
     const stop = startAutoUpdate(ctx, checker, { firstDelayMs: 5, intervalMs: 20, log: (line) => logs.push(line) })
     await waitFor(() => logs.some((line) => /restart-required/.test(line)))
@@ -228,8 +218,36 @@ try {
     await sleep(120)
     check('同一版本不重复试', logs.filter((line) => /restart-required/.test(line)).length === 1, JSON.stringify(logs))
     stop()
+    registry.set('dsh-pwsh-plugin', packageDocument({ latest: previous.latest }, { '0.0.1': {}, '0.0.2': {} }))
     rmSync(profileDir, { recursive: true, force: true })
-    rmSync(dir, { recursive: true, force: true })
+  }
+
+  // ── 3d. 冷却期：装到了更旧的版本，目标版本要留着下次再试 ──────────────────
+  // pnpm 的 minimumReleaseAge 会让「请求 0.0.2、落回 0.0.1」成为正常结果。若把这个目标当成
+  // 已经装过，这个进程就再也升不上去了 —— 这一节钉的就是那条「撤掉记录」。
+  console.log('\n[3d] 冷却期落地后重新排队')
+  {
+    registry.set('dsh-pwsh-plugin', packageDocument({ latest: '0.0.2' }, { '0.0.1': {}, '0.0.2': {} }))
+    const profileDir = makeProfile(undefined, '0.0.1')
+    const state = makeFakeHmr()
+    const manager = makeFakeManager(state, [{ application: 'applied' }])
+    const ctx = {
+      get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : name === 'profileContext' ? { dir: profileDir } : undefined),
+    }
+    const checker = new UpdateChecker({ source, version: '0.0.1' })
+    const logs = []
+    const stop = startAutoUpdate(ctx, checker, { firstDelayMs: 5, intervalMs: 20, cooldownRetryMs: 25, log: (line) => logs.push(line) })
+    await waitFor(() => manager.attempts.length >= 1)
+    check('先真装了一次', manager.attempts.length === 1, 'attempts=' + manager.attempts.length)
+    check('说清装到了更旧的版本', logs.some((line) => /installed 0\.0\.1 rather than 0\.0\.2/.test(line)), JSON.stringify(logs))
+    // 第二轮应该被认出是冷却期：不再去装，但要继续看着。
+    await waitFor(() => logs.some((line) => /cooling-down/.test(line)))
+    check('第二轮认出冷却期', logs.some((line) => /cooling-down/.test(line)), JSON.stringify(logs))
+    check('冷却期不重复去装', manager.attempts.length === 1, 'attempts=' + manager.attempts.length)
+    await waitFor(() => logs.filter((line) => /cooling-down/.test(line)).length >= 2)
+    check('冷却期里仍在看着（没停死）', logs.filter((line) => /cooling-down/.test(line)).length >= 2, JSON.stringify(logs))
+    stop()
+    rmSync(profileDir, { recursive: true, force: true })
   }
 
   // ── 4. 装失败要撤记录并退避 ──────────────────────────────────────────────
@@ -238,10 +256,10 @@ try {
     const state = makeFakeHmr()
     const manager = makeFakeManager(state, [
       { application: 'failed', changed: false, error: { code: 'operation-error', diagnostic: 'pnpm exited 1' } },
-      { application: 'applied', version: '0.0.2' },
+      { application: 'applied' },
     ])
     const ctx = { get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : undefined) }
-    const checker = new UpdateChecker({ source: { kind: 'git', url: release.url, spec: release.spec }, version: '0.0.1' })
+    const checker = new UpdateChecker({ source, version: '0.0.1' })
     const stop = startAutoUpdate(ctx, checker, { firstDelayMs: 5, intervalMs: 20, retryBaseMs: 15, retryMaxMs: 40 })
     await waitFor(() => manager.attempts.length >= 2)
     check('失败后会重试', manager.attempts.length >= 2, 'attempts=' + manager.attempts.length)
@@ -249,10 +267,13 @@ try {
   }
   {
     // 退避本身：连续失败时下一次调度应当越来越晚。用记录调度间隔的假定时器验证。
+    // 这一节刻意用一个不联网的假 checker：压缩全局 setTimeout 会连带缩短 undici 内部
+    // 的解析器超时计时器，让它在空闲连接上抛 TypeError（实测过），与本插件毫无关系。
+    // 退避只跟「查到的状态」有关，与 checker 的实现无关。
     const state = makeFakeHmr()
     const manager = makeFakeManager(state, [{ application: 'failed', changed: false, error: { code: 'operation-error' } }])
     const ctx = { get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : undefined) }
-    const checker = new UpdateChecker({ source: { kind: 'git', url: release.url, spec: release.spec }, version: '0.0.1' })
+    const checker = { async check() { return { state: 'available', latest: '0.0.2' } }, document: () => ({ state: 'available', latest: '0.0.2', spec: 'dsh-pwsh-plugin@0.0.2' }) }
     const delays = []
     globalThis.setTimeout = (fn, ms) => { delays.push(ms); return realSetTimeout(fn, 2) }
     let stop
@@ -284,22 +305,40 @@ try {
     const state = makeFakeHmr()
     const manager = makeFakeManager(state, [{ application: 'applied' }])
     const ctx = { get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : undefined) }
-    const current = { async check() { return { state: 'current', latest: 'v0.0.1' } }, document: () => ({ state: 'current', latest: 'v0.0.1' }) }
+    const current = { async check() { return { state: 'current', latest: '0.0.1' } }, document: () => ({ state: 'current', latest: '0.0.1' }) }
     const stop = startAutoUpdate(ctx, current, { firstDelayMs: 5, intervalMs: 20 })
     await sleep(60)
     check('已是最新时不装', manager.attempts.length === 0, 'attempts=' + manager.attempts.length)
+    stop()
+  }
+  {
+    // 真 checker 遇上真 404：registry 上没有这个包名。
+    const state = makeFakeHmr()
+    const manager = makeFakeManager(state, [{ application: 'applied' }])
+    const ctx = { get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : undefined) }
+    const logs = []
+    // checker 自己的日志与 auto-update 的日志在插件里都汇进同一个 logger，所以这里也共用一个数组。
+    const missing = new UpdateChecker({
+      source: { kind: 'registry', registry: registry.url, name: 'no-such-package', spec: 'no-such-package' },
+      version: '0.0.1',
+      log: (line) => logs.push(line),
+    })
+    const stop = startAutoUpdate(ctx, missing, { firstDelayMs: 5, intervalMs: 20, retryBaseMs: 10, retryMaxMs: 20, log: (line) => logs.push(line) })
+    await sleep(80)
+    check('404 时不装', manager.attempts.length === 0, 'attempts=' + manager.attempts.length)
+    check('404 落进日志', logs.some((line) => /not published on/.test(line)), JSON.stringify(logs))
+    check('404 记为失败而不是最新', /state: failed|failed/.test(JSON.stringify(missing.document())), JSON.stringify(missing.document()))
     stop()
   }
 
   // ── 5b. 没有 HMR 的宿主上不自动装（装上也换不掉，只会谎报版本）─────────────
   console.log('\n[5b] 没有 HMR 时不自动装')
   {
-    const manager = makeFakeManager({ executing: new AsyncLocalStorage() }, [{ application: 'applied', version: '0.0.2' }])
+    const manager = makeFakeManager({ executing: new AsyncLocalStorage() }, [{ application: 'applied' }])
     const ctx = { get: (name) => (name === 'pluginManager' ? manager : undefined) }
-    const checker = new UpdateChecker({ source: { kind: 'git', url: release.url, spec: release.spec }, version: '0.0.1' })
+    const checker = new UpdateChecker({ source, version: '0.0.1' })
     const logs = []
     const stop = startAutoUpdate(ctx, checker, { firstDelayMs: 5, intervalMs: 20, log: (line) => logs.push(line) })
-    // 这一轮的 check() 要起真 git 子进程量一次 tag，固定 sleep 会偶发假失败：等日志落地。
     await waitFor(() => logs.length > 0, 8000)
     check('没有 HMR 就不装', manager.attempts.length === 0, 'attempts=' + manager.attempts.length)
     check('但要说清为什么', logs.some((line) => /no HMR/.test(line)), JSON.stringify(logs))
@@ -310,16 +349,16 @@ try {
   console.log('\n[6] 抛错也要活下来')
   {
     const state = makeFakeHmr()
-    const manager = makeFakeManager(state, [() => { throw new Error('profile is locked') }, { application: 'applied', version: '0.0.2' }])
+    const manager = makeFakeManager(state, [() => { throw new Error('profile is locked') }, { application: 'applied' }])
     const ctx = { get: (name) => (name === 'pluginManager' ? manager : name === 'hmr' ? state.hmr : undefined) }
-    const checker = new UpdateChecker({ source: { kind: 'git', url: release.url, spec: release.spec }, version: '0.0.1' })
+    const checker = new UpdateChecker({ source, version: '0.0.1' })
     const stop = startAutoUpdate(ctx, checker, { firstDelayMs: 5, intervalMs: 20, retryBaseMs: 15, retryMaxMs: 40 })
     await waitFor(() => manager.attempts.length >= 2)
     check('抛错后仍会再试', manager.attempts.length >= 2, 'attempts=' + manager.attempts.length)
     stop()
   }
 } finally {
-  release.cleanup()
+  await registry.close()
 }
 
 console.log('\n' + '='.repeat(56))
