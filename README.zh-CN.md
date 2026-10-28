@@ -42,6 +42,14 @@
 它**不会**顺手禁用官方的 `tool-bash`：那一行本来就带 `disabled: !!js process.platform === 'win32'`，
 在这里写死 `disabled: true` 会把 Linux 上的官方 bash 一起关掉。
 
+**npm registry。** 也在 npm 上：`npm i dsh-pwsh-plugin`，或者让 DSH 装 registry 规格：
+
+```powershell
+& $dsh plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
+```
+
+> 注意 pnpm 的 `minimumReleaseAge` 默认 1440 分钟：刚发布的版本当天不会自动解析到，点「更新」会装到上一个版本。这是供应链策略，不是装错。
+
 **侧栏。** Plugins → Add plugin → `https://github.com/citydirector/dsh-pwsh-plugin`，然后打开开关。
 
 **命令行。** `desktop` profile 只能由桌面端自带的 CLI 管：

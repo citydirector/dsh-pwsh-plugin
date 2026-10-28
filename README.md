@@ -45,6 +45,15 @@ It inserts two:
 It does **not** disable the stock `tool-bash`: that row already carries `disabled: !!js process.platform ===
 'win32'`, and a hard `disabled: true` from here would switch the official bash off on Linux too.
 
+**npm registry.** Also published to npm: `npm i dsh-pwsh-plugin`, or let DSH install the registry spec:
+
+```powershell
+& $dsh plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
+```
+
+> pnpm's `minimumReleaseAge` defaults to 1440 minutes, so a version published today is not resolved
+today — pressing update installs the previous release. That is the supply-chain policy, not a failure.
+
 **Sidebar.** Plugins → Add plugin → `https://github.com/citydirector/dsh-pwsh-plugin`, then switch it on.
 
 **CLI.** The `desktop` profile can only be managed by the desktop application's own CLI:
