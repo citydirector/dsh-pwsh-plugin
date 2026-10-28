@@ -25,14 +25,24 @@ const fail = (message) => {
   process.exit(1)
 }
 
-/** 跑一条 git 命令，失败时返回 undefined 而不是抛出 —— 大多数检查要容忍「没有 tag」。 */
-const git = (...args) => {
+/**
+ * 跑一条 git 命令。失败时不抛出，而是把 git 自己的 stderr 一起带回来。
+ *
+ * 为什么要把 stderr 留下：在受限令牌的会话里 git 根本起不来（建不了匿名管道，报
+ * "cannot create standard input pipe"），那时 stderr 为空、退出码非零。只返回 undefined
+ * 的版本会把它说成「当前目录不是 git 仓库」—— 一句听起来像配置问题的假话，实测误导过一轮。
+ */
+const gitRaw = (...args) => {
   try {
-    return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
-  } catch {
-    return undefined
+    return { output: execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim() }
+  } catch (error) {
+    const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : ''
+    return { reason: stderr !== '' ? stderr : 'git exited without a message (' + (error?.code ?? 'unknown') + ')' }
   }
 }
+
+/** 大多数检查只关心「拿到了没有」，失败原因由需要解释的地方用 gitRaw 取。 */
+const git = (...args) => gitRaw(...args).output
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const version = pkg.version
@@ -40,8 +50,13 @@ if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version)) {
   fail('package.json 的 version 必须是三段版本号，当前是 ' + String(version))
 }
 
-const dirty = git('status', '--porcelain')
-if (dirty === undefined) fail('当前目录不是 git 仓库')
+const status = gitRaw('status', '--porcelain')
+if (status.output === undefined) {
+  fail('git status 跑不通：' + status.reason
+    + '\n（报错里出现 EPERM、pipe 或 Access is denied，说明当前会话的受限令牌起不了 git 子进程，'
+    + '换一个正常权限的终端来跑这个脚本，而不是去查仓库本身。）')
+}
+const dirty = status.output
 if (dirty.length > 0) {
   fail('工作区不干净，先提交或 stash：\n' + dirty)
 }
