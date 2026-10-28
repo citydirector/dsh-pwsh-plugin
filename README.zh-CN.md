@@ -246,7 +246,8 @@ Remove-Item -Recurse -Force $root
 Windows 上打，那份文件到手时是 `0644` —— 探测发现它属于当前用户却不可执行时，会自己补上执行位再试。
 
 完整说明、`-r` 档语义表、54 项验收矩阵与接入方式：**[docs/llrun.md](docs/llrun.md)**。想在自己机器上
-复验就 `bash wsl/acceptance.sh` —— 它的每个路径都从自身位置推导，并在结尾复核磁盘有没有泄漏。
+复验就 `bash wsl/acceptance.sh`（要在未被 `custom-bash` 包裹的 WSL 里跑：套第二层围栏会让四项断言
+因错误的原因变红）—— 它的每个路径都从自身位置推导，并在结尾复核磁盘有没有泄漏。
 
 ## 故障处理
 

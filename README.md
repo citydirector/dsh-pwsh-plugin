@@ -271,8 +271,9 @@ It needs no manual install: the binary ships inside the package and is the last 
 restores the executable bit itself before giving up, as long as the file belongs to the current user.
 
 Full description, the `-r` semantics table, the 54-assertion acceptance matrix and the wiring:
-**[docs/llrun.md](docs/llrun.md)**. Run `bash wsl/acceptance.sh` to re-verify on your own machine — it
-derives every path from its own location and re-checks the disk for leaks.
+**[docs/llrun.md](docs/llrun.md)**. Run `bash wsl/acceptance.sh` from a plain WSL shell (not from inside
+`custom-bash`, where nesting a second fence makes four assertions fail for the wrong reason) to re-verify on
+your own machine — it derives every path from its own location and re-checks the disk for leaks.
 
 ## Troubleshooting
 

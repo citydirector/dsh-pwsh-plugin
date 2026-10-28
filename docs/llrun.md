@@ -87,6 +87,10 @@ The script is machine-independent: it derives the workspace from its own locatio
 user directory under `/mnt/*/Users/*/`, and only asserts against directories that actually exist. It also
 re-checks the disk at the end (`leaks=N`) so a silently-succeeding write cannot pass unnoticed.
 
+Run it from a WSL shell that is **not** itself inside the fence. Under `custom-bash` the shell is already
+wrapped in `llrun`, and nesting a second user namespace turns four assertions red and leaves a `/dev/shm`
+probe behind — a false failure, not a regression. `wsl.exe -e bash` from a plain Windows prompt is enough.
+
 - **Write boundary**: outside targets (drive root, `Documents`, the portable data root, the profile dir,
   `C:\Users\<user>`) all DENIED with disk re-check absent; workspace, `/tmp` and `/home` writable;
   `/var/tmp` sealed but readable.
