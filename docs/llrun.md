@@ -65,6 +65,14 @@ mkdir -p <DSH_HOME>/bin && cp llrun <DSH_HOME>/bin/llrun && chmod 755 <DSH_HOME>
 | 2 | `<DSH_HOME>/bin/llrun` | **recommended** — inside your own data root, survives upgrades with it |
 | 3 | `/usr/local/bin/llrun` | only if you can write there (`sudo`) |
 | 4 | `~/.local/bin/llrun` | no `sudo`, but must be a path the shell user can execute |
+| 5 | the copy next to `custom-bash.mjs` | ships with the package — the only candidate a fresh install has |
+
+**The packaged copy arrives without an executable bit.** `npm pack` runs on Windows when the release is
+cut, and Windows has no such concept: every entry lands as `0644`. So the probe does not stop at `-x`. If a
+candidate exists, belongs to the shell user (`-O`) and is not executable yet, it runs `chmod +x` on it and
+retries — the file is ours, inside the user's own `node_modules`, so this costs nothing and needs no
+install script (pnpm does not run those by default anyway). Ownership is the gate: a `llrun` owned by
+someone else is left untouched, and reported as 「exists but is not executable」 rather than as missing.
 
 The result is cached across calls, so installing the binary later takes effect on the next call — no DSH
 restart. The probe runs once over `bash -s` and returns a single exit code, so a missing candidate costs a
@@ -159,6 +167,7 @@ deployment default):
 | `read-only` | `llrun -r <workspace> /bin/bash -s` |
 | `sandboxPolicy` absent | **throws, refuses to run**, unless `fence: false` is configured |
 | no candidate executable | **throws, refuses to run** — never silently degrades to unfenced; the message lists every probed path |
+| a candidate exists but cannot be executed | **throws**, naming that exact path — not reported as 「not found」 |
 
 `workspace` comes from the policy's `workspaceRoot` (falling back to the session cwd), with Windows paths
 translated to `/mnt/<drive>/...`. A POSIX `workdir` goes to llrun's `-C` (chdir after landlock); a Windows
@@ -179,4 +188,8 @@ to `custom-bash.mjs` inside the package — first executable wins, and the resul
 install works without a restart. Yours come first: a system-level `llrun` may be newer, the packaged one only
 guarantees that the fence is there at all.
 
-Tests: `node test/bashtest.mjs` (19, mock runtime) + `node test/bash-e2e.mjs` (11, real runtime + real llrun).
+Tests: `node test/bashtest.mjs` (25, mock runtime) + `node test/bash-e2e.mjs` (11, real runtime + real llrun).
+Three of the 25 pin the executable-bit repair: a `0644` copy is made executable and the call succeeds, an
+unusable copy is named in the error, and an unusable candidate earlier in the list does not shadow a usable
+one later. They only assert the mode on POSIX hosts — NTFS reports every file as `0666`, so there the
+assertion is that the call still works.

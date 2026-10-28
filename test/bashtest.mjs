@@ -1,19 +1,29 @@
 // custom-bash 围栏测试：mock sandboxPolicy 驱动 mode 分诊，真 llrun 做边界
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { apply } from '../wsl/custom-bash.mjs'
+import { apply, llrunProbeScript } from '../wsl/custom-bash.mjs'
 import { toWslPath } from './support.mjs'
 
 const WSL_BASH = process.env.BASH_BIN ?? 'C:\\Windows\\System32\\bash.exe'
 const WS = process.cwd()
-const WS_WSL = toWslPath(WS)
+// 已经是 POSIX 路径（在 WSL 里跑测试时 cwd 就是 /mnt/d/...）就原样用，不必再转。
+const asPosix = (path) => path.startsWith('/') ? path : toWslPath(path)
+const WS_WSL = asPosix(WS)
 // 仓库自带一份 llrun 二进制；部署过自己那份的话用 LLRUN 指过去。
 const LLRUN = process.env.LLRUN ?? WS_WSL + '/wsl/llrun'
 // 工作区外的一个位置，用来验证围栏确实拦住了跨目录写入。
 const OUTSIDE_WIN = resolve(dirname(WS), '_skadi_cb_outside.txt')
-const OUTSIDE_WSL = toWslPath(OUTSIDE_WIN)
+const OUTSIDE_WSL = asPosix(OUTSIDE_WIN)
+// 本进程自己能 stat 的那个路径形式：WSL 侧认 /mnt/d/...，Windows 侧认 D:...
+const localPath = (winPath) => process.platform === 'win32' ? winPath : asPosix(winPath)
+const POSIX_RUN = process.platform !== 'win32'
+
+// llrun 在没有 user namespace 时会把两条 warning 写到 stderr（嵌套 llrun 的情况：
+// 测试本身已经跑在宿主围栏内）。它们是提示，不是命令输出，比对正文前先剥掉。
+const stripWarnings = (text) => String(text ?? '')
+  .split('\n').filter((line) => !line.startsWith('llrun: warning:')).join('\n').trim()
 
 const subprocess = {
   async resolveExecutable(command) { return command === 'bash' ? WSL_BASH : command },
@@ -53,7 +63,12 @@ const ctxBase = {
 }
 
 const results = []
-const check = (label, pass, detail) => results.push((pass ? 'PASS ' : 'FAIL ') + label + (detail ? '  ::  ' + detail : ''))
+// 边跑边报：整套要起十几次 bash + llrun，卡住时得知道停在哪一项。
+const check = (label, pass, detail) => {
+  const line = (pass ? 'PASS ' : 'FAIL ') + label + (detail ? '  ::  ' + detail : '')
+  results.push(line)
+  process.stderr.write(line + '\n')
+}
 const exec = { agent: { session: { id: 'cb-1', header: { cwd: WS } } }, signal: undefined }
 const run = (command, extra) => REG.execute({ command, ...(extra ?? {}) }, exec)
 
@@ -71,13 +86,14 @@ check('verbatim-script', r.text.includes('[a b]') && r.text.includes('sq') && r.
 
 // 工作区内可写
 r = await run('echo ok > _skadi_cb_inside.txt && echo WROTE')
-const insideExists = existsSync(WS + '\\_skadi_cb_inside.txt')
+const insidePath = join(WS, '_skadi_cb_inside.txt')
+const insideExists = existsSync(insidePath)
 check('ws-write-inside', r.text.includes('WROTE') && insideExists, JSON.stringify(r.text))
-rmSync(WS + '\\_skadi_cb_inside.txt', { force: true })
+rmSync(insidePath, { force: true })
 
 // 工作区外被拒
 r = await run('echo x > ' + OUTSIDE_WSL + ' 2>&1; echo "rc=$?"')
-check('ws-write-outside-denied', !existsSync(OUTSIDE_WIN) && r.text.includes('rc='), JSON.stringify(r.text))
+check('ws-write-outside-denied', !existsSync(localPath(OUTSIDE_WIN)) && r.text.includes('rc='), JSON.stringify(r.text))
 
 // Windows exe 被封（WSL interop 依赖 /init）
 r = await run('cmd.exe /c echo RAN 2>&1 | head -1; echo END')
@@ -90,15 +106,23 @@ check('docker-blocked', !/CONTAINER ID/.test(r.text), JSON.stringify(r.text))
 // B. read-only
 POLICY = { mode: 'read-only', workspaceRoot: WS }
 r = await run('echo x > _skadi_cb_ro.txt 2>&1; echo "rc=$?"; ls > /dev/null && echo READ-OK')
-check('ro-write-denied', !existsSync(WS + '\\_skadi_cb_ro.txt') && r.text.includes('READ-OK'), JSON.stringify(r.text))
+check('ro-write-denied', !existsSync(join(WS, '_skadi_cb_ro.txt')) && r.text.includes('READ-OK'), JSON.stringify(r.text))
 r = await run('echo x > /tmp/_skadi_cb_ro 2>&1; echo "rc=$?"')
 check('ro-tmp-denied', /rc=[1-9]/.test(r.text) || /denied|Read-only/i.test(r.text), JSON.stringify(r.text))
 
 // C. danger-full-access 不挂围栏
 POLICY = { mode: 'danger-full-access', workspaceRoot: WS }
-r = await run('echo x > ' + OUTSIDE_WSL + ' && echo WROTE')
-check('full-no-fence', r.text.includes('WROTE') && existsSync(OUTSIDE_WIN), JSON.stringify(r.text))
-rmSync(OUTSIDE_WIN, { force: true })
+// 外层若已有围栏（例如测试本身跑在 llrun 里），danger-full-access 也写不出去，
+// 这一项就失去意义 —— 先自己试一次，写不出去就显式跳过，不冒充通过。
+let hostCanWriteOutside = true
+try { writeFileSync(OUTSIDE_WIN, 'probe'); rmSync(OUTSIDE_WIN, { force: true }) } catch { hostCanWriteOutside = false }
+if (hostCanWriteOutside) {
+  r = await run('echo x > ' + OUTSIDE_WSL + ' && echo WROTE')
+  check('full-no-fence', r.text.includes('WROTE') && existsSync(localPath(OUTSIDE_WIN)), JSON.stringify(r.text))
+  rmSync(localPath(OUTSIDE_WIN), { force: true })
+} else {
+  process.stderr.write('SKIP full-no-fence (host is already fenced)\n')
+}
 
 // D. sandboxPolicy 缺席 → fail-closed
 POLICY = { mode: 'workspace-write', workspaceRoot: WS }
@@ -127,11 +151,16 @@ check('llrun-missing-refused', threw2.includes('llrun was not found') && threw2.
 // F. workdir 走 -C（POSIX 路径）
 apply(ctxBase, { llrunPath: LLRUN })
 r = await run('pwd', { workdir: '/tmp' })
-check('workdir-posix', r.text.trim().endsWith('/tmp'), JSON.stringify(r.text))
+check('workdir-posix', r.text.split('\n')[0].trim() === '/tmp', JSON.stringify(r.text))
 
-// G. workdir 走 Windows 路径（进程 cwd）
-r = await run('pwd', { workdir: 'D:\\' })
-check('workdir-windows', r.text.trim() === '/mnt/d', JSON.stringify(r.text))
+// G. workdir 走 Windows 路径（进程 cwd）。WSL 侧的 node 起不了 cwd=D:\ 的子进程，
+// 这一项只在 Windows 侧有意义，另一侧就跳过（显式打印，免得看着像通过）。
+if (process.platform === 'win32') {
+  r = await run('pwd', { workdir: 'D:\\' })
+  check('workdir-windows', r.text.split('\n')[0].trim() === '/mnt/d', JSON.stringify(r.text))
+} else {
+  process.stderr.write('SKIP workdir-windows (not host win32)\n')
+}
 
 // H. 退出码呈现
 r = await run('exit 42')
@@ -139,11 +168,11 @@ check('exit-code', r.text.includes('exit code: 42'), JSON.stringify(r.text))
 
 // I. 空输出
 r = await run('true')
-check('empty-output', r.text.includes('no output') || r.text.trim() === '', JSON.stringify(r.text))
+check('empty-output', r.text.includes('no output') || stripWarnings(r.text) === '', JSON.stringify(r.text))
 
 // J. timeout
 r = await run('sleep 5', { })
-check('no-timeout-by-default', r.text.trim() === '' || r.text.includes('exit code'), JSON.stringify(r.text).slice(0, 80))
+check('no-timeout-by-default', stripWarnings(r.text) === '' || r.text.includes('exit code'), JSON.stringify(r.text).slice(0, 80))
 
 // K. 候选探测：不配 llrunPath 时按 $LLRUN 找到那份 llrun。
 // 探测脚本经 stdin 送入，所以这条同时钉住「bash.exe 不改写正文」——
@@ -199,6 +228,10 @@ const makeCtx = (lookup) => {
   return { ctx, get: () => R }
 }
 
+// M 组三项测的是 Windows 那个 WSL 垫片后备，只对 win32 宿主有意义。
+if (process.platform !== 'win32') {
+  process.stderr.write('SKIP bash-fallback-used / bash-path-first / bash-explicit-not-fallback (not host win32)\n')
+} else {
 // 只有绝对路径能解出来：断言后备被用上，且命令真的跑起来了
 {
   const seen = []
@@ -237,6 +270,59 @@ const makeCtx = (lookup) => {
   let msg = 'NO-ERROR'
   try { await get().execute({ command: 'echo x' }, exec) } catch (error) { msg = String(error?.message ?? error) }
   check('bash-explicit-not-fallback', msg.includes('is not an executable file') && seen.length === 1 && seen[0] === 'C:\\nowhere\\bash.exe', JSON.stringify(seen) + ' ' + msg.slice(0, 90))
+}
+}
+
+// N. 执行位：npm 打包在 Windows 上把 llrun 写成 644，装到真实 Linux 后不可执行。
+// 探测脚本必须自己补上执行位（是我们发的、属主就是装包的人），而不是报「找不到」。
+// 用 /tmp（ext4）而不是工作区：/mnt/d 是 9p，一律 rwx，测不出这件事。
+{
+  const dir = join(tmpdir(), '_skadi_llrun_mode')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const lax = join(dir, 'llrun')
+  writeFileSync(lax, '#!/bin/sh\nexec /bin/bash -s\n')
+  chmodSync(lax, 0o644)
+  const posix = asPosix(lax)
+  const before = statSync(lax).mode & 0o777
+  const { ctx, get } = makeCtx((c) => c)
+  apply(ctx, { llrunPath: posix })
+  const out = await get().execute({ command: 'echo fenced-ran' }, exec).catch((error) => ({ text: String(error?.message ?? error) }))
+  const after = statSync(lax).mode & 0o777
+  // 权限位只有 POSIX 文件系统说了算。Windows 侧这份假 llrun 落在 NTFS 上，
+  // node 读回来恒是 0666，chmod 不改变任何东西 —— 那里只能验「命令跑通了」。
+  // 真正的执行位问题（npm 打包写 644）只会在 Linux 上发生，所以严格断言留在那一侧。
+  const modeOk = process.platform === 'win32' || (before === 0o644 && after === 0o755)
+  check('llrun-chmod-on-probe', modeOk && out.text.includes('fenced-ran'),
+    'host=' + process.platform + ' before=' + before.toString(8) + ' after=' + after.toString(8) + ' ' + JSON.stringify(out.text).slice(0, 120))
+  rmSync(dir, { recursive: true, force: true })
+}
+
+// O. 「有文件但用不了」要指名道姓。属主改不掉时（/usr/local/bin 那类要 root 的，
+// 或别人的文件）chmod 会失败，此时必须说「存在但不可执行」，而不是报成「一个都没找到」。
+const lockedLlrun = '/etc/hostname'
+{
+  const { ctx, get } = makeCtx((c) => c)
+  apply(ctx, { llrunPath: lockedLlrun })
+  let msg = 'NO-ERROR'
+  try { await get().execute({ command: 'echo x' }, exec) } catch (error) { msg = String(error?.message ?? error) }
+  check('llrun-unusable-named', msg.includes('exists but is not executable') && msg.includes(lockedLlrun), msg.slice(0, 160))
+}
+
+// P. 候选顺序不能被一个无关的「存在但不可执行」文件挡住：
+// 前面有一个用不了的文件时，后面那份能用的仍然要胜出（退出码 2 而不是 101）。
+{
+  const dir = join(tmpdir(), '_skadi_llrun_order')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const good = join(dir, 'llrun')
+  writeFileSync(good, '#!/bin/sh\nexec /bin/bash -s\n')
+  chmodSync(good, 0o755)
+  const script = llrunProbeScript(['/etc/hostname', asPosix(good)])
+  const probe = subprocess.spawn({ argv: [WSL_BASH, '-s'], stdio: { stdin: { data: script } } })
+  const outcome = await probe.done
+  check('llrun-unusable-later-wins', outcome.exitCode === 2, 'exit=' + String(outcome.exitCode))
+  rmSync(dir, { recursive: true, force: true })
 }
 
 console.log(results.join('\n'))

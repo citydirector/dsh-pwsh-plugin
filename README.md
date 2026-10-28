@@ -266,6 +266,10 @@ the DSH sandbox. `wsl/llrun` closes that with a user namespace, landlock (ABI 7,
 deliberately omits `/init` so no Windows executable can be launched) and a `/var/tmp` mount seal.
 `wsl/custom-bash.mjs` wires it into the `bash` tool and picks the tier from the session's permission.
 
+It needs no manual install: the binary ships inside the package and is the last probe candidate, so a fresh
+`plugin add` is enough. Since releases are packed on Windows, that copy arrives as `0644` — the probe
+restores the executable bit itself before giving up, as long as the file belongs to the current user.
+
 Full description, the `-r` semantics table, the 54-assertion acceptance matrix and the wiring:
 **[docs/llrun.md](docs/llrun.md)**. Run `bash wsl/acceptance.sh` to re-verify on your own machine — it
 derives every path from its own location and re-checks the disk for leaks.
@@ -377,7 +381,7 @@ PWSH_BIN='pwsh' node test/itest.mjs          # 17: protocol and session core
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15: full plugin path
 node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
-node test/bashtest.mjs                       # 22: custom-bash fence triage, bash fallback
+node test/bashtest.mjs                       # 25: custom-bash fence triage, bash fallback, exec-bit repair
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
 node test/updatetest.mjs                     # 96: update check, install outcomes, pre-flight, local git only
 node test/autoupdatetest.mjs                 # 38: automatic install, back-off, idle gate, pre-flight, HMR-context escape
@@ -386,7 +390,7 @@ node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn
 node test/metatest.mjs                       # 23: plugin-page metadata (no spawn, runs anywhere)
 ```
 
-Eleven scripts, **269 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Eleven scripts, **272 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.

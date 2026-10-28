@@ -1628,3 +1628,71 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/us
 ### 一条诚实说明
 这道后备只救 `bash` 工具。`cmd`、`fsutil` 这类靠 PATH 找的可执行文件依旧找不到 —— 它们没有写死的备选位置。
 真正的解法是重建 `explorer.exe` 的环境块（注销重新登录），那一步要用户挑时机。
+## 三十二、npm 打包在 Windows 上丢执行位：探测自己补（2026-10-27）
+
+### 症状
+发布包在 Windows 上打，tar 里没有「执行位」这个概念，于是 `wsl/llrun` 落到用户机器上是 **`0644`**：
+
+```
+000644    17328 package/wsl/llrun        ← 不可执行
+000644    13376 package/wsl/llrun.c
+000644    16706 package/wsl/custom-bash.mjs
+```
+
+本机一直没人发现，是因为仓库在工作区 `/mnt/d`（9p 挂载一律 `rwxrwxrwx`），开发机上又真装过 llrun，
+前四个候选总有命中的。而在真实 Linux 上用 registry 装的用户，五个候选全落空，
+`bash` 工具在 workspace-write / read-only 下 **直接 fail-closed，完全不能用**。
+
+### 第一次修法的错误
+第一版把「存在但不可执行」写成紧跟在每个候选后面的一段 `if [ -e ... ]; then exit 100+N`。
+后果是**一个无关的文件就能把后面能用的候选挡住** —— 探测按序号取第一个命中，第 101 号会先于第 2 号返回。实测：
+
+```
+候选 = [/nope/llrun, /etc/hostname, <可用>]
+旧版 → exit=102   ← 报「第二个存在但不可执行」，可用的第三个根本没被问到
+新版 → exit=3     ← 可用那个胜出
+```
+
+改成**两遍扫描**：第一遍只看「能不能跑」，任何一个可用立即定下来；全部否定之后，第二遍才找
+「存在但不可执行」的那一个。这样顺序语义没被「诊断信息」污染。
+
+### 最终实现（`wsl/custom-bash.mjs` 的 `llrunProbeScript`）
+第一遍每个候选两行：
+
+```bash
+if [ -x "<path>" ]; then exit "$index"; fi
+if [ -f "<path>" ] && [ -O "<path>" ] && chmod +x "<path>" 2>/dev/null && [ -x "<path>" ]; then exit "$index"; fi
+```
+
+`-O`（属主是自己）是这道门的关键：包内那份在我们自己的 `node_modules` 里，补执行位不需要任何权限；
+而 `/usr/local/bin` 那种 root 的文件、或别人的文件，一律不碰。失败就落到第二遍，被指名道姓地报出来。
+
+### 实测（ext4 `/tmp`，不是 9p）
+
+| 场景 | 结果 |
+|---|---|
+| `644` 且属主是自己 | `chmod` 成功，`644 → 755`，命令真的跑起来 |
+| `644` 但属主是 `nobody`（`/etc/hostname`） | 权限位不变，退出码 `101` |
+| 不可执行在前、可用在后 | 退出码 `2`（可用那个胜出，不被挡住） |
+| 全不存在 | 退出码 `0` |
+| 从 tar 解包（真 `0644`）后直接 new 一个插件实例 | `FRESH-INSTALL-FENCED-OK`，之后权限 `755` |
+
+### 钉住（`test/bashtest.mjs` 22 → 25）
+`llrun-chmod-on-probe` / `llrun-unusable-named` / `llrun-unusable-later-wins`。
+第一项只在 POSIX 宿主上断言权限位：NTFS 上 `statSync().mode` 恒为 `0666`，那里只验「命令跑通了」。
+
+### 顺带修掉的四处测试自身缺陷
+这一轮为了能在 WSL 里跑通整套，暴露了 bashtest 里几处**只在 Windows 侧成立**的写法：
+
+| 缺陷 | 后果 | 修法 |
+|---|---|---|
+| `toWslPath(WS)` 在 WSL 侧返回 `undefined` | `echo x > undefined` 在工作区里造出一个叫 `undefined` 的文件，而「越界被拒」的断言看的是另一个路径 → **假绿** | 加 `asPosix()`，已是 POSIX 就原样用 |
+| 磁盘断言写死 `WS + '\\name'` | WSL 侧 `existsSync` 永远 false | 用 `join()` 拼，或按平台取路径形式 |
+| `workdir-windows` / 三个 bash 后备项 | WSL 侧起不了 `cwd=D:\\`、也没有 `bash.exe` | 非 win32 显式 `SKIP`，不冒充通过 |
+| llrun 的两行 `warning:` 混进合并输出 | 空输出、无超时两项误判 | `stripWarnings()` 剥掉 `llrun: warning:` 开头的行 |
+
+另外 `full-no-fence` 一项在宿主本身已被围栏时无法验证（danger-full-access 也写不出去），
+改成先自己试写一次，写不出去就 `SKIP`。
+
+### 验收
+十一份脚本在 Windows node 下 **272 项全绿**；bashtest 在 WSL 侧另跑到 `TOTAL pass=20 fail=0`（四项按平台跳过）。

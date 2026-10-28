@@ -242,6 +242,9 @@ Remove-Item -Recurse -Force $root
 起不来）与 `/var/tmp` 挂载封印把这件事变成闭环。`wsl/custom-bash.mjs` 把它接进 `bash` 工具，并按会话
 权限选档。
 
+不需要手动装：二进制随包发布，探测候选的最后一个就是它，所以一次 `plugin add` 就够。由于发布包在
+Windows 上打，那份文件到手时是 `0644` —— 探测发现它属于当前用户却不可执行时，会自己补上执行位再试。
+
 完整说明、`-r` 档语义表、54 项验收矩阵与接入方式：**[docs/llrun.md](docs/llrun.md)**。想在自己机器上
 复验就 `bash wsl/acceptance.sh` —— 它的每个路径都从自身位置推导，并在结尾复核磁盘有没有泄漏。
 
@@ -340,7 +343,7 @@ PWSH_BIN='pwsh' node test/itest.mjs          # 17：协议与会话本体
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15：插件完整路径
 node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
-node test/bashtest.mjs                       # 22：custom-bash 围栏分诊、bash 后备
+node test/bashtest.mjs                       # 25：custom-bash 围栏分诊、bash 后备、执行位自修复
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
 node test/updatetest.mjs                     # 96：更新检查、安装结果、安装前预检（只碰本地 git）
 node test/autoupdatetest.mjs                 # 38：自动安装、退避、空闲闸门、安装前预检、HMR 上下文逃逸
@@ -349,7 +352,7 @@ node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起�
 node test/metatest.mjs                       # 23：插件页元数据（不起子进程，哪儿都能跑）
 ```
 
-十一份脚本合计 **269 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十一份脚本合计 **272 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

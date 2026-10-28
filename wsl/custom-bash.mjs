@@ -73,7 +73,10 @@ const PROBE_TIMEOUT_MS = 8000
 function packagedLlrunPath() {
   try {
     // 目录 URL 带尾分隔符，去掉再转，免得拼出双斜杠。
-    return toWslPath(fileURLToPath(new URL('.', import.meta.url)).replace(/[\\/]$/, ''))
+    const dir = fileURLToPath(new URL('.', import.meta.url)).replace(/[\\/]$/, '')
+    // 包本身就在 POSIX 文件系统上时（非 Windows 宿主，或从 WSL 侧加载），
+    // 它已经是可直接用的路径，不必也无法转成 /mnt/<drive>。
+    return dir.startsWith('/') ? dir : toWslPath(dir)
   } catch {
     return undefined
   }
@@ -106,14 +109,29 @@ function defaultLlrunCandidates() {
  * 因为收集缓冲区只在 stdio 声明为 collect 时才存在，不该把可用性押在它上面。
  * 候选里的 ~ 在这里展开：用引号包起来的路径不会被 bash 做 tilde 展开。
  */
-function llrunProbeScript(candidates) {
-  const lines = ['index=0']
-  for (const candidate of candidates) {
-    // ~ 在生成时展开成 $HOME，留给 bash 自己解析，不写死探测时的家目录。
-    const path = candidate.startsWith('~/') ? '$HOME/' + candidate.slice(2) : candidate
-    lines.push('index=$((index + 1))')
-    lines.push('if [ -x "' + path + '" ]; then exit "$index"; fi')
-  }
+export function llrunProbeScript(candidates) {
+  // ~ 在生成时展开成 $HOME，留给 bash 自己解析，不写死探测时的家目录。
+  const posix = candidates.map((candidate) => candidate.startsWith('~/') ? '$HOME/' + candidate.slice(2) : candidate)
+  const lines = []
+  // 第一遍只看能不能跑：任何一个可用就定下来，顺序即优先级。
+  const first = ['index=0']
+  posix.forEach((path) => {
+    first.push('index=$((index + 1))')
+    first.push('if [ -x "' + path + '" ]; then exit "$index"; fi')
+    // npm 打包在 Windows 上会把文件权限写成 644（那里没有执行位概念），
+    // 装到真实 Linux 后这份 llrun 就不可执行。它是我们发的、属主是装包的人，
+    // 所以可以就地补上执行位；别人的文件（-O 为假）不碰。
+    first.push('if [ -f "' + path + '" ] && [ -O "' + path + '" ] && chmod +x "' + path + '" 2>/dev/null && [ -x "' + path + '" ]; then exit "$index"; fi')
+  })
+  lines.push(...first)
+  // 第二遍才看「在但不是可执行」：要等所有候选都否定过，否则一个无关的文件
+  // 会让后面本来能用的那几份没机会。退出码 100+N 让上层能说清是哪一份。
+  const second = ['index=0']
+  posix.forEach((path) => {
+    second.push('index=$((index + 1))')
+    second.push('if [ -e "' + path + '" ]; then exit "$((100 + index))"; fi')
+  })
+  lines.push(...second)
   lines.push('exit 0')
   return lines.join('\n')
 }
@@ -201,6 +219,8 @@ export function apply(ctx, config) {
    * 这样用户装好之后下一次调用就能直接用，不必重启 DSH。
    */
   let resolvedLlrun
+  // 探测到「文件存在但用不了」的候选，供错误文案区分两种情况。
+  let unusableLlrun
   async function resolveLlrun(shell, cwd) {
     if (resolvedLlrun !== undefined) return resolvedLlrun
     const handle = ctx.subprocess.spawn({
@@ -212,7 +232,12 @@ export function apply(ctx, config) {
     })
     const outcome = await handle.done.catch(() => undefined)
     const index = outcome?.exitCode
-    if (!Number.isInteger(index) || index < 1 || index > llrunCandidates.length) return undefined
+    if (!Number.isInteger(index)) return undefined
+    if (index > 100 && index <= 100 + llrunCandidates.length) {
+      unusableLlrun = llrunCandidates[index - 101]
+      return undefined
+    }
+    if (index < 1 || index > llrunCandidates.length) return undefined
     resolvedLlrun = llrunCandidates[index - 1]
     return resolvedLlrun
   }
@@ -268,7 +293,10 @@ export function apply(ctx, config) {
       if (needFence) {
         const llrunPath = await resolveLlrun(shell, baseCwd)
         if (llrunPath === undefined) {
-          throw new Error(`bash fence is required in ${mode} mode but llrun was not found; looked for: ${llrunCandidates.join(', ')}`
+          const detail = unusableLlrun === undefined
+            ? `looked for: ${llrunCandidates.join(', ')}`
+            : `${unusableLlrun} exists but is not executable`
+          throw new Error(`bash fence is required in ${mode} mode but llrun was not found; ${detail}`
             + ' — deploy wsl/llrun to one of them (see README), set the `llrunPath` config, or disable the fence'
             + ' explicitly with the `fence: false` config.')
         }
