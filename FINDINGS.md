@@ -1822,3 +1822,59 @@ No authorization header was set for the request.
 
 `updatetest` 118 项、`autoupdatetest` 46 项、`wiringtest` 24 项全部改走这个假 registry。
 
+## 三十四、把更新交回 DSH（2026-10-29）
+
+### 决定
+
+博士原话：「我们换成了 NPM 发版，使用 DSH 自带的版本管理和更新功能，就不再需要旧的自动更新机制。」
+
+于是 `plugin/update-check.mjs`、`plugin/update-apply.mjs`、`plugin/auto-update.mjs` 与对应的三份测试
+（`updatetest` 118 项、`autoupdatetest` 46 项、`wiringtest` 24 项）整体删除；`pwsh_run_update` 工具、
+`updateCheck` / `autoUpdate` / `autoUpdateDelayMs` 三个配置项、安装闸门（`activeRuns` / `installing` /
+`installGate` / `waitForInstall`）、输出末尾的更新提示一并去掉。`test/support.mjs` 里的假 registry
+（`startRegistry` / `packageDocument`）随之删除 —— 它只服务那三份测试。
+
+### 宿主这条路是完整的（源码逐行读过）
+
+`@deepseek-ai/dsh-plugin-manager`：
+
+| 方法 | 行为 |
+|---|---|
+| `listVersions(name)` | `askRegistries(name, ["versions","time","dist-tags"])` → `newerVersions(listing, installed)`，按 semver 过滤并倒排 |
+| `updateBundle(name, version)` | 先 `semver.gt(version, from)` 校验，再查 `["name","version","engines","peerDependencies","deprecated","dsh"]`，判 `facts.bundle` 与兼容性，最后 `installBundle` |
+| `updateRefusal(bundle, name)` | 能不能更新的全部条件 |
+
+`updateRefusal` 的四道门，缺一不可：
+
+1. `bundle.installed`、`availability === 'profile'`、非 `official`、有 `source`；
+2. 没有 `readOnlyReason`（带插件管理能力的包不可被更新）；
+3. `bundle.version` 是合法 semver；
+4. `parsedForRegistry(bundle.source)` 的 `kind === 'registry'`、`name === bundle.name`、且 `range` 不含 `:`。
+
+→ **只有从 registry 装、且 source 是裸名才可更新。** `github:` / `file:` / git range 一律不行。我们 profile
+现在记的是 `"dsh-pwsh-plugin": "0.2.14"`，四道门全过。
+
+客户端侧（`dsh-client-ui-plugin-manager`）：`checkVersions` → `listVersions`；`runUpdate` → `updateBundle`；
+`pkg.updatable` 直接来自 `updateRefusal`。文案「可更新」「可更新到 {version}」「{count} 个插件可更新」
+「将从 {from} 更新到 {to}，期间插件可能短暂停止」「更新失败，已恢复到 {version}」都是现成的。
+
+### 拆掉之后仍然成立的三件事
+
+- **`minimumReleaseAge` 仍然生效**，只是现在由宿主在装的时候撞上、由宿主在页面上说明。我们不再需要自己
+  回读磁盘、自己判 `cooling-down`。
+- **`already-installed` 的静默循环消失了。** 那个循环原本只存在于「插件自己按 tag 反复装同一个版本」这条
+  路径上；版本由人按、由页面驱动时，第一次就会被拒并如实显示。
+- **升级仍会换掉常驻会话。** 停掉插件就 dispose 所有会话，这一点与谁发起安装无关。README 的「已知边界」
+  保留了这条，只删掉「绝不打断在跑的调用」那半句 —— 那是我们自己加的闸门，现在没有执行者了。
+
+### 代价（诚实说明）
+
+宿主发起更新时不会先问有没有 `pwsh_run` 调用在跑。若正好有脚本在飞，升级会把它连同会话一起掐断，表现与
+断电相同：输出写了一半、调用结束时拿不到状态。这条现在只能靠人看时机 —— 页面上的「期间插件可能短暂停止」
+是宿主能给出的全部提示。
+
+### 删后的断言数
+
+十七份 → 八份，305 项 → **117 项**（itest 17 / plugintest 15 / e2e 8 / sandbox 7 / bash 25 / bash-e2e 11 /
+denial 11 / meta 23）。
+

@@ -31,9 +31,6 @@
 
 import { readFileSync } from 'node:fs'
 import { DEFAULT_MAX_OUTPUT_BYTES, bootArgv, startSession } from './session.mjs'
-import { installReleaseLive, startAutoUpdate } from './auto-update.mjs'
-import { preflightInstall } from './update-apply.mjs'
-import { UpdateChecker } from './update-check.mjs'
 
 /** 加载器诊断里显示的插件名。 */
 export const name = 'pwsh-run'
@@ -155,11 +152,6 @@ export function apply(ctx, config) {
   const maxOutputBytes = Number.isSafeInteger(config?.maxOutputBytes) && config.maxOutputBytes > 0 ? config.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES
   // 明确放弃边界的唯一开关：策略服务缺席时默认拒绝启动，只有这里能改主意。
   const allowUnconfined = config?.allowUnconfined === true
-  // 更新检查：查到新版本时在当次调用的输出末尾挂一行。
-  const updateCheck = config?.updateCheck !== false
-  // 自动更新：查到新版本就自己装上，装上即生效（HMR 在场时无需重启）。默认开——
-  // 用户装这个插件图的是「命令不再被转义」，不该再手动盯版本。
-  const autoUpdate = config?.autoUpdate !== false
 
   // 沙箱服务每次启动会话时再取：插件 apply 可能早于沙箱服务挂载，
   // 而沙箱缺席时插件仍需能加载（启动会话时给出明确错误即可）。
@@ -173,16 +165,6 @@ export function apply(ctx, config) {
     return sandboxPolicy.resolve(session === undefined ? {} : { session })
   }
 
-  /**
-   * 安装闸门：自动更新与手动安装共用。
-   *
-   * 热替换会执行本插件的 effect 清理函数，那里 dispose 掉全部常驻会话——正在跑的脚本
-   * 会连人带马被掐断，与直接断电无异。所以安装前先确认没有调用在跑；置位与检查必须在
-   * 同一个同步块里完成，否则中间会挤进一条新调用。
-   */
-  let activeRuns = 0
-  let installing = false
-
   /** sessionId -> Promise<PwshSession>。用 Promise 占位，避免并发首调用各起一个进程。 */
   const sessions = new Map()
 
@@ -194,33 +176,6 @@ export function apply(ctx, config) {
   const evict = async (key, session) => {
     sessions.delete(key)
     if (session !== undefined && session !== null) await session.dispose()
-  }
-
-  /**
-   * 申请安装权：只有「没有调用在跑、也没有别人在装」时才拿得到。
-   *
-   * 检查与置位放在同一个同步块里，中间不会挤进新调用——否则就会出现
-   * 「刚判断空闲、一条调用起来、安装把它的会话掐掉」这种时序空档。
-   */
-  const beginInstall = () => {
-    if (installing || activeRuns > 0) return false
-    installing = true
-    return true
-  }
-  const endInstall = () => { installing = false }
-  /** 交给自动更新循环：忙就别装，推迟整轮。 */
-  const installGate = { tryAcquire: beginInstall, release: endInstall }
-
-  /**
-   * 安装进行中到达的调用先等着：此刻建出来的会话会在热替换那一刻被 dispose，
-   * 等于刚起就断。等到安装收尾再继续——之后的会话属于安装后的世界。
-   */
-  const waitForInstall = async () => {
-    const deadline = Date.now() + 120000
-    while (installing) {
-      if (Date.now() > deadline) throw new Error('pwsh_run: an update is being installed and has not finished; retry in a moment')
-      await new Promise((resolve) => setTimeout(resolve, 100))
-    }
   }
 
   /** 取一个活着的会话，必要时新建；超出上限淘汰最久未用的。 */
@@ -316,147 +271,9 @@ export function apply(ctx, config) {
     sessions.clear()
   }, 'pwsh-run.sessions')
 
-  // 更新检查：只读 npm registry 的 dist-tags、只记判决，从不自己安装。
-  // 发现新版本时不改工具描述（描述在注册时就固定了），而是把提示挂在每次调用的
-  // 输出末尾一次——够模型看见，也不至于每次刷。
-  const checker = updateCheck
-    ? new UpdateChecker({
-        log: (line) => {
-          try {
-            ctx.logger?.info?.('pwsh-run: %s', line)
-          } catch {
-            // 日志服务缺席时不影响工具本身。
-          }
-        },
-      })
-    : undefined
-  // 自动更新循环自成一个 effect：它比 checker 多一层「装上即生效」的动作，
-  // 失败要退避、要记装过的版本，这些都在 auto-update.mjs 里。
-  ctx.effect(() => {
-    const stopAuto = autoUpdate && checker !== undefined
-      ? startAutoUpdate(ctx, checker, {
-          log: (line) => { try { ctx.logger?.info?.('pwsh-run: %s', line) } catch { /* 日志缺席不影响更新 */ } },
-          installGate,
-          ...(Number.isSafeInteger(config?.autoUpdateDelayMs) && config.autoUpdateDelayMs >= 0 ? { firstDelayMs: config.autoUpdateDelayMs } : {}),
-        })
-      : undefined
-    return () => stopAuto?.()
-  }, 'pwsh-run.auto-update')
 
-  // 提示用的定时检查只在自动更新关闭时才起：自动更新的循环自己就会调 check()，
-  // 两边都开着等于每 12 小时查两次。
-  ctx.effect(() => {
-    if (checker === undefined || autoUpdate) return undefined
-    checker.start()
-    return () => checker.stop()
-  }, 'pwsh-run.update')
-
-  /**
-   * 更新工具：把「查到」与「装」拆成同一入口的两个动作。
-   *
-   * 为什么要有它
-   *   只把提示挂在 pwsh_run 输出末尾时，模型看见了也无从下手（它拿不到 profile 名，
-   *   也不知道该不该重启）。给出一个能被调用的动作，比给一句话可靠。
-   *
-   * 为什么装这一步不自己下载
-   *   见 update-apply.mjs 的头注释：本插件是 profile 的一个 bundle 依赖，版本钉在
-   *   package.json 与 pnpm-lock.yaml 里，绕开包管理器改文件会让 lockfile 与磁盘不一致。
-   */
-  ctx.effect(() => ctx.tools.register({
-    name: 'pwsh_run_update',
-    description: [
-      'Check for, and optionally install, a newer release of the pwsh_run plugin.',
-      '* action "check" reads the npm registry dist-tags once and reports the verdict; it never installs anything.',
-      '* action "install" hands the pinned version spec (<package>@X.Y.Z) to DSH\'s own plugin manager (the same service the Plugins page uses), which runs pnpm and rolls back on failure.',
-      '* Installing writes the package to the profile. Where the host runs its HMR service, the new code is already live when this returns; otherwise the running process keeps the old modules until DSH restarts. The result says which of the two happened.',
-      '* Only published stable versions are considered; pre-releases are never pushed. The version actually installed is read back from disk, because pnpm\'s minimumReleaseAge policy can install an older release than the one requested.',
-      '* An install replaces this plugin in place, which terminates the persistent pwsh sessions. It is therefore refused while a pwsh_run call is running; retry after that call finishes (the automatic updater applies the same rule on its own).',
-    ].join('\n'),
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['check', 'install'],
-          description: 'check (default): report whether a newer release exists. install: also install the newest release.',
-        },
-      },
-      additionalProperties: false,
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: { text: { type: 'string' } },
-        required: ['text'],
-      },
-      render: (_args, value) => [{ type: 'text', text: value.text }],
-    },
-    async execute(args) {
-      if (checker === undefined) {
-        return { text: 'pwsh_run update checks are disabled in this profile (config.updateCheck: false), so pwsh_run_update has nothing to do.' }
-      }
-      const action = args?.action === 'install' ? 'install' : 'check'
-      const state = await checker.check()
-      const doc = checker.document()
-      const lines = ['state: ' + String(doc.state)]
-      if (doc.running !== undefined) lines.push('running: ' + doc.running)
-      if (doc.latest !== undefined) lines.push('newest release: ' + doc.latest)
-      if (doc.spec !== undefined) lines.push('install spec: ' + doc.spec)
-      if (doc.error !== undefined) lines.push('error: ' + String(doc.error))
-      if (state.state !== 'available') {
-        // failed 与 current 必须分开说：查不到的时候说「已是最新」是句谎话。
-        if (state.state === 'current') {
-          lines.push(action === 'install'
-            ? 'Nothing to install: this is the newest release the source publishes.'
-            : 'No newer release.')
-        }
-        else {
-          // 这条分支上 doc.spec 是 undefined，插值只会印出一个字面占位符，所以给模板。
-          lines.push('Could not reach the npm registry, so whether a newer version exists is unknown. '
-            + 'Run the check again later, or upgrade by hand: dsh plugin --profile <name> add "<package>@X.Y.Z"')
-        }
-        return { text: lines.join('\n') }
-      }
-      if (action === 'check') {
-        lines.push('Run this again with action "install", or run: dsh plugin --profile <name> add "' + String(doc.spec) + '"')
-        return { text: lines.join('\n') }
-      }
-      // 装之前先问一句值不值得装：磁盘上已经是这个版本、或者这个 tag 的包根本没改过版本号，
-      // 装下去只会被 plugin-manager 判 already-installed。判掉后照实说清是哪一种。
-      const unnecessary = preflightInstall(ctx, checker, String(doc.spec))
-      if (unnecessary !== null) {
-        lines.push('install: ' + unnecessary.outcome)
-        lines.push(unnecessary.text)
-        return { text: lines.join('\n') }
-      }
-      // 安装会热替换本插件，从而 dispose 掉所有常驻会话。正有调用在跑时先不装：
-      // 掐断别人跑到一半的脚本，代价远大于晚几十秒。
-      if (!beginInstall()) {
-        lines.push('install: postponed')
-        lines.push('A pwsh_run call is running right now, and installing would terminate its session mid-script. '
-          + 'Retry once that call has finished; auto-update performs this same check on its own.')
-        return { text: lines.join('\n') }
-      }
-      let outcome
-      try {
-        outcome = await installReleaseLive(ctx, String(doc.spec), { requestId: 'pwsh-run-update' })
-      } finally {
-        endInstall()
-      }
-      lines.push('install: ' + outcome.outcome)
-      lines.push(outcome.text)
-      if (outcome.installedVersion !== undefined && outcome.installedVersion !== doc.latest) {
-        lines.push('Installed version on disk: ' + outcome.installedVersion + ' (requested ' + String(doc.latest) + ').')
-      }
-      if (outcome.ok !== true && doc.spec !== undefined) lines.push('Manual path: dsh plugin --profile <name> add "' + String(doc.spec) + '"')
-      return { text: lines.join('\n') }
-    },
-  }), 'pwsh-run.update-tool')
-
-  /** 一条调用的实体；activeRuns 由注册处的 execute 在外面加减。 */
+  /** 一条调用的实体。 */
   const runScript = async (args, exec) => {
-    await waitForInstall()
     const requested = Number.isFinite(args?.timeoutMs) && args.timeoutMs > 0 ? Math.trunc(args.timeoutMs) : defaultTimeoutMs
     const key = sessionKey(exec)
     const workdir = typeof args?.workdir === 'string' && args.workdir.length > 0 ? args.workdir : undefined
@@ -522,14 +339,6 @@ export function apply(ctx, config) {
     for (const line of response?.warn ?? []) body.push('WARNING: ' + line)
     for (const line of response?.verbose ?? []) body.push('VERBOSE: ' + line)
     if (response?.sentinel === 'threw') body.push('[script threw]')
-    // 更新提示只在第一次查到新版本时挂一行，之后不再刷。自动更新关掉时给出可照做的命令，
-    // 打开时说清楚它自己会装——否则模型会把这个版本当成「需要人工干预」。
-    const fresh = checker?.announce
-    if (fresh !== undefined && autoUpdate === false) {
-      notes.push('[a newer pwsh-run release exists: ' + fresh.latest + ' (running ' + String(checker?.version ?? '?') +
-        '). Install it with dsh plugin --profile <name> add "' + fresh.spec + '". ' +
-        'Auto-update is off in this profile (config.autoUpdate: false).]')
-    }
     const text = [body.join('\n')]
       .concat(response?.err ?? [])
       .concat(response?.exceptions ?? [])
@@ -567,14 +376,7 @@ export function apply(ctx, config) {
       render: (_args, value) => [{ type: 'text', text: value.text }],
     },
     async execute(args, exec) {
-      // 自动更新与手动安装都要先看这个计数：热替换会 dispose 全部会话，
-      // 正跑着的脚本会被连人带马掐断。
-      activeRuns += 1
-      try {
-        return await runScript(args, exec)
-      } finally {
-        activeRuns -= 1
-      }
+      return await runScript(args, exec)
     },
   }), 'pwsh-run.tool')
 }

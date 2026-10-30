@@ -20,7 +20,6 @@
   "exports": {
     ".": "./plugin/index.mjs",
     "./session": "./plugin/session.mjs",
-    "./update": "./plugin/update-check.mjs",
     "./wsl/custom-bash.mjs": "./wsl/custom-bash.mjs",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./locale/*.json": "./locale/*.json",
@@ -52,8 +51,7 @@
     "@deepseek-ai/dsh": ">=0.2.0-rc.2 <0.3.0"
   },
   "scripts": {
-    "test": "node test/itest.mjs && node test/plugintest.mjs && node test/updatetest.mjs && node test/autoupdatetest.mjs && node test/wiringtest.mjs && node test/denialtest.mjs && node test/metatest.mjs",
-    "test:all": "node test/itest.mjs && node test/plugintest.mjs && node test/e2e-real-subprocess.mjs && node test/sandboxtest.mjs && node test/bashtest.mjs && node test/bash-e2e.mjs && node test/updatetest.mjs && node test/autoupdatetest.mjs && node test/wiringtest.mjs && node test/denialtest.mjs && node test/metatest.mjs",
-    "test:update": "node test/updatetest.mjs && node test/autoupdatetest.mjs && node test/wiringtest.mjs"
+    "test": "node test/itest.mjs && node test/plugintest.mjs && node test/denialtest.mjs && node test/metatest.mjs",
+    "test:all": "node test/itest.mjs && node test/plugintest.mjs && node test/e2e-real-subprocess.mjs && node test/sandboxtest.mjs && node test/bashtest.mjs && node test/bash-e2e.mjs && node test/denialtest.mjs && node test/metatest.mjs"
   }
 }

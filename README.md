@@ -119,8 +119,7 @@ The three files in `plugin/` (`index.mjs`, `session.mjs`, `session-server.ps1`) 
 
 ## The tools
 
-`pwsh_run` runs a script. `pwsh_run_update` checks for and optionally installs a newer release of this
-plugin — see [Updates](#updates).
+`pwsh_run` runs a script. Versions are managed by DSH itself — see [Updates](#updates).
 
 | Argument | Required | Meaning |
 |---|---|---|
@@ -144,9 +143,6 @@ When order matters, merge them yourself: `2>&1` or `*>&1`.
 | `maxSessions` | `4` | How many sessions may live at once (one per agent workspace). |
 | `maxOutputBytes` | `8388608` | Output collection cap per call (8 MB). Truncation is reported honestly, never silently. |
 | `allowUnconfined` | `false` | `true` = start a session even when the sandbox policy service is missing. |
-| `updateCheck` | `true` | Look for newer published versions periodically. Checking and installing are separate: this only checks; `pwsh_run_update` and auto-update do the install. |
-| `autoUpdate` | `true` | Install a newer release by itself, and — where the host runs HMR — take effect without a restart. |
-| `autoUpdateDelayMs` | `90000` | Wait before the first automatic check, so start-up is not competing with pnpm. |
 
 `allowUnconfined` is the one deliberate escape hatch. In a normal deployment `ctx.sandboxPolicy` is always
 present; when it is missing the composition is incomplete, and the plugin **refuses to start** rather than
@@ -182,91 +178,34 @@ runspace. The tool reports that clearly and points at the built-in `pwsh` tool, 
 
 ## Updates
 
-Left alone, the plugin upgrades itself: 90 seconds after start, then every 12 hours, it reads the `latest`
-dist-tag from the npm registry, and a newer release is installed on the spot. On a host that runs DSH's HMR service the new code is
-**already live when the install returns** — no restart, no prompt, nothing for the user to do.
+This plugin carries no updater of its own. It is an ordinary registry package, so **DSH manages its
+version**: the Plugins page lists it, shows when a newer release exists, and installs it — the same
+`listVersions` / `updateBundle` path used for every other plugin.
 
-| How | What happens |
-|---|---|
-| Automatic (`autoUpdate: true`, default) | Checks, installs, and takes effect in place. A failed install backs off exponentially (5 min doubling to 2 h) and tries again; a version that installed successfully is not retried. **Never while a call is running** — it retries in 3 minutes. On a host **without** HMR it installs nothing — see below. |
-| `pwsh_run_update` `action: "check"` | Reads the registry once and reports `state` / `running` / `newest release` / `install spec`. Installs nothing. |
-| `pwsh_run_update` `action: "install"` | The same install, driven by hand instead of by the clock. Reports `install: postponed` if a call is running, and `install: restart-required` / `install: broken-release` when a pre-flight check says installing would achieve nothing (see below). |
+That path is available because the profile records a bare registry spec (`"dsh-pwsh-plugin": "0.2.14"`).
+DSH refuses to update a bundle installed from anything else: a `github:` or `file:` source, a git range,
+a package that is not a third-party dependency of this profile, or one that declares no semver version.
 
-The install goes through `ctx.get('pluginManager')` — the service behind the Plugins page — which runs pnpm
-and rolls `package.json` back on failure. The plugin never edits its own files: it is a bundle dependency
-pinned in `package.json` and `pnpm-lock.yaml`, and writing files behind the package manager's back would
-leave the lockfile lying.
+Two consequences worth knowing:
 
-**Why it can take effect without a restart.** A plugin's `apply` and any timer it starts run inside the HMR
-service's transaction context. Calling `installBundle` from there runs pnpm and lands the new files, then
-fails to recompose — `HMR transactions cannot be nested` — which leaves the worst possible state: new files
-new files on disk, old modules running. Clearing the context first (`hmr.executing.run(undefined, …)`) lets the
-recomposition happen, and because the freshly installed files on disk no longer match what is loaded, HMR
-evicts the old modules and imports the new ones. Measured: 137 ms from the trigger to the new code answering.
+- **`minimumReleaseAge` still applies.** pnpm's supply-chain policy defaults to 1440 minutes, so a version
+  published today is not resolved today — pressing update installs the previous release, and the page says
+  which version it actually installed. This is the policy working, not a failure.
+- **A version is only as good as its tag.** `package.json` is the one hard-coded version in this repository.
+  Publish a tag without bumping it and every update attempt installs the same bytes; `scripts/release-check.mjs`
+  fails the release workflow before that happens.
 
-**Why it looks before it installs.** DSH's plugin manager refuses, before running pnpm, an install whose spec
-exactly matches what the profile already records — `already-installed`. Two situations reach that, and neither
-should be attempted at all:
-
-- Somebody already installed this version (a terminal `dsh plugin add`, the Plugins page) and the process was
-  not restarted yet. The files are current; a restart is all that is missing.
-- A release was tagged without bumping `version` in `package.json`. The tag changes, the declared version does
-  not, so every attempt installs the same bytes and is refused the same way — a silent loop that never ends
-  and never says anything.
-
-So before installing, the updater compares three facts it already has: the spec the profile records, the
-version the installed package declares, and the version the running process reports. A version already on disk
-reports `install: restart-required`; a tag whose package still declares the old version reports
-`install: broken-release` and says so plainly. `scripts/release-check.mjs` catches the second case before the
-tag is pushed; this check catches it afterwards, on every machine that tries to update.
-
-**Why it waits for an idle moment.** An install replaces the plugin, and stopping the plugin disposes every
-persistent session it owns. Done while a script is in flight, that is a power cut: half-written output, a call
-that ends with no exit status, session state gone. So the updater asks the plugin whether any call is running
-(same synchronous check-and-set the tool uses, so a call cannot slip in between), and postpones the whole
-attempt when one is. Calls that arrive mid-install wait for it instead of racing it.
-
-On a host **without** HMR the automatic path does nothing at all. Installing there would put the new files
-on disk while the running process keeps the old modules — an automatic update that needs a restart is not
-an update, it is a version number that lies. (`pwsh_run_update action: "install"` still installs in that
-situation, because a human asked and can decide when to restart; the result says `restart-required`.)
-Turning the automatic path off (`autoUpdate: false`) restores the older behaviour everywhere: check only,
-and put one line at the end of the next `pwsh_run` output so a human decides.
-
-Without `pluginManager` — a profile where the `plugin-manager` service is disabled — `install` reports
-`no-manager` and you upgrade from a terminal instead:
+Updating by hand is the same operation DSH performs:
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
 & '<desktop install>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
 ```
 
-Note that DSH's stock composition disables the *tool* `plugin_manager` while leaving the *service* running
-for desktop profiles; the two are different things, and only the service is used here.
+**An update replaces the persistent session.** Stopping the plugin disposes every session it owns, so after
+an update the next call rebuilds the pwsh process: variables, `Set-Location` and imported modules held only
+in that session are gone. Do not keep unrecoverable state in a session across an upgrade.
 
-The source is the npm registry entry for this package: `GET https://registry.npmjs.org/dsh-pwsh-plugin`
-with `accept: application/vnd.npm.install-v1+json`. Its `dist-tags.latest` is the release to offer; it must
-be a plain `X.Y.Z`. A `latest` marked `deprecated` is never offered, and without a `dist-tags` the check
-falls back to the highest stable version in the version list. A `404` is reported as "not published on
-<registry>" rather than "no newer release" — those are different facts, and only one of them is temporary.
-
-The install spec is the registry form, `dsh-pwsh-plugin@X.Y.Z`, so what the plugin asks for and what
-`dsh plugin add` accepts are the same string.
-
-| Environment variable | Effect |
-|---|---|
-| `DSH_PWSH_UPDATE_REGISTRY` | Registry base URL, default `https://registry.npmjs.org`. Point it at a mirror, or at a local server to rehearse. |
-| `DSH_PWSH_UPDATE_DELAY_MS` | First check delay, default 5000 |
-
-```powershell
-& $dsh plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
-```
-
-Installing by hand is the same operation the plugin performs, with the same policy applied by pnpm.
-
-A failed query never throws into the tool call: it records `state: 'failed'`, logs one line through
-`ctx.logger`, and keeps an earlier `latest` as `stale: 'available'` — one network hiccup should not make a
-known new version vanish.
 
 ## The `llrun` shim
 
@@ -295,7 +234,6 @@ your own machine — it derives every path from its own location and re-checks t
 | `could not confine the session: SetNamedSecurityInfoW failed (Win32 5)` | The workspace root is not fully controlled by you. The sandbox writes a DACL + an integrity label there, which needs ownership plus `WRITE_DAC` and `WRITE_OWNER`. Take ownership and grant yourself full control: `icacls "<root>" /grant "%USERNAME%":(OI)(CI)F`, or start the session from a directory under your user profile. |
 | `refusing to start: read-only mode` | Expected. Use the built-in `pwsh` tool in read-only sessions. |
 | Script cannot write where the built-in tool can | Check that `session` reached `sandboxPolicy.resolve` (see [Sandbox](#sandbox)); a missing session silently moves the boundary to the profile directory. |
-| Update notice never appears | The source env var must be set on the **Windows** side; WSL does not forward `DSH_*`. |
 | Output looks reordered | stdout and stderr are merged by type, not by time. Merge them yourself with `2>&1`. |
 | `exit N` code is not reported | Runspace semantics — use `Write-Output` or read `$LASTEXITCODE`. |
 | A child process keeps a file locked after the call | The session holds the `Process` object. Wait for `idleMs`, or force a rebuild with a timeout. |
@@ -342,17 +280,10 @@ your own machine — it derives every path from its own location and re-checks t
   "%USERNAME%":(OI)(CI)F` fixes a root you do not own. Confinement fails closed with that message instead of
   running unconfined.
 - No interactive programs and no TTY.
-- **An update replaces the session, but never cuts a call short.** Replacing a plugin stops it, and stopping
-  this plugin disposes its sessions, so the install that lands a new version leaves the persistent pwsh
-  process gone and the next call rebuilds it: anything held only in that session (variables, `Set-Location`,
-  imported modules) is lost. Measured across a v0.2.3 → v0.2.4 install: `$PID` changed from 24820 to 15632 and a
-  `$global:` variable set before the install read back empty. What the updater does **not** do is interrupt
-  work in flight: both the automatic loop and `pwsh_run_update action: "install"` ask the plugin whether a call
-  is running, and if one is, the install is postponed (the loop retries in 3 minutes, the tool reports
-  `install: postponed` and leaves the profile untouched) until the session is idle. Calls that arrive while an
-  install is in progress wait for it to finish instead of starting a session that is about to be disposed.
-  The version is worth more than the session state, but it is not "nothing happened" — do not hold
-  unrecoverable state in it across an upgrade.
+- **An update replaces the session.** Replacing a plugin stops it, and stopping this plugin disposes its
+  sessions, so the install that lands a new version leaves the persistent pwsh process gone and the next call
+  rebuilds it: anything held only in that session is lost. Measured across a v0.2.3 → v0.2.4 install: `$PID`
+  changed from 24820 to 15632 and a `$global:` variable set before the install read back empty.
 
 ## Development
 
@@ -361,9 +292,6 @@ plugin/
   index.mjs           tool registration, sandbox wiring, timeouts
   session.mjs         the session object: framing, queue, base64 encode, boot argv
   session-server.ps1  the PowerShell side: runspace, stream tagging, sentinels
-  update-check.mjs    registry lookup and version comparison
-  update-apply.mjs    hands the pinned spec to pluginManager, never downloads
-  auto-update.mjs     the automatic path: install outside the HMR transaction, back off on failure
 test/
   support.mjs         locates a DSH install; converts Windows paths to /mnt form
   itest.mjs           protocol and session core
@@ -372,9 +300,6 @@ test/
   sandboxtest.mjs     real LocalSandboxProvider, boundary + fail-closed cases
   bashtest.mjs        custom-bash fence triage (mock runtime)
   bash-e2e.mjs        custom-bash end to end (real runtime + real llrun)
-  updatetest.mjs      update check against a local registry, install outcomes
-  autoupdatetest.mjs  the automatic loop, its back-off, its idle gate, and the HMR-context escape it needs
-  wiringtest.mjs      the update notice lands at the end of tool output, and installs wait for an idle session
   denialtest.mjs      the sandbox-denial hint fires on the right messages only
   metatest.mjs        the plugin-page metadata: locale, icon, and which document the page selects
 wsl/
@@ -393,14 +318,11 @@ node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
 node test/bashtest.mjs                       # 25: custom-bash fence triage, bash fallback, exec-bit repair
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
-node test/updatetest.mjs                     # 96: update check, install outcomes, pre-flight, local git only
-node test/autoupdatetest.mjs                 # 38: automatic install, back-off, idle gate, pre-flight, HMR-context escape
-node test/wiringtest.mjs                     # 21: update notice wiring, idle gate, pre-flight wiring
 node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
 node test/metatest.mjs                       # 23: plugin-page metadata (no spawn, runs anywhere)
 ```
 
-Eleven scripts, **305 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Eight scripts, **117 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.
@@ -414,11 +336,10 @@ the runner's short-lived GitHub identity for a token scoped to this repository a
 part of the trust contract (rename it and every publish fails with 403 until the npm setting is updated), and
 provenance is mandatory there, so the tarball carries a signed statement of which commit built it.
 
-The version in `package.json` is the one thing in this repository that is hard-coded, and the update check
-compares it against the published version. Publish without bumping it and the check reports a newer
-release forever: the installed files keep reading the old number, so every cycle requests the same version
-and the back-off climbs to its ceiling. `npm version` writes the version, commits, and tags in one step, which is
-why the three cannot drift apart:
+The version in `package.json` is the one thing in this repository that is hard-coded, and it is what DSH
+compares against the published version. Publish a tag without bumping it and every update attempt installs
+the same bytes: the page keeps offering the "new" version, pnpm keeps landing the old one. `npm version`
+writes the version, commits, and tags in one step, which is why the three cannot drift apart:
 
 ```powershell
 npm version patch -m 'chore(release): %s'   # bump, commit, annotated tag

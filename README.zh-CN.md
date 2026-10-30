@@ -104,7 +104,7 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 
 ## 工具接口
 
-`pwsh_run` 跑脚本；`pwsh_run_update` 查更新、必要时安装本插件的新版本 —— 见[自动更新检查](#自动更新检查)。
+`pwsh_run` 跑脚本。版本由 DSH 自己管 —— 见[更新](#更新)。
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -127,9 +127,6 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 | `maxSessions` | `4` | 同时存活的会话上限（每个 agent 工作区一个）。 |
 | `maxOutputBytes` | `8388608` | 单次调用的输出收集上限（8MB）。截断会明确报出来，不静默。 |
 | `allowUnconfined` | `false` | `true` = 沙箱策略服务缺席时也起会话。 |
-| `updateCheck` | `true` | 定期查有没有新发布的版本。查与装分开：这里只查，装由 `pwsh_run_update` 与自动更新做。 |
-| `autoUpdate` | `true` | 自己装上更新，宿主有 HMR 时**不需要重启**即生效。 |
-| `autoUpdateDelayMs` | `90000` | 自动检查前的等待，避免与启动流程抢 pnpm。 |
 
 `allowUnconfined` 是唯一一条「明知故犯」的开关。正常部署下 `ctx.sandboxPolicy` 一定在；缺席说明组合
 不完整，这时插件**拒绝启动**，而不是悄悄跑一个不受约束的会话。
@@ -160,81 +157,29 @@ session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`�
 
 ## 更新
 
-默认情况下插件自己升级：启动 90 秒后查一次 npm registry 的 `latest` 标签，之后每 12 小时一次；查到
-更高的版本就直接装上。宿主跑着 DSH 的 HMR 服务时，**装上的那一刻新代码就已经在跑** —— 不用重启，不用弹窗，用户什么
-都不用做。
+本插件**没有自己的更新器**。它就是一个普通的 registry 包，所以**版本交给 DSH 管**：「插件」页面会列出它、
+标出有没有更新的版本、并按与其它插件相同的 `listVersions` / `updateBundle` 路径装上。
 
-| 方式 | 行为 |
-|---|---|
-| 自动（`autoUpdate: true`，默认） | 查 → 装 → 就地生效。装失败按指数退避重试（5 分钟起、翻倍、封顶 2 小时）；装成功过的版本不再重试。**有调用在跑时绝不装** —— 3 分钟后再看。宿主**没有** HMR 时它什么都不装，见下。 |
-| `pwsh_run_update` 的 `action: "check"` | 只读一次 registry，报出 `state` / `running` / `newest release` / `install spec`。不装任何东西。 |
-| `pwsh_run_update` 的 `action: "install"` | 同一条安装路径，只是由人按下去而不是由时钟按下去。有调用在跑时报 `install: postponed`；预检判定「装了也没用」时报 `install: restart-required` / `install: broken-release`（见下）。 |
+这条路成立的前提是 profile 里记的是裸 registry 规格（`"dsh-pwsh-plugin": "0.2.14"`）。换成别的来源就更新不了：
+`github:` / `file:` / git range、不是本 profile 的第三方依赖、或者本身不声明 semver 版本，DSH 都会拒。
 
-安装走 `ctx.get('pluginManager')` —— 也就是「插件」页面背后那个服务 —— 由它跑 pnpm，失败时回滚
-`package.json`。本插件**从不自己改自己的文件**：它是 profile 的 bundle 依赖，版本钉在
-`package.json` 与 `pnpm-lock.yaml` 里，绕开包管理器写文件会立刻让 lockfile 与磁盘对不上。
+两件值得知道的事：
 
-**为什么能不重启就生效。** 插件的 `apply` 以及它起的定时器，都跑在 HMR 服务的事务上下文里
-（`AsyncLocalStorage`）。在那里直接调 `installBundle`，pnpm 会跑完、磁盘会换成新版，紧接着的重组合
-却被拒掉（`HMR transactions cannot be nested`），于是停在最难看清的状态：磁盘是新的、进程里是旧的。
-先把上下文清空（`hmr.executing.run(undefined, …)`）再调，重组合才会真的发生；而磁盘上新装的文件与已
-加载的模块已经对不上，HMR 于是驱逐旧模块、import 新模块。实测：从触发到新代码应答 137 ms。
+- **`minimumReleaseAge` 照样生效。** pnpm 的供应链策略默认 1440 分钟，今天发布的版本今天解析不到 ——
+  点「更新」会装到上一个版本，页面上会写清实际装的是哪个。这是策略在起作用，不是出错。
+- **版本号与标签必须对齐。** `package.json` 是本仓库唯一写死的版本；打了标签却没抬版本号，每一次更新装的
+  都是同一份字节。`scripts/release-check.mjs` 会在 workflow 里先把这种情况拦下来。
 
-**为什么先看一眼再装。** DSH 的插件管理器在跑 pnpm **之前**就会拒掉一类安装：要装的规格与 profile
-里为该包记下的规格完全一致 —— 也就是 `already-installed`。有两种情形会走到这一步，而这两种本来就不该
-发起安装：
-
-- 这个版本已经装好了（终端里的 `dsh plugin add`、或者「插件」页面），只是进程还没重启。文件是新的，
-  缺的只是一次重启。
-- 发版时忘了把 `package.json` 里的 `version` 抬上去。标签变了、声明的版本没变，于是每一次尝试装的都是
-  同一份字节、被同一句话拒掉 —— 一个永不结束、也从不吭声的循环。
-
-所以安装之前，更新器先比对手上已有的三个事实：profile 记下的规格、已装包自己声明的版本、运行中的进程
-报出的版本。磁盘上已经是新版的报 `install: restart-required`；标签存在但包内版本没抬的报
-`install: broken-release` 并直说原因。`scripts/release-check.mjs` 在推标签**之前**拦第二种，运行时这道
-预检则在**之后**、在每一台试图升级的机器上再拦一次。
-
-**为什么非要等安静。** 安装会替换插件，而停掉本插件就要 dispose 掉它所有的常驻会话。若此刻有脚本正在
-跑，那与直接断电无异：输出写了一半、调用结束时拿不到状态、会话状态全失。所以更新器先问插件「现在有没有
-调用在跑」（与工具本身用同一套同步的检查加置位，中途塞不进新调用），有就整轮推迟。安装进行中到达的调用
-则等它装完，而不是跟它抢。
-
-宿主**没有** HMR 时，自动路径什么都不做。那种环境装下去只会「磁盘是新版、进程是旧版」—— 需要重启的
-自动更新不算更新，只是一个会说谎的版本号。（`pwsh_run_update` 的 `install` 在这种情况下照样装，因为
-是人按的、人能决定什么时候重启；结果里会诚实地写 `restart-required`。）
-把自动路径关掉（`autoUpdate: false`）则在任何宿主上都回到旧行为：只查不装，在下次 `pwsh_run` 输出末尾
-挂一行，让人来定。
-
-若 profile 关掉了 `plugin-manager` 服务，`install` 会报 `no-manager`，改用终端升级：
+手动更新与 DSH 做的是同一个操作：
 
 ```powershell
 $env:DSH_HOME = '<DSH_HOME>'
 & '<桌面端安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
 ```
 
-注意 DSH 的默认组合关掉的是**工具** `plugin_manager`，而桌面 profile 上的**服务** `plugin-manager`
-是活的 —— 两者不是一回事，这里只用服务。
+**更新会换掉常驻会话。** 停掉插件就要 dispose 掉它所有的常驻会话，所以升级后下一次调用是重建的 pwsh 进程：
+只存在那个会话里的变量、`Set-Location`、已导入模块都会丢。不要把它当作跨升级保存状态的地方。
 
-发布源就是这个包在 npm registry 上的条目：`GET https://registry.npmjs.org/dsh-pwsh-plugin`，请求头带
-`accept: application/vnd.npm.install-v1+json`。它的 `dist-tags.latest` 就是要推的版本，必须是纯
-`X.Y.Z`；被标了 `deprecated` 的 `latest` 永不推送；没有 `dist-tags` 时回落到版本清单里的最高正式版。
-返回 `404` 时报的是「not published on <registry>」而不是「没有新版本」—— 这两件事不同，只有一件是临时的。
-
-安装规格用 registry 形式 `dsh-pwsh-plugin@X.Y.Z`，所以插件请求的字符串与 `dsh plugin add` 接受的是同一个。
-
-| 环境变量 | 作用 |
-|---|---|
-| `DSH_PWSH_UPDATE_REGISTRY` | registry 基址，默认 `https://registry.npmjs.org`。可指向镜像，或指向本机服务做预演 |
-| `DSH_PWSH_UPDATE_DELAY_MS` | 首次检查延迟，默认 5000 |
-
-```powershell
-& $dsh plugin --profile desktop add 'dsh-pwsh-plugin@<version>'
-```
-
-手动安装与插件自己做的事是同一条路径，同样由 pnpm 施加同样的策略。
-
-查询失败不会抛进工具调用：记 `state: 'failed'`，经 `ctx.logger` 留一行，先前查到过的 `latest` 保留成
-`stale: 'available'` —— 一次网络抖动不该让已知的新版本消失。
 
 ## `llrun` 垫片
 
@@ -261,7 +206,6 @@ Windows 上打，那份文件到手时是 `0644` —— 探测发现它属于当
 | `refusing to start: read-only mode` | 预期行为。read-only 会话里用内置 `pwsh` 工具。 |
 | `could not confine the session: SetNamedSecurityInfoW failed (Win32 5)` | 工作区根目录的 DACL 没给你 `WRITE_DAC` + `WRITE_OWNER`（沙箱要在那里写 DACL 与完整性标签）。全控制权限两样都满足，`Modify` 不够。执行 `icacls "<根目录>" /grant "%USERNAME%":(OI)(CI)F`，或从用户目录下的目录起会话。 |
 | 内置工具能写的地方本工具写不进 | 确认 `session` 真的传到了 `sandboxPolicy.resolve`（见「沙箱」）；漏传会把边界静默挪到 profile 目录。 |
-| 永远看不到更新提示 | 源环境变量必须在 **Windows** 侧设；WSL 不透传 `DSH_*`。 |
 | 输出顺序看着不对 | stdout 与 stderr 按类型合并，不按时间。自己用 `2>&1` 合。 |
 | `exit N` 的退出码拿不到 | runspace 语义 —— 用 `Write-Output` 或读 `$LASTEXITCODE`。 |
 | 调用结束后子进程还占着文件 | 会话持有 `Process` 对象。等 `idleMs`，或者用一次超时强制重建。 |
@@ -299,14 +243,10 @@ Windows 上打，那份文件到手时是 `0644` —— 探测发现它属于当
   `Modify`，单靠 `Modify` 会以 `SetNamedSecurityInfoW failed (Win32 5)` 失败。属主不是决定因素：
   `icacls <根目录> /grant "%USERNAME%":(OI)(CI)F` 能救。届时是 fail-closed 报错，不会退化成无边界。
 - 不支持交互式程序与 TTY。
-- **升级会换掉会话，但绝不打断正在跑的调用。** 替换插件会先把它停掉，而停掉本插件就会销毁它的会话 ——
-  所以真正装上新版的那一次，常驻 pwsh 进程已经不在了，下次调用重新拉起。只存在于该会话里的东西（变量、
-  `Set-Location` 过的目录、import 进来的模块）随之丢失。实测 v0.2.3 → v0.2.4 的一次安装：`$PID` 由
-  24820 变成 15632，安装前设的 `$global:` 变量读回来是空的。更新器**不会**做的事是打断在跑的活：
-  自动循环与 `pwsh_run_update` 的 `install` 都会先问插件「现在有没有调用在跑」，有就整轮推迟
-  （循环 3 分钟后再看，工具报 `install: postponed` 且不动 profile），直到会话安静下来。安装进行中到达的
-  调用会先等它装完，而不是建一个马上要被销毁的会话。版本比会话状态值钱，但这并不等于「什么都没发生」
-  —— 别把不可重建的状态放在里面跨过升级。
+- **升级会换掉会话。** 替换插件会先把它停掉，而停掉本插件就会销毁它的会话 —— 所以真正装上新版的那一次，
+  常驻 pwsh 进程已经不在了，下次调用重新拉起。只存在于该会话里的东西（变量、`Set-Location` 过的目录、
+  import 进来的模块）随之丢失。实测 v0.2.3 → v0.2.4 的一次安装：`$PID` 由 24820 变成 15632，安装前设的
+  `$global:` 变量读回来是空的。
 
 ## 开发
 
@@ -315,9 +255,6 @@ plugin/
   index.mjs           工具注册、沙箱接线、超时
   session.mjs         会话对象：分帧、队列、base64、启动 argv
   session-server.ps1  PowerShell 侧：runspace、流打标、哨兵
-  update-check.mjs    registry 查询与版本比较
-  update-apply.mjs    把钉住的规格交给 pluginManager，不自己下载
-  auto-update.mjs     自动路径：在 HMR 事务之外安装，失败退避
 test/
   support.mjs         定位 DSH 安装；Windows 路径转 /mnt 形式
   itest.mjs           协议与会话本体
@@ -326,9 +263,6 @@ test/
   sandboxtest.mjs     真 LocalSandboxProvider，边界 + fail-closed 用例
   bashtest.mjs        custom-bash 围栏分诊（mock runtime）
   bash-e2e.mjs        custom-bash 端到端（真 runtime + 真 llrun）
-  updatetest.mjs      更新检查与安装结果（本地 git 仓库）
-  autoupdatetest.mjs  自动更新循环、退避、空闲闸门，以及它依赖的 HMR 上下文逃逸
-  wiringtest.mjs      更新提示真的接到工具输出末尾、安装要等会话空闲
   denialtest.mjs      沙箱拒绝提示只在该触发的报错上触发
   metatest.mjs        插件页元数据：locale、icon，以及页面到底读哪份文档
 wsl/
@@ -347,14 +281,11 @@ node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
 node test/bashtest.mjs                       # 25：custom-bash 围栏分诊、bash 后备、执行位自修复
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
-node test/updatetest.mjs                     # 96：更新检查、安装结果、安装前预检（只碰本地 git）
-node test/autoupdatetest.mjs                 # 38：自动安装、退避、空闲闸门、安装前预检、HMR 上下文逃逸
-node test/wiringtest.mjs                     # 21：更新提示接线、空闲闸门、安装前预检的接线
 node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
 node test/metatest.mjs                       # 23：插件页元数据（不起子进程，哪儿都能跑）
 ```
 
-十一份脚本合计 **305 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+八份脚本合计 **117 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 
@@ -366,9 +297,8 @@ runner 用自己那份短命的 GitHub 身份换一个只对「这个仓库 + �
 `NPM_TOKEN`，也不该加。两个连带后果值得记住：workflow 的文件名是信任契约的一部分（改名后每次发布都会
 403，直到在 npm 上改设置）；provenance 在那里是强制的，所以 tarball 会带上「由哪个提交构建」的签名声明。
 
-`package.json` 里的 version 是本仓库唯一写死的东西，而更新检查拿它跟 registry 上的已发布版本比。
-不升版本就发版，检查会永远报有新版：装上去的文件读到的还是旧数字，于是每轮都请求同一个版本，
-退避一路爬到上限。
+`package.json` 里的 version 是本仓库唯一写死的东西，DSH 拿它跟 registry 上的已发布版本比。
+不升版本就发版，每次更新装的都是同一份字节：页面一直提示有新版，pnpm 一直装回旧的。
 `npm version` 一次完成「改版本 + 提交 + 打 annotated tag」，所以这三者不会漂开：
 
 ```powershell
