@@ -1877,4 +1877,39 @@ No authorization header was set for the request.
 
 十七份 → 八份，305 项 → **117 项**（itest 17 / plugintest 15 / e2e 8 / sandbox 7 / bash 25 / bash-e2e 11 /
 denial 11 / meta 23）。
+## 三十五、WSL 里的 SSH agent：非交互 shell 不读 .bashrc（2026-10-30）
+
+`bash` 工具跑的是 `bash -s`，非交互。Ubuntu 的默认 `~/.bashrc` 第 8-12 行有一句提前返回
+（`case $- in *i*) ;; *) return;; esac`），所以文件末尾那句 `eval $(wsl2-ssh-agent)` 永远执行不到，
+`SSH_AUTH_SOCK` 保持为空。在首行插一个 `echo` 标记即可确认：`bash -s` 的输出里没有它，
+`bash -i -s` 有。三条调用对照：`bash -i -s` 与 `bash -l -s`（经 `.profile`）有钥匙，`bash -s` 没有。
+
+围栏与此无关。python 直连 socket 的探测在裸 shell 和 llrun 内都返回 `CONNECTED`，`SO_PEERCRED` 的
+pid/uid/gid 相同，identities 请求回 541 字节的 type 12。四格矩阵（有无围栏 × 有无显式
+`SSH_AUTH_SOCK`）说明成败只取决于变量有没有给出来。
+
+围栏确实挡了一件事：它屏蔽 `/init`，于是 `wsl2-ssh-agent` 在围栏内起不来 —— 那个桥要调
+`powershell.exe` 去读 Windows 侧的 `\\.\pipe\openssh-ssh-agent`，在围栏内是 `Permission denied`。
+所以守护进程只能在围栏外活，靠一个 systemd 用户单元持续拉起：
+`/home/lihao/.config/systemd/user/skadi-ssh-agent.service`，内容是
+`ExecStart=%h/.local/bin/wsl2-ssh-agent -foreground`、`ExecStartPre` 先删残留 socket、
+`Restart=on-failure`。实测四种保活方式里只有它稳：`eval "$(wsl2-ssh-agent)"` 与
+`setsid nohup ... &` 都在父 shell 退出后几十秒内消失，`systemd-run --user --scope` 直接不返回
+（占满超时），`--unit=... --collect` 的 PPID 是 1。
+
+插件侧的做法是给每条命令前置三行：
+
+```sh
+if [ -z "$SSH_AUTH_SOCK" ] && [ -S "$HOME/.ssh/wsl2-ssh-agent.sock" ]; then
+  export SSH_AUTH_SOCK="$HOME/.ssh/wsl2-ssh-agent.sock"
+fi
+```
+
+判据是 `-S`（真 socket）而不是 `-e`，且不覆盖用户自己设的值 —— 脚本内 `export` 仍然胜出，这条有断言
+钉住。`sshAgentSocket: false` 关掉注入，其他字符串替换路径。端到端实测在围栏内拿到 8 把钥匙。
+
+顺带修掉一个实现缺陷：无围栏 + `workdir` 的分支原本用 `args.command` 重建脚本，会把前置探测丢掉；
+现在基于已带前置的 `script` 再包 `cd`。断言 `agent-survives-workdir` 钉住这一条。
+
+计数因此从 117 涨到 **123**（bash 25 → 31）。`docs/llrun.md` 里的 25 与两份 README 的 117 同批改过。
 

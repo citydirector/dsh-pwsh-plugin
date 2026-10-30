@@ -184,6 +184,7 @@ Configuration:
   config:
     llrunPath: '/mnt/c/Users/<you>/.local/bin/llrun'   # omit to probe the candidates
     fence: true                                        # false = no fence (not recommended)
+    sshAgentSocket: '$HOME/.ssh/wsl2-ssh-agent.sock'   # false = do not inject
 ```
 
 `llrunPath` is only for overriding. Left out, the plugin probes `$LLRUN` / `$DSH_LLRUN`,
@@ -192,8 +193,27 @@ to `custom-bash.mjs` inside the package — first executable wins, and the resul
 install works without a restart. Yours come first: a system-level `llrun` may be newer, the packaged one only
 guarantees that the fence is there at all.
 
-Tests: `node test/bashtest.mjs` (25, mock runtime) + `node test/bash-e2e.mjs` (11, real runtime + real llrun).
+Tests: `node test/bashtest.mjs` (31, mock runtime) + `node test/bash-e2e.mjs` (11, real runtime + real llrun).
 Three of the 25 pin the executable-bit repair: a `0644` copy is made executable and the call succeeds, an
 unusable copy is named in the error, and an unusable candidate earlier in the list does not shadow a usable
 one later. They only assert the mode on POSIX hosts — NTFS reports every file as `0666`, so there the
 assertion is that the call still works.
+
+### The SSH agent socket
+
+`bash -s` is a **non-interactive** shell: it never reads `~/.bashrc`, so the usual
+`eval $(wsl2-ssh-agent)` line at the bottom of that file never runs and `SSH_AUTH_SOCK` stays empty. The
+fence is not the cause — a socket given explicitly works inside it just as well as outside.
+
+`custom-bash` therefore prepends a three-line probe to every command:
+
+```sh
+if [ -z "$SSH_AUTH_SOCK" ] && [ -S "$HOME/.ssh/wsl2-ssh-agent.sock" ]; then
+  export SSH_AUTH_SOCK="$HOME/.ssh/wsl2-ssh-agent.sock"
+fi
+```
+
+It tests `-S` (a real socket, not merely an existing path) and never overwrites a value you set yourself —
+so a script that exports its own socket still wins. `sshAgentSocket: false` turns the injection off; any
+other string replaces the path. The agent itself is still yours to keep running: the fence blocks
+`/init`, so `wsl2-ssh-agent` cannot start **inside** it and must be a user service outside.

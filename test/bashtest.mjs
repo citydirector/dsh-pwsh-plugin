@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { apply, llrunProbeScript } from '../wsl/custom-bash.mjs'
+import { apply, llrunProbeScript, sshAgentPreamble } from '../wsl/custom-bash.mjs'
 import { toWslPath } from './support.mjs'
 
 const WSL_BASH = process.env.BASH_BIN ?? 'C:\\Windows\\System32\\bash.exe'
@@ -323,6 +323,78 @@ const lockedLlrun = '/etc/hostname'
   const outcome = await probe.done
   check('llrun-unusable-later-wins', outcome.exitCode === 2, 'exit=' + String(outcome.exitCode))
   rmSync(dir, { recursive: true, force: true })
+}
+
+// Q. SSH agent：非交互 shell 不读 ~/.bashrc，用户终端里能用的 SSH_AUTH_SOCK
+// 在 bash 工具里天然是空的。脚本前置的探测要能补上它，且不能盖掉用户自己的设置。
+// socket 路径必须是 WSL 视角（/tmp/...），因为断言跑在 WSL 的 bash 里，
+// Windows 的 D:\Temp 与它是两套坐标。
+const AGENT_SOCK = '/tmp/_skadi_agent_probe.sock'
+
+// Q1 生成器本身：判据是 -S（真 socket），且不覆盖已设的值
+{
+  const pre = sshAgentPreamble(AGENT_SOCK)
+  check('agent-preamble-shape',
+    pre.includes('-S ') && pre.includes(AGENT_SOCK) && pre.includes('export SSH_AUTH_SOCK')
+      && pre.includes('-z "$SSH_AUTH_SOCK"'),
+    pre.replaceAll('\n', ' | '))
+  check('agent-preamble-off', sshAgentPreamble('') === '' && sshAgentPreamble(undefined) === '', 'off')
+}
+
+// Q2 没有 socket 时不 export：不能凭空造一个指向不存在路径的变量。
+// 先清掉上一次运行可能留下的 socket —— 否则这条断言测的是残留而不是逻辑。
+{
+  const clean = spawn(WSL_BASH, ['-s'], { stdio: ['pipe', 'pipe', 'pipe'] })
+  clean.stdin.end('rm -f ' + AGENT_SOCK + '\n')
+  await new Promise((res) => clean.on('exit', res))
+  const { ctx, get } = makeCtx((c) => c)
+  apply(ctx, { llrunPath: LLRUN, sshAgentSocket: AGENT_SOCK })
+  const out = await get().execute({ command: 'echo "[$SSH_AUTH_SOCK]"' }, exec)
+  check('agent-absent-not-exported', stripWarnings(out.text).trim() === '[]', JSON.stringify(out.text).slice(0, 90))
+}
+
+// Q3 socket 存在时 export。真造一个 unix socket：python 绑一下立刻关掉，
+// 文件留在磁盘上就足以让 `-S` 为真 —— 这条测的正是「不是普通文件」。
+{
+  // python 正文用单引号包住：路径里没有单引号，这样不必在双引号里再转义一层。
+  const mk = spawn(WSL_BASH, ['-s'], { stdio: ['pipe', 'pipe', 'pipe'] })
+  mk.stdin.end("python3 -c 'import os,socket;p=\"" + AGENT_SOCK + "\";"
+    + "os.path.exists(p) and os.unlink(p);s=socket.socket(socket.AF_UNIX);s.bind(p);s.close()'\n")
+  await new Promise((res) => mk.on('exit', res))
+  const { ctx, get } = makeCtx((c) => c)
+  apply(ctx, { llrunPath: LLRUN, sshAgentSocket: AGENT_SOCK })
+  const out = await get().execute({ command: 'echo "[$SSH_AUTH_SOCK]"' }, exec)
+  check('agent-present-exported', stripWarnings(out.text).includes(AGENT_SOCK), JSON.stringify(out.text).slice(0, 120))
+}
+
+// Q4 已设过就不动：用户显式指定优先于我们的猜测，哪怕它指错了。
+// 先 export 再跑，确认探测没把它改成 socket 路径。
+{
+  const { ctx, get } = makeCtx((c) => c)
+  apply(ctx, { llrunPath: LLRUN, sshAgentSocket: AGENT_SOCK })
+  const out = await get().execute({ command: 'export SSH_AUTH_SOCK=/kept/by/user; echo "[$SSH_AUTH_SOCK]"' }, exec)
+  // 用户脚本在探测之后执行，所以它自己设的值必然胜出 —— 这条其实测的是顺序：
+  // 探测必须排在用户脚本前面，否则用户设的值会被我们覆盖。
+  check('agent-runs-before-script', stripWarnings(out.text).trim() === '[/kept/by/user]', JSON.stringify(out.text).slice(0, 90))
+}
+
+// Q5 带 workdir 的无围栏分支不能把前置片段丢掉（曾经的实现缺陷：
+// 那里用 args.command 重建脚本，探测被静默丢弃）。
+{
+  const { ctx, get } = makeCtx((c) => c)
+  apply(ctx, { llrunPath: LLRUN, sshAgentSocket: AGENT_SOCK, fence: false })
+  POLICY = { mode: 'danger-full-access', workspaceRoot: WS }
+  const out = await get().execute({ command: 'echo "[$SSH_AUTH_SOCK]"', workdir: WS_WSL }, exec)
+  check('agent-survives-workdir', stripWarnings(out.text).includes(AGENT_SOCK), JSON.stringify(out.text).slice(0, 120))
+  POLICY = { mode: 'workspace-write', workspaceRoot: WS }
+  apply(ctxBase, { llrunPath: LLRUN })
+}
+
+// 收尾：探针 socket 送走
+{
+  const rm = spawn(WSL_BASH, ['-s'], { stdio: ['pipe', 'pipe', 'pipe'] })
+  rm.stdin.end('rm -f ' + AGENT_SOCK + '\n')
+  await new Promise((res) => rm.on('exit', res))
 }
 
 console.log(results.join('\n'))

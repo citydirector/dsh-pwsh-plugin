@@ -25,3 +25,7 @@
       disabled: !!js process.platform !== 'win32'
       config:
         timeoutMs: 300000
+        # 非交互 shell 不读 ~/.bashrc，用户终端里能用的 SSH_AUTH_SOCK 在这里是空的。
+        # 这段探测让 bash 工具也能用 Windows 侧的 ssh-agent（socket 由 wsl2-ssh-agent 提供，
+        # 守护进程要另行保活，例如一个 systemd 用户单元）。设 false 关掉。
+        sshAgentSocket: $HOME/.ssh/wsl2-ssh-agent.sock

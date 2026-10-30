@@ -191,6 +191,11 @@ $env:DSH_HOME = '<DSH_HOME>'
 不需要手动装：二进制随包发布，探测候选的最后一个就是它，所以一次 `plugin add` 就够。由于发布包在
 Windows 上打，那份文件到手时是 `0644` —— 探测发现它属于当前用户却不可执行时，会自己补上执行位再试。
 
+同一行还会注入 `SSH_AUTH_SOCK`。`bash -s` 是非交互的，`~/.bashrc` 末尾那句 `eval $(wsl2-ssh-agent)`
+永远执行不到，变量因此是空的 —— 围栏不是原因，显式给出的 socket 在围栏内一样能用。现在每条命令前
+都带一段三行探测：`$HOME/.ssh/wsl2-ssh-agent.sock` 是真 socket 且当前没设过值时导出它；
+`sshAgentSocket: false` 关掉。agent 守护进程本身必须在**围栏外**（它要 `/init`），通常做成 systemd 用户单元。
+
 完整说明、`-r` 档语义表、54 项验收矩阵与接入方式：**[docs/llrun.md](docs/llrun.md)**。想在自己机器上
 复验就 `bash wsl/acceptance.sh`（要在未被 `custom-bash` 包裹的 WSL 里跑：套第二层围栏会让四项断言
 因错误的原因变红）—— 它的每个路径都从自身位置推导，并在结尾复核磁盘有没有泄漏。
@@ -254,13 +259,13 @@ PWSH_BIN='pwsh' node test/itest.mjs          # 17：协议与会话本体
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15：插件完整路径
 node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
 node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
-node test/bashtest.mjs                       # 25：custom-bash 围栏分诊、bash 后备、执行位自修复
+node test/bashtest.mjs                       # 31：custom-bash 围栏分诊、bash 后备、执行位自修复、SSH agent
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
 node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
 node test/metatest.mjs                       # 23：插件页元数据（不起子进程，哪儿都能跑）
 ```
 
-八份脚本合计 **117 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+八份脚本合计 **123 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

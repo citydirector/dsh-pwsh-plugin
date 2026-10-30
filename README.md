@@ -218,6 +218,13 @@ It needs no manual install: the binary ships inside the package and is the last 
 `plugin add` is enough. Since releases are packed on Windows, that copy arrives as `0644` — the probe
 restores the executable bit itself before giving up, as long as the file belongs to the current user.
 
+The same row also injects `SSH_AUTH_SOCK`. `bash -s` is non-interactive, so the `eval $(wsl2-ssh-agent)`
+line at the bottom of `~/.bashrc` never runs and the variable stays empty — the fence is not the cause, a
+socket named explicitly works inside it just as well. A three-line probe exports
+`$HOME/.ssh/wsl2-ssh-agent.sock` when it is a real socket and nothing is set yet; `sshAgentSocket: false`
+turns it off. The agent daemon itself must live **outside** the fence (it needs `/init`), typically as a
+systemd user unit.
+
 Full description, the `-r` semantics table, the 54-assertion acceptance matrix and the wiring:
 **[docs/llrun.md](docs/llrun.md)**. Run `bash wsl/acceptance.sh` from a plain WSL shell (not from inside
 `custom-bash`, where nesting a second fence makes four assertions fail for the wrong reason) to re-verify on
@@ -282,13 +289,13 @@ PWSH_BIN='pwsh' node test/itest.mjs          # 17: protocol and session core
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15: full plugin path
 node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
 node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
-node test/bashtest.mjs                       # 25: custom-bash fence triage, bash fallback, exec-bit repair
+node test/bashtest.mjs                       # 31: custom-bash fence triage, bash fallback, exec-bit repair
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
 node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
 node test/metatest.mjs                       # 23: plugin-page metadata (no spawn, runs anywhere)
 ```
 
-Eight scripts, **117 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Eight scripts, **123 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.

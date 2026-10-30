@@ -22,6 +22,8 @@
  *                   最后才用包内自带的 wsl/llrun —— 显式安装的优先，包里那份只负责开箱可用。
  *                   取第一个可执行的；探测结果缓存，装好即生效，不必重启。
  *   fence           是否按 sandbox 权限档挂围栏，默认 true。
+ *   sshAgentSocket  WSL 侧的 ssh-agent socket 路径，默认 '~/.ssh/wsl2-ssh-agent.sock'；
+ *                   给 false 关掉这段探测。见下方「SSH agent」一节。
  *
  * 沙箱（2026-10-23）
  *   workspace-write / read-only 下经 `wsl/llrun` 起 bash：userns socket 掩蔽（docker 等）
@@ -40,6 +42,15 @@
  *   - POSIX 路径的 `workdir` 不能当 Windows 进程 cwd（spawn 直接失败）；
  *     有围栏时交给 llrun 的 `-C`（在 landlock 之后 chdir），无围栏时退化为命令内 `cd`。
  *   - 默认工作目录取自 workingDirectory 服务而非 header.cwd：会话中途切目录后 header 不更新。
+ *
+ * SSH agent
+ *   非交互 shell 不读 ~/.bashrc（那是交互式专属），所以用户终端里能用的
+ *   SSH_AUTH_SOCK 在这里天然是空的。而 WSLENV 转发也不可靠：Windows 侧的
+ *   变量要显式列进 WSLENV 才过界，且经 llrun 的 userns 之后仍然没有保证。
+ *   因此改成在脚本文本最前面插一段探测：socket 存在就 export，已设过则不动。
+ *   走 stdin 送进 `bash -s`，围栏内外是同一条路径，一处覆盖两种模式。
+ *   只 export 变量，不启动守护进程 —— 进程得由 systemd 用户单元之类的
+ *   围栏外机制维持，本工具无权也不该替用户起后台服务。
  */
 
 import { fileURLToPath } from 'node:url'
@@ -63,6 +74,30 @@ const WINDOWS_BASH_FALLBACKS = ['C:\\Windows\\System32\\bash.exe']
 const DEFAULT_TIMEOUT_MS = 120000
 const DEFAULT_MAX_OUTPUT_BYTES = 64000
 const PROBE_TIMEOUT_MS = 8000
+
+/**
+ * 默认的 wsl2-ssh-agent socket（rupor-github/wsl-ssh-agent 的默认路径）。
+ * 用 $HOME 而不是展开后的绝对路径：脚本在 WSL 里跑，家目录以那边的为准。
+ */
+const DEFAULT_SSH_AGENT_SOCKET = '$HOME/.ssh/wsl2-ssh-agent.sock'
+
+/**
+ * 生成 agent 探测片段。返回空串表示不需要插入。
+ *
+ * 三件事同时成立才 export：调用方没有自己设 SSH_AUTH_SOCK、socket 确实存在、
+ * 并且是个 socket（`-S` 而不是 `-e`）—— 残留的普通文件不该被当成可用的 agent。
+ * 已设过就不覆盖：用户显式指定的优先级永远高于我们的猜测，哪怕它指错了，
+ * 也该由用户看到错误而不是被静默改到别处。
+ */
+export function sshAgentPreamble(socket) {
+  if (typeof socket !== 'string' || socket.length === 0) return ''
+  const quoted = '"' + socket.replaceAll('"', '\\"') + '"'
+  return [
+    'if [ -z "$SSH_AUTH_SOCK" ] && [ -S ' + quoted + ' ]; then',
+    '  export SSH_AUTH_SOCK=' + quoted,
+    'fi',
+  ].join('\n')
+}
 
 /**
  * 本文件同目录的 llrun，也就是随插件包一起发布的那份。
@@ -191,6 +226,13 @@ export function apply(ctx, config) {
   const configuredLlrun = typeof config?.llrunPath === 'string' && config.llrunPath.length > 0 ? config.llrunPath : undefined
   const llrunCandidates = configuredLlrun === undefined ? defaultLlrunCandidates() : [configuredLlrun]
   const fenceEnabled = config?.fence !== false
+  // 显式给 false 表示完全关掉；给字符串就用它；其余（含缺省）用默认 socket。
+  const sshAgentSocket = config?.sshAgentSocket === false
+    ? ''
+    : typeof config?.sshAgentSocket === 'string' && config.sshAgentSocket.length > 0
+      ? config.sshAgentSocket
+      : DEFAULT_SSH_AGENT_SOCKET
+  const agentPreamble = sshAgentPreamble(sshAgentSocket)
 
   /**
    * bash 解析：按 bashCandidates 顺序问 subprocess 服务，第一个解出来的胜出。
@@ -289,7 +331,8 @@ export function apply(ctx, config) {
       const needFence = fenceEnabled && mode !== 'danger-full-access'
 
       let argv
-      let script = args.command
+      // agent 探测排在用户脚本之前，两条路径共用同一段文本，围栏内外行为一致。
+      let script = agentPreamble.length > 0 ? agentPreamble + '\n' + args.command : args.command
       if (needFence) {
         const llrunPath = await resolveLlrun(shell, baseCwd)
         if (llrunPath === undefined) {
@@ -307,7 +350,9 @@ export function apply(ctx, config) {
         fenceArgs.push(shellQuote(workspace), '/bin/bash', '-s')
         argv = [shell, '-c', `exec ${llrunExecWord(llrunPath)} ${fenceArgs.join(' ')}`]
       } else {
-        if (posixDir !== undefined) script = `cd ${shellQuote(posixDir)} && ${args.command}`
+        // 这里要基于已经带上前置片段的 script 再包 cd，不能回到 args.command ——
+        // 否则带 workdir 的调用会静默丢掉 agent 探测。
+        if (posixDir !== undefined) script = `cd ${shellQuote(posixDir)} && ${script}`
         argv = [shell, '-s']
       }
 
