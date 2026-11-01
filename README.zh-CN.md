@@ -2,6 +2,8 @@
 
 [English](README.md) · **简体中文**
 
+[![npm](https://img.shields.io/npm/v/dsh-pwsh-plugin)](https://www.npmjs.com/package/dsh-pwsh-plugin) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.0--rc.2-blue)](https://github.com/topics/dsh-plugin)
+
 给 DeepSeek Harness 的 `pwsh_run` 工具：PowerShell 脚本正文**经 stdin** 送进一个常驻 pwsh 7 进程 ——
 路上不做任何转义、没有 32K 命令行上限、~400ms 冷启动只付一次，变量 / 当前目录 / 已加载模块跨调用保留。
 
@@ -293,6 +295,19 @@ HEAD 上还没有 tag 时，它把该打的标签名打印出来。
 npm 要用 Windows 侧那份。WSL 里 `/usr/local/bin/npm` 指向 bun 的软链，`npm version` 会报
 `Script not found "version"`。
 
-## 许可
+## 相关项目
 
-MIT —— 见 [LICENSE](LICENSE)。
+[@citydirector](https://github.com/citydirector) 的其它 DeepSeek Harness（DSH）项目：
+
+| 项目 | 类型 | 用途 |
+|---|---|---|
+| [DSH-build](https://github.com/citydirector/DSH-build) | 构建 | DSH 的 Windows 便携版 / 桌面版绿色构建，每天跟随上游打补丁、冒烟、发布 |
+| [dsh-remote-access-proxy](https://github.com/citydirector/dsh-remote-access-proxy) | 插件 | 在手机、平板或其它电脑上用浏览器访问 DSH Web GUI |
+| [deepinfra-fusion-proxy](https://github.com/citydirector/deepinfra-fusion-proxy) | 插件 | DeepInfra Standard / Flex 按会话切换与自动回退 |
+| [dsh-loop-rescue](https://github.com/citydirector/dsh-loop-rescue) | 插件 | 模型复读时从流内切断、剪掉循环并自动续跑 |
+| [ui-locate-mcp](https://github.com/citydirector/ui-locate-mcp) | MCP 插件 | 按界面文字和图标给出精确像素坐标，用于桌面操作 |
+| [dsh-session-manager](https://github.com/citydirector/dsh-session-manager) | 离线工具 | 离线升级、归档、回收站、清洗循环、修复烂尾 / 隐藏会话 |
+
+## 许可证
+
+[MIT](LICENSE)

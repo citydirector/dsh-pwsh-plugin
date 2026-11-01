@@ -1,6 +1,8 @@
 # dsh-pwsh-plugin
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+**English** · [简体中文](README.zh-CN.md)
+
+[![npm](https://img.shields.io/npm/v/dsh-pwsh-plugin)](https://www.npmjs.com/package/dsh-pwsh-plugin) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.0--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
 A `pwsh_run` tool for DeepSeek Harness: PowerShell script text goes to a **persistent** pwsh 7 process
 over stdin, so nothing is escaped on the way in, there is no 32K command-line cap, the ~400 ms cold start
@@ -119,7 +121,7 @@ The three files in `plugin/` (`index.mjs`, `session.mjs`, `session-server.ps1`) 
 
 ## The tools
 
-`pwsh_run` runs a script. Versions are managed by DSH itself — see [Updates](#updates).
+`pwsh_run` runs a script. Versions are managed by DSH itself — see [Updating](#updating).
 
 | Argument | Required | Meaning |
 |---|---|---|
@@ -176,7 +178,7 @@ Under `danger-full-access` nothing is confined, exactly like the built-in tool.
 **`read-only` does not start.** In that mode pwsh runs in ConstrainedLanguage and cannot even create a
 runspace. The tool reports that clearly and points at the built-in `pwsh` tool, which works there.
 
-## Updates
+## Updating
 
 This plugin carries no updater of its own. It is an ordinary registry package, so **DSH manages its
 version**: the Plugins page lists it, shows when a newer release exists, and installs it — the same
@@ -246,7 +248,7 @@ your own machine — it derives every path from its own location and re-checks t
 | A child process keeps a file locked after the call | The session holds the `Process` object. Wait for `idleMs`, or force a rebuild with a timeout. |
 | `Program 'node.exe' failed to run: Access is denied.` (or `拒绝访问`) | Expected under `workspace-write`: the restricted token cannot create anonymous pipes, so **any** launch that captures a child's stdio fails — `& exe` included. Use `Start-Process -RedirectStandardOutput/-RedirectStandardError <file>` (captures output, no exit code), `[Diagnostics.Process]::Start` with `UseShellExecute=$false` and no redirection (exit code, child inherits stdout), or a `.cmd` wrapper that writes stdout, stderr and `%ERRORLEVEL%` to three files. The tool appends this same advice to the output. |
 
-## Known limits
+## Known limitations
 
 The full list — session semantics, detached child std handles, UAC differences, and what an update does to a
 session — lives in **[docs/runtime-notes.md](docs/runtime-notes.md)**. The short version:
@@ -327,6 +329,19 @@ new content). With no tag on HEAD it prints the exact name to create.
 Use the Windows-side npm. In WSL, `/usr/local/bin/npm` resolves to a bun symlink and `npm version` fails
 with `Script not found "version"`.
 
+## Related projects
+
+More DeepSeek Harness (DSH) projects from [@citydirector](https://github.com/citydirector):
+
+| Project | Kind | What it does |
+|---|---|---|
+| [DSH-build](https://github.com/citydirector/DSH-build) | Build | Portable and desktop Windows builds of DSH, patched, smoke-tested and released daily |
+| [dsh-remote-access-proxy](https://github.com/citydirector/dsh-remote-access-proxy) | Plugin | Use the DSH Web GUI from your phone, tablet, or another computer |
+| [deepinfra-fusion-proxy](https://github.com/citydirector/deepinfra-fusion-proxy) | Plugin | DeepInfra Standard / Flex switching with automatic fallback, per session |
+| [dsh-loop-rescue](https://github.com/citydirector/dsh-loop-rescue) | Plugin | Cut model repetition loops mid-stream, prune them from the log, and resume |
+| [ui-locate-mcp](https://github.com/citydirector/ui-locate-mcp) | MCP plugin | Pixel-exact coordinates for on-screen text and icons, for desktop automation |
+| [dsh-session-manager](https://github.com/citydirector/dsh-session-manager) | Offline tool | Upgrade, archive, trash, loop cleanup and repair for DSH sessions |
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE)
