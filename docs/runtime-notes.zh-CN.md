@@ -6,23 +6,25 @@
 
 ## 已知边界
 
-- **不支持 `read-only` 模式**（见上），用内置 `pwsh`。
+- **不支持 `read-only` 模式**，用内置 `pwsh`。
 - **沙箱策略服务缺席时拒绝启动**，除非 `allowUnconfined: true`。
 - **超时会杀掉整个会话**（连带回收子进程树）。状态丢失，下次调用自动重建。
 - **`exit N` 的退出码不可观测**（runspace 语义）。
-- **stdout / stderr 的逐行时序不保留** —— 全部流经 `*>&1` 合并后按类型打标。
-- **`[Console]::Error.WriteLine` 会被吞掉**（服务端为防协议污染把 `Console.Error` 指向内存流）。
-  子进程的 stderr、`Write-Error`、`throw` 都正常回来。
-- **子进程的 std handle 已与协议流断开。** `Console::SetIn/SetOut` 只改 .NET 层，服务端还改写了三个 Win32 槽位：
-  stdin 接 `NUL`，stdout / stderr 接一个带 `FILE_FLAG_DELETE_ON_CLOSE` 的临时文件、每次调用前截回零。
-  于是子进程往继承来的 stdout 写东西不会再伪造出协议行（实测：子进程一句 `Write-Output '<<<BYE>>>'`
-  曾让会话当场死亡），读继承来的 stdin 也只会读到 EOF，而不是调用方的请求。
-  替上去的句柄必须是**可继承**的（`SECURITY_ATTRIBUTES.bInheritHandle`）：用 `NULL` 安全描述符建的句柄
-  只存在于本进程，子进程按 `STARTUPINFO.hStdInput` 拿到的只是一个在那边没有意义的句柄**编号** ——
-  `GetFileType` 报 `UNKNOWN`，几十次里还有一次那个编号被别的对象复用，读出来是别人的字节。
-  stdout **故意不接 `NUL`**：那是字符设备，PowerShell 会认为输出没被重定向，沙箱拒绝的报错会变成一句
-  没用的 `StandardOutputEncoding` 提示。临时目录不可写时退回 `NUL`，并在第一次调用的警告里说明一次。
-- **会话是串行的**：并发调用排成队列逐个执行（不会串输出，但也没有并行加速）。
+- **stdout / stderr 的逐行时序不保留** —— 流分别收集，最终按类型分组。
+- **直接 Console 输出会被丢弃**：`Console.Out` / `Console.Error` 使用空输出流，不再积存在内存里。
+  Windows 的继承 stdin/stdout/stderr 接可继承的 `NUL` 句柄；子进程不能读请求或向协议注入假行。
+  PowerShell 正常捕获的原生输出、`Write-Error`、`throw` 仍返回；主动绕过 PowerShell 捕获而继承句柄的输出会丢失。
+  句柄隔离失败时拒绝启动，不允许降级继续。`NUL` 可能改变原生启动被拒时的文案，不改变权限边界。
+- **会话是串行的**：同一 DSH ID 的创建与执行共用队列。超时从实际发送开始计；排队取消只取消自身，执行中取消才终止进程。
+- **复用前重新核对边界**：有效策略、工作区或沙箱后端变化后重建。缺少 session ID 会拒绝，不能共享默认状态。
+- **忙会话不会因池满或空闲计时被淘汰**：满池全忙时新调用收到重试说明；完成调用后才计算闲置。
+- **输出正文按 UTF-8 字节限制**：普通流共用 `maxOutputBytes`，错误另留 64KiB，记录换行也计数。
+  服务端立即移除消费过的记录；进度记录不显示且及时清空。单帧有长度限制，显示前缀不计入正文预算。
+- **脚本顶层语义保留**：正文单独执行，工作目录通过 API 设置；对象走 `Out-String -Stream -Width 200`。
+  `#requires` 的版本、PSEdition、模块和管理员身份会在正文前核验；`-ShellId` / `-Assembly` 明确拒绝。
+  管理员身份检查依据当前令牌的有效组身份，不能据此判断沙箱是否存在。
+- **启动失败会清理子进程并带回 stderr 尾部**；握手警告在第一条用户调用显示一次。启动器采用 gzip 压缩，
+  编码后仍须在 Windows 命令行预算以内，否则启动前明确拒绝。
 - **不依赖 WSL。** `pwsh_run` 全程不碰 WSL，只有 `wsl/custom-bash.mjs` 才碰。没有可用的 `bashPath` 时，
   该预设照样加载成功（可执行文件是惰性解析的），`bash` 工具每次调用报
   `command "<路径>" is not an executable file` —— 清晰失败，不会静默降级。默认值是裸名 `bash`；

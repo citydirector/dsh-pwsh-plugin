@@ -1,42 +1,56 @@
-/**
- * pwsh-run 会话客户端 —— 常驻 pwsh 进程的生命周期与协议编解码
- *
- * 本模块**不依赖 DSH**，只要求调用方给一个最小的 subprocess 接口：
- *   interface SubprocessLike {
- *     spawn(spec): { stdin, stdout, stderr, done, terminate(), waitForExit(signal?) }
- *   }
- * 这样既能挂在 ctx.subprocess 上，也能在纯 node 里做集成测试。
- */
+/** 常驻 pwsh 的协议、串行调用及有界输出收集。 */
+import { gzipSync } from 'node:zlib'
+import { StringDecoder } from 'node:string_decoder'
 
-const DEFAULT_GRACE_MS = 3000
-
-/**
- * 单次调用的输出收集上限（每个流各自计）。
- * 常驻会话没有原生工具那种 collect 尾巴截断，几个 MB 的输出也照单全收——不设上限的话
- * 一段死循环打印就能把宿主进程的内存吃光。超限只丢弃后续内容并打标记，不打断脚本。
- */
 export const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
-
-/** 把脚本正文编码成协议负载。 */
+export const DIAGNOSTIC_BYTES = 64 * 1024
+export const RESPONSE_GRACE_MS = 5000
+// Node 定时器采用有符号 32 位毫秒，执行预算还需给收尾留下余量。
+export const MAX_TIMEOUT_MS = 2147483647 - RESPONSE_GRACE_MS
+const MAX_FRAME_CHARS = 32768
 export const encodeScript = (text) => Buffer.from(text, 'utf8').toString('base64')
 
-/** 由 UTF-16LE 的 base64 生成 pwsh 启动参数（-EncodedCommand，避开 32K 命令行里的转义问题）。 */
-export function bootArgv(serverSource) {
-  return ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(serverSource, 'utf16le').toString('base64')]
+export function validateTimeout(value) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_TIMEOUT_MS) {
+    throw new Error('pwsh_run timeoutMs must be an integer between 1 and ' + MAX_TIMEOUT_MS)
+  }
+  return value
 }
 
-/**
- * 一个常驻 pwsh 会话。
- *
- * 线程模型：服务端是单 runspace，调用必须串行；run() 内部用 Promise 链排队。
- * 生命周期：进程退出 / stdout 出错 / 服务端发 BYE 都算「会话死亡」，
- *          在途调用立刻失败，下一次 acquire 会重建。
- */
+export function bootArgv(serverSource) {
+  // 压缩启动源码：服务端功能增长不能再撞 Windows 的 32K 命令行上限。
+  const payload = gzipSync(Buffer.from(serverSource, 'utf8')).toString('base64')
+  const boot = "$m=[IO.MemoryStream]::new([Convert]::FromBase64String('" + payload + "'));"
+    + "$g=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress);"
+    + "$r=[IO.StreamReader]::new($g,[Text.Encoding]::UTF8);"
+    + "try { & ([ScriptBlock]::Create($r.ReadToEnd())) } finally { $r.Dispose(); $m.Dispose() }"
+  const encoded = Buffer.from(boot, 'utf16le').toString('base64')
+  if (encoded.length > 30000) throw new Error('pwsh_run compressed bootstrap exceeds the Windows command-line budget')
+  return ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded]
+}
+
+const cancelled = () => new Error('pwsh_run cancelled before execution')
+export function abortable(promise, signal, shouldAbort = () => true) {
+  if (signal === undefined) return promise
+  if (signal.aborted) return Promise.reject(cancelled())
+  return new Promise((resolve, reject) => {
+    const abort = () => { if (shouldAbort()) reject(cancelled()) }
+    signal.addEventListener('abort', abort, { once: true })
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+  })
+}
+
+function clipUtf8(text, limit) {
+  const bytes = Buffer.from(text, 'utf8')
+  if (bytes.length <= limit) return text
+  return new StringDecoder('utf8').write(bytes.subarray(0, Math.max(0, limit)))
+}
+
 export class PwshSession {
-  constructor(handle, label, maxOutputBytes) {
+  constructor(handle, label, maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES) {
     this.handle = handle
     this.label = label
-    this.maxOutputBytes = maxOutputBytes === undefined ? DEFAULT_MAX_OUTPUT_BYTES : maxOutputBytes
+    this.maxOutputBytes = maxOutputBytes
     this.buffer = ''
     this.pending = new Map()
     this.activeId = null
@@ -46,178 +60,172 @@ export class PwshSession {
     this.queue = Promise.resolve()
     this.lastUsed = Date.now()
     this.stderrTail = ''
-
-    const stdout = handle.stdout
-    if (stdout !== undefined && stdout !== null) {
-      if (typeof stdout.setEncoding === 'function') stdout.setEncoding('utf8')
-      stdout.on('data', (chunk) => this.#onData(chunk))
-      stdout.on('error', (error) => this.#fail('stdout error: ' + String(error)))
-    }
-    const stderr = handle.stderr
-    if (stderr !== undefined && stderr !== null) {
-      if (typeof stderr.setEncoding === 'function') stderr.setEncoding('utf8')
-      stderr.on('data', (chunk) => { this.stderrTail = (this.stderrTail + chunk).slice(-2000) })
-    }
-    if (handle.done !== undefined) {
-      handle.done.then(
-        (outcome) => this.#fail('session died code=' + String(outcome === undefined ? 'null' : outcome.exitCode)),
-        (error) => this.#fail('session died: ' + String(error)),
-      )
-    }
+    this.startupWarnings = []
+    handle.stdin?.on?.('error', (error) => this.#fail('stdin error: ' + String(error)))
+    handle.stdout?.setEncoding?.('utf8')
+    handle.stdout?.on('data', (chunk) => this.#onData(chunk))
+    handle.stdout?.on('error', (error) => this.#fail('stdout error: ' + String(error)))
+    handle.stderr?.setEncoding?.('utf8')
+    handle.stderr?.on('data', (chunk) => { this.stderrTail = (this.stderrTail + chunk).slice(-2000) })
+    handle.stderr?.on('error', (error) => { this.stderrTail = (this.stderrTail + String(error)).slice(-2000) })
+    handle.done?.then(
+      (outcome) => this.#fail('session died code=' + String(outcome?.exitCode ?? 'null')),
+      (error) => this.#fail('session died: ' + String(error)),
+    )
   }
 
-  /** 追加收到的字节，按行切出协议消息。 */
   #onData(chunk) {
     this.buffer += chunk
     for (;;) {
       const index = this.buffer.indexOf('\n')
-      if (index < 0) return
+      if (index < 0) {
+        if (this.buffer.length > MAX_FRAME_CHARS) {
+          this.#fail('pwsh protocol frame exceeded its size limit')
+          void this.dispose()
+        }
+        return
+      }
       const line = this.buffer.slice(0, index).replace(/\r$/, '')
       this.buffer = this.buffer.slice(index + 1)
+      if (line.length > MAX_FRAME_CHARS) {
+        this.#fail('pwsh protocol frame exceeded its size limit')
+        void this.dispose()
+        return
+      }
       this.#onLine(line)
     }
   }
 
   #onLine(line) {
-    if (line.length === 0) return
-    if (line === '<<<BYE>>>') {
-      this.#fail('session said BYE')
-      return
-    }
+    if (line === '<<<BYE>>>') { this.#fail('session said BYE'); return }
     const marker = line.match(/^<<<([BTE]):([^>:]+)(?::([01]))?>>>$/)
     if (marker !== null) {
-      const kind = marker[1]
-      const id = marker[2]
-      if (kind === 'B') {
-        this.activeId = id
-        return
-      }
+      const [, kind, id] = marker
+      if (kind === 'B') { this.activeId = id; return }
       const entry = this.pending.get(id)
       if (entry === undefined) return
-      if (kind === 'T') {
-        if (marker[3] === '1') entry.response.timedOut = true
-        return
-      }
-      // E：本次响应收齐
+      if (kind === 'T') { entry.response.timedOut = marker[3] === '1'; return }
       this.activeId = null
       this.pending.delete(id)
       entry.resolve(entry.response)
       return
     }
-    const part = line.match(/^([OEWVXFS]):(.*)$/)
-    if (part === null) return
-    const entry = this.activeId === null ? undefined : this.pending.get(this.activeId)
+    const entry = this.pending.get(this.activeId)
     if (entry === undefined) return
-    const text = Buffer.from(part[2], 'base64').toString('utf8')
-    // 哨兵必须无条件收：它决定「跑完 / 抛异常 / 被中断」，丢了会让上层误判。
-    if (part[1] === 'S') {
-      entry.response.sentinel = text
-      return
+    if (line === 'L:') { entry.response.truncated = true; return }
+    const part = line.match(/^([OEWVXFSID])(\+?):(.*)$/)
+    if (part === null) return
+    let text = Buffer.from(part[3], 'base64').toString('utf8')
+    const kind = part[1]
+    if (kind === 'S') { entry.response.sentinel = text; return }
+    const diagnostic = 'EXF'.includes(kind)
+    const counter = diagnostic ? 'diagnosticBytes' : 'bytes'
+    const records = diagnostic ? 'diagnosticRecords' : 'records'
+    const newRecord = entry.continuing !== kind
+    const separator = newRecord && entry.response[records] > 0 ? 1 : 0
+    const remaining = (diagnostic ? DIAGNOSTIC_BYTES : this.maxOutputBytes) - entry.response[counter] - separator
+    if (remaining < 0) { entry.response.truncated = true; return }
+    const kept = clipUtf8(text, remaining)
+    if (kept !== text) entry.response.truncated = true
+    text = kept
+    if (text.length > 0 || part[3].length === 0) {
+      entry.response[counter] += Buffer.byteLength(text, 'utf8') + separator
+      if (newRecord) entry.response[records]++
     }
-    if (entry.response.truncated) return
-    entry.response.bytes += text.length
-    if (entry.response.bytes > this.maxOutputBytes) {
-      // 只标记一次；后续数据行直接丢弃，脚本本身不受影响。
-      entry.response.truncated = true
-      return
+    const field = { O: 'out', E: 'err', W: 'warn', V: 'verbose', X: 'exceptions', F: 'fatal', I: 'information', D: 'debug' }[kind]
+    const items = entry.response[field]
+    if (text.length > 0 || part[3].length === 0) {
+      if (entry.continuing === kind && items.length > 0) items[items.length - 1] += text
+      else items.push(text)
     }
-    switch (part[1]) {
-      case 'O': entry.response.out.push(text); break
-      case 'E': entry.response.err.push(text); break
-      case 'W': entry.response.warn.push(text); break
-      case 'V': entry.response.verbose.push(text); break
-      case 'X': entry.response.exceptions.push(text); break
-      case 'F': entry.response.fatal.push(text); break
-      default: break
-    }
+    entry.continuing = part[2] === '+' ? kind : null
   }
 
-  /** 会话不可再用：在途调用立刻失败。 */
   #fail(reason) {
-    if (this.dead) return
-    this.dead = true
-    this.deathReason = reason
-    for (const entry of this.pending.values()) entry.reject(new Error(reason))
+    if (!this.dead) { this.dead = true; this.deathReason = reason }
+    for (const entry of this.pending.values()) entry.reject(new Error(this.deathReason ?? reason))
     this.pending.clear()
     this.activeId = null
   }
 
-  /** 杀掉进程并等待托管范围清空（Windows 上 Job Object 会连带回收子进程树）。 */
-  async dispose() {
-    this.dead = true
-    try {
-      this.handle.terminate()
-    } catch {
-      // terminate 幂等：进程已退出时忽略。
-    }
-    if (typeof this.handle.waitForExit === 'function') {
-      try {
-        await this.handle.waitForExit(AbortSignal.timeout(3000))
-      } catch {
-        // 托管范围无法观察时不再等待。
-      }
-    }
+  dispose(reason = 'pwsh session disposed') {
+    this.#fail(reason)
+    this.disposal ??= (async () => {
+      try { this.handle.terminate() } catch { /* 已退出的进程不需要再次终止。 */ }
+      const abort = new AbortController()
+      const timer = setTimeout(() => abort.abort(), 3000)
+      try { await this.handle.waitForExit?.(abort.signal) } catch { /* 等待范围已终止或不可观察。 */ }
+      finally { clearTimeout(timer) }
+    })()
+    return this.disposal
   }
 
-  /** 跑一段脚本；同一会话内串行。 */
-  run(script, timeoutMs) {
-    const execute = () => this.#send(script, timeoutMs)
+  run(script, timeoutMs, options = {}) {
+    validateTimeout(timeoutMs)
+    if (options.signal?.aborted) return Promise.reject(cancelled())
+    let started = false
+    const execute = () => { started = true; return this.#send(script, timeoutMs, options) }
     const result = this.queue.then(execute, execute)
     this.queue = result.then(() => undefined, () => undefined)
-    return result
+    return abortable(result, options.signal, () => !started)
   }
 
-  #send(script, timeoutMs) {
-    if (this.dead) return Promise.reject(new Error(this.deathReason === null ? 'session is dead' : this.deathReason))
-    const stdin = this.handle.stdin
-    if (stdin === undefined || stdin === null) return Promise.reject(new Error('session has no stdin pipe'))
+  #send(script, timeoutMs, options) {
+    if (options.signal?.aborted) return Promise.reject(cancelled())
+    if (this.dead) return Promise.reject(new Error(this.deathReason ?? 'session is dead'))
+    if (!this.handle.stdin) return Promise.reject(new Error('session has no stdin pipe'))
     const id = 'c' + String(++this.sequence)
     this.lastUsed = Date.now()
-    const response = { out: [], err: [], warn: [], verbose: [], exceptions: [], fatal: [], sentinel: null, timedOut: false, bytes: 0, truncated: false }
-    const seconds = Math.max(1, Math.ceil(timeoutMs / 1000))
+    const response = { out: [], err: [], warn: this.startupWarnings.splice(0), verbose: [], information: [], debug: [], exceptions: [], fatal: [], sentinel: null, timedOut: false, bytes: 0, diagnosticBytes: 0, records: 0, diagnosticRecords: 0, truncated: false }
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { response, resolve, reject })
-      stdin.write(id + ' ' + String(seconds) + ' ' + encodeScript(script) + '\n', (error) => {
+      let timer
+      const finish = (fn, value) => {
+        clearTimeout(timer)
+        options.signal?.removeEventListener('abort', onAbort)
+        this.lastUsed = Date.now()
+        fn(value)
+      }
+      const stop = (isCancellation) => {
+        this.pending.delete(id)
+        response.cancelled = isCancellation
+        response.noResponse = !isCancellation
+        finish(resolve, response)
+        void this.dispose(isCancellation ? 'pwsh session cancelled' : 'pwsh session response timed out')
+      }
+      const onAbort = () => stop(true)
+      this.pending.set(id, { response, resolve: (v) => finish(resolve, v), reject: (e) => finish(reject, e), continuing: null })
+      // 只有实际发送后才开始计执行时间；排队取消不会杀前一条调用。
+      timer = setTimeout(() => stop(false), timeoutMs + RESPONSE_GRACE_MS)
+      options.signal?.addEventListener('abort', onAbort, { once: true })
+      this.handle.stdin.write(id + ' ' + timeoutMs + ' ' + encodeScript(JSON.stringify({ script, workdir: options.workdir })) + ' ' + this.maxOutputBytes + '\n', (error) => {
         if (error) {
+          const entry = this.pending.get(id)
           this.pending.delete(id)
-          reject(new Error('write to pwsh session failed: ' + String(error)))
+          entry?.reject(new Error('write to pwsh session failed: ' + error))
         }
       })
     })
   }
 }
 
-/**
- * 启动一个会话并完成握手（跑一句 $PSVersionTable 确认真的活着）。
- * 服务端启动要解析脚本 + 打开 runspace，实测约 1s，所以握手超时给到 20s。
- */
 export async function startSession(subprocess, options) {
-  // argv：调用方已经算好的完整命令行。沙箱给出的是一条完整受限命令（node runner.js … -- pwsh.exe …），
-  // 拆成前缀再接会更脆，所以整条用；没有沙箱时由调用方给出裸 pwsh 命令行。
-  const argv = Array.isArray(options.argv) ? options.argv : [options.executable].concat(bootArgv(options.serverSource))
-  const handle = subprocess.spawn({
-    argv,
-    cwd: options.cwd,
-    stdio: {
-      stdin: 'pipe',
-      // 必须自己解协议：collect 模式只保留尾部，会把前面的响应截掉。
-      stdout: 'pipe',
-      // 同理用 pipe 而非 collect：collect 模式下 handle.stderr 是 undefined，
-      // 启动失败的诊断尾巴会永远读不到（实测踩过）。这里自己收 2000 字符尾巴。
-      stderr: 'pipe',
-    },
-    graceMs: DEFAULT_GRACE_MS,
-  })
-  const session = new PwshSession(handle, options.label === undefined ? 'pwsh' : options.label, options.maxOutputBytes)
-  const probe = await Promise.race([
-    session.run('$PSVersionTable.PSVersion.Major', 15000),
-    new Promise((resolve) => setTimeout(() => resolve(null), 20000)),
-  ])
-  if (probe === null || probe.sentinel !== 'ok') {
+  if (options.signal?.aborted) throw cancelled()
+  const argv = options.argv ?? [options.executable, ...bootArgv(options.serverSource)]
+  const handle = subprocess.spawn({ argv, cwd: options.cwd, stdio: { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' }, graceMs: 3000 })
+  const session = new PwshSession(handle, options.label ?? 'pwsh', options.maxOutputBytes)
+  let timer
+  try {
+    const probe = await Promise.race([
+      abortable(session.run('$PSVersionTable.PSVersion.Major', 15000), options.signal),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('startup handshake timed out')), options.startupTimeoutMs ?? 20000) }),
+    ])
+    if (probe.sentinel !== 'ok' || session.dead) throw new Error('startup handshake failed: ' + [...probe.exceptions, ...probe.fatal].join('\n'))
+    session.version = probe.out.join('\n').trim()
+    session.startupWarnings.push(...probe.warn)
+    return session
+  } catch (error) {
+    await session.dispose('pwsh session startup failed')
     const tail = session.stderrTail.trim()
-    await session.dispose()
-    throw new Error('pwsh session failed to start' + (tail.length > 0 ? ': ' + tail : ''))
-  }
-  session.version = (probe.out ?? []).join('\n').trim()
-  return session
+    throw new Error('pwsh session failed to start: ' + (error?.message ?? error) + (tail ? '\n' + tail : ''))
+  } finally { clearTimeout(timer) }
 }

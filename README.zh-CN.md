@@ -112,12 +112,12 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 |---|---|---|
 | `script` | 是 | PowerShell 脚本正文。**原样**送达 —— 不要转义 `$`，不要包 `pwsh -c`，不要加外层引号。 |
 | `workdir` | 否 | 先 `Set-Location` 过去。会话有状态，后续调用会继承。路径无效则本次脚本不执行。 |
-| `timeoutMs` | 否 | 单次超时，默认 120000。 |
+| `timeoutMs` | 否 | 实际执行的超时，默认 120000；不含排队等待。必须为 1–2147478647 的整数毫秒。 |
 
-输出：stdout 原样，warning 前缀 `WARNING: `，verbose 前缀 `VERBOSE: `，抛出的异常带 `[script threw]`
-与最内层消息。错误（`Write-Error`、子进程的 stderr）排在 stdout **之后** —— 服务端用 `*>&1` 合并全部
-流并按类型打标，所以 **stdout 与 stderr 的逐行时序不保留**（内置工具是分开两栏的）。需要顺序时自己
-合并：`2>&1` 或 `*>&1`。
+输出使用 PowerShell 标准格式化（宽度 200），对象按表格或列表显示；需要结构化字段时显式 `ConvertTo-Json`。
+Warning、Verbose、Information、Debug 分别带类型前缀，错误和最内层异常排在普通输出之后。各流按类型分组，
+不保留跨流时序；需要合并时在脚本中使用 `2>&1` 或 `*>&1`。正文保持顶层执行，支持 `using`、`param`；
+`#requires` 会在正文前核验，暂不支持的 `-ShellId` / `-Assembly` 会明确拒绝。
 
 ## 配置
 
@@ -126,8 +126,8 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 | `pwshPath` | `pwsh` | 可执行文件；默认经 `PATH` 解析。 |
 | `timeoutMs` | `120000` | 单次调用默认超时。 |
 | `idleMs` | `1800000` | 空闲会话回收（30 分钟）。 |
-| `maxSessions` | `4` | 同时存活的会话上限（每个 agent 工作区一个）。 |
-| `maxOutputBytes` | `8388608` | 单次调用的输出收集上限（8MB）。截断会明确报出来，不静默。 |
+| `maxSessions` | `4` | 每个插件实例的会话上限，以 DSH session ID 隔离；全部忙时拒绝新会话并提示重试。 |
+| `maxOutputBytes` | `8388608` | 每次调用普通输出正文的 UTF-8 字节预算（含记录换行）；错误另留 65536 字节。协议与显示标签不计入，截断会明确提示。 |
 | `allowUnconfined` | `false` | `true` = 沙箱策略服务缺席时也起会话。 |
 
 `allowUnconfined` 是唯一一条「明知故犯」的开关。正常部署下 `ctx.sandboxPolicy` 一定在；缺席说明组合
@@ -142,8 +142,10 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 `WRITE_RESTRICTED` 受限令牌，而令牌是**进程级**的 —— 所以 confine 一次之后，该会话的每一次读 / 写都
 受同一个 workspace 边界约束，与内置 `pwsh` 工具等价。
 
-策略按**启动会话时的真实 session** 解析（`session` 必须传进 `sandboxPolicy.resolve`）：会话的
-`sandbox/mode` 优先，边界根取会话的 `header.cwd`。
+每次调用先按**当前真实 session** 重新解析策略（`session` 必须传进 `sandboxPolicy.resolve`），并核对
+有效策略、工作区和沙箱后端。任一项变化就销毁旧进程，再按新边界创建；切到只读时拒绝正文。
+因此权限或工作区切换也会清空常驻状态。工作目录服务出错时直接报错，不回退到旧目录。
+同一 ID 的创建与执行共用队列；只淘汰没有执行、排队或启动请求的空闲会话。
 
 一个值得记住的坑：早先传的是 ToolExecution（`agent` 挂在 `exec.agent` 上），`resolve` 拿不到
 session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`），边界于是跑到 profile 目录去了 ——
@@ -216,9 +218,12 @@ Windows 上打，那份文件到手时是 `0644` —— 探测发现它属于当
 | 输出顺序看着不对 | stdout 与 stderr 按类型合并，不按时间。自己用 `2>&1` 合。 |
 | `exit N` 的退出码拿不到 | runspace 语义 —— 用 `Write-Output` 或读 `$LASTEXITCODE`。 |
 | 调用结束后子进程还占着文件 | 会话持有 `Process` 对象。等 `idleMs`，或者用一次超时强制重建。 |
-| `Program 'node.exe' failed to run: 拒绝访问。` | `workspace-write` 下的正常现象：受限令牌建不了匿名管道，凡是「捕获子进程 stdio」的起法都失败，`& exe` 也在其中。改用 `Start-Process -RedirectStandardOutput/-RedirectStandardError <文件>`（能拿到输出，拿不到退出码）、`[Diagnostics.Process]::Start`（`UseShellExecute=$false`、不重定向，能拿退出码但子进程继承 stdout），或一个把 stdout / stderr / `%ERRORLEVEL%` 分别写进三个文件的 `.cmd` 包装器。工具也会把这段说明附在输出末尾。 |
+| `Program 'node.exe' failed to run: 拒绝访问。` | 当前 Windows 受限令牌无法创建部分子进程管道，`& exe` 可能失败。需要输出和退出码时，用 `[Diagnostics.Process]::Start` 执行 `cmd.exe /c "<exe> <参数> > out.txt 2> err.txt"` 且 `UseShellExecute=$false`；或 `Start-Process -NoNewWindow -PassThru -Wait -RedirectStandardOutput/-RedirectStandardError <文件>`（退出码可能为空）。不要新建控制台；直接继承的输出会送往 `NUL`。 |
 
 ## 已知边界
+
+九组问题及修复验收见[审计报告](docs/pwsh-run-audit.zh-CN.md)；宿主 HTTPS 问题单独记在
+[Schannel 兼容性记录](docs/dsh-windows-schannel.zh-CN.md)。
 
 完整清单（会话语义、已断开的子进程 std handle、UAC 差异、升级对会话的影响）见
 **[docs/runtime-notes.zh-CN.md](docs/runtime-notes.zh-CN.md)**。要点：
@@ -238,6 +243,8 @@ plugin/
   session-server.ps1  PowerShell 侧：runspace、流打标、哨兵
 test/
   support.mjs         定位 DSH 安装；Windows 路径转 /mnt 形式
+  protocoltest.mjs    分帧、UTF-8 预算、启动清理
+  lifecycletest.mjs   权限切换、会话池与取消
   itest.mjs           协议与会话本体
   plugintest.mjs      插件完整路径（mock 上下文）
   e2e-real-subprocess.mjs  真 DSH subprocess 运行时
@@ -257,17 +264,19 @@ FINDINGS.md          全部实测数据与设计理由
 
 ```bash
 cd <检出目录>
-PWSH_BIN='pwsh' node test/itest.mjs          # 17：协议与会话本体
+node test/protocoltest.mjs                  #  6：帧边界、字节预算、启动清理
+node test/lifecycletest.mjs                 # 16：权限切换、池、并发、取消、卸载
+PWSH_BIN='pwsh' node test/itest.mjs          # 30：协议与会话本体
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15：插件完整路径
 node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
-node test/sandboxtest.mjs                    #  7：真沙箱边界 + fail-closed
+node test/sandboxtest.mjs                    # 12：真沙箱边界、降权、切根、首次并发
 node test/bashtest.mjs                       # 31：custom-bash 围栏分诊、bash 后备、执行位自修复、SSH agent
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
 node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
 node test/metatest.mjs                       # 23：插件页元数据（不起子进程，哪儿都能跑）
 ```
 
-八份脚本合计 **123 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十份脚本合计 **163 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
 

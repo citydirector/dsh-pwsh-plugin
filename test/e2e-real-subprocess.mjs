@@ -55,7 +55,7 @@ r = await run("Write-Output ([string]::IsNullOrEmpty($global:e2e))");
 check("timeout-rebuilt", r.text === "True", JSON.stringify(r.text));
 
 // 子进程回收：脚本内起 cmd，超时后会话被 terminate，Job Object 应连带清掉子进程
-r = await run("$p = Start-Process cmd -ArgumentList '/c','timeout','120' -PassThru\nWrite-Output $p.Id\nStart-Sleep 20", { timeoutMs: 2000 });
+r = await run("$p = Start-Process cmd -NoNewWindow -ArgumentList '/c','timeout','120' -PassThru\nWrite-Output $p.Id\nStart-Sleep 20", { timeoutMs: 2000 });
 const pid = (r.text.match(/^(\d+)/m) ?? [])[1];
 await new Promise((res) => setTimeout(res, 1200));
 let alive = "no-pid";
@@ -69,4 +69,4 @@ await new Promise((res) => setTimeout(res, 600));
 console.log(results.join("\n"));
 const fails = results.filter((x) => x.startsWith("FAIL")).length;
 console.log("\nSUMMARY pass=" + (results.length - fails) + " fail=" + fails);
-process.exit(0);
+process.exit(fails > 0 ? 1 : 0);

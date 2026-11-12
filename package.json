@@ -51,7 +51,7 @@
     "@deepseek-ai/dsh": ">=0.2.0-rc.2 <0.3.0"
   },
   "scripts": {
-    "test": "node test/itest.mjs && node test/plugintest.mjs && node test/denialtest.mjs && node test/metatest.mjs",
-    "test:all": "node test/itest.mjs && node test/plugintest.mjs && node test/e2e-real-subprocess.mjs && node test/sandboxtest.mjs && node test/bashtest.mjs && node test/bash-e2e.mjs && node test/denialtest.mjs && node test/metatest.mjs"
+    "test": "node test/protocoltest.mjs && node test/lifecycletest.mjs && node test/itest.mjs && node test/plugintest.mjs && node test/denialtest.mjs && node test/metatest.mjs",
+    "test:all": "node test/protocoltest.mjs && node test/lifecycletest.mjs && node test/itest.mjs && node test/plugintest.mjs && node test/e2e-real-subprocess.mjs && node test/sandboxtest.mjs && node test/bashtest.mjs && node test/bash-e2e.mjs && node test/denialtest.mjs && node test/metatest.mjs"
   }
 }

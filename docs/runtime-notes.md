@@ -6,28 +6,32 @@ Implementation details and historical measurements follow. Behavior depends on t
 
 ## Known limits
 
-- **`read-only` mode is unsupported** (see above); use the built-in `pwsh` tool there.
+- **`read-only` mode is unsupported**; use the built-in `pwsh` tool there.
 - **Refuses to start when the sandbox policy service is absent**, unless `allowUnconfined: true`.
 - **A timeout kills the whole session** (and reaps its child process tree). State is lost; the next call
   rebuilds automatically.
 - **`exit N` exit codes are not observable** (runspace semantics).
-- **stdout / stderr interleaving is not preserved** — everything goes through `*>&1` and is tagged by type.
-- **`[Console]::Error.WriteLine` is swallowed** (the server points `Console.Error` at an in-memory stream so
-  the protocol cannot be polluted). A child process's stderr, `Write-Error` and `throw` all come back fine.
-- **Child std handles are detached from the protocol.** `Console::SetIn/SetOut` only changes the .NET layer, so
-  the server also rewrites the three Win32 slots: stdin goes to `NUL`, stdout and stderr go to a
-  `FILE_FLAG_DELETE_ON_CLOSE` temp file truncated before every call. A grandchild that writes to inherited
-  stdout can no longer inject a fake protocol line (measured: one `Write-Output '<<<BYE>>>'` from a child used
-  to kill the session), and one that reads inherited stdin gets EOF instead of the caller's request.
-  The replacement handles are created **inheritable** (`SECURITY_ATTRIBUTES.bInheritHandle`): a handle made with
-  a `NULL` security descriptor only exists in this process, so a child that trusts `STARTUPINFO.hStdInput`
-  receives a bare handle *number* that means nothing over there — `GetFileType` reports `UNKNOWN`, and once in
-  a few dozen launches that number is recycled by an unrelated object and the read returns its bytes.
-  stdout deliberately does **not** go to `NUL`: that is a character device, PowerShell then believes its output
-  is not redirected and the sandbox denial changes into a useless `StandardOutputEncoding` message.
-  If the temp directory is unwritable it falls back to `NUL` and says so once, in a warning on the first call.
-- **A session is serial**: concurrent calls queue up and run one at a time (no interleaved output, but no
-  parallel speedup either).
+- **stdout / stderr interleaving is not preserved** — streams are collected separately and grouped by type.
+- **Direct Console output is discarded.** `Console.Out` and `Console.Error` use null writers rather than
+  retained memory streams. On Windows, inheritable `NUL` handles replace stdin/stdout/stderr so a child
+  cannot read requests or inject protocol lines. PowerShell-captured native output, `Write-Error` and
+  `throw` still return; launches that directly inherit the detached handles lose their output.
+  Handle-detachment failure refuses startup. `NUL` can change native-launch denial wording, not permissions.
+- **A session is serial**: creation and execution share one queue per DSH ID. The execution timeout
+  excludes queue waiting. Cancelling a queued request affects only itself; active cancellation kills its process.
+- **Reuse rechecks boundaries**: changes to effective policy, workspace or sandbox backend rebuild the
+  process. A missing session ID is rejected instead of sharing a default process.
+- **Pool pressure and idle expiry never evict busy sessions.** A full busy pool refuses new sessions
+  with a retry message. Idle age starts after the last call completes.
+- **UTF-8 payload budgets are enforced on both sides.** Ordinary streams share `maxOutputBytes`; errors
+  retain a separate 64KiB budget, including record separators. Consumed records and undisplayed progress
+  records are drained immediately. Frames are size-limited; display prefixes are outside the payload budget.
+- **Top-level syntax is retained.** Workdir uses a separate API call and objects use
+  `Out-String -Stream -Width 200`. `#requires` checks version, PSEdition, modules and administrator identity
+  before the body; `-ShellId` / `-Assembly` are explicitly refused. Administrator group membership alone
+  does not prove the process is unconfined.
+- **Startup failure cleans up and returns the stderr tail.** Handshake warnings appear once on the first
+  user call. The gzip bootstrap must remain within the encoded Windows command-line budget or startup is refused.
 - **No WSL is required.** `pwsh_run` never touches WSL; only `wsl/custom-bash.mjs` does. Without a usable
   `bashPath`, applying that preset still succeeds (the executable is resolved lazily) and the `bash` tool
   fails per call with `command "<path>" is not an executable file` — a clear failure, not a silent

@@ -76,7 +76,7 @@ r = await run("Write-Output 'should-not-run'", { workdir: "D:\\nope\\nope" });
 check("workdir-invalid", !r.text.includes("should-not-run") && r.text.includes("nope"), JSON.stringify(r.text.slice(0, 100)));
 
 // 9. workdir 里带 $ 与空格不被 PowerShell 展开（psLiteral 单引号字面量的价值）
-const dollarDir = process.cwd() + "\\_dollar $dir";
+const dollarDir = process.cwd() + "\\_skadi_temp\\_dollar $dir";
 mkdirSync(dollarDir, { recursive: true });
 r = await run("Write-Output $PWD.Path", { workdir: dollarDir });
 check("workdir-dollar", r.text.trim() === dollarDir, JSON.stringify(r.text));
@@ -107,4 +107,4 @@ await new Promise((res) => setTimeout(res, 500));
 console.log(results.join("\n"));
 const fails = results.filter(x => x.startsWith("FAIL")).length;
 console.log("\nSUMMARY pass=" + (results.length - fails) + " fail=" + fails);
-process.exit(0);
+process.exit(fails > 0 ? 1 : 0);

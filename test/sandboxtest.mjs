@@ -1,15 +1,17 @@
 // 沙箱边界测试：真 LocalSandboxProvider + 真 confine，验证常驻会话与原生工具同边界
 import { spawn } from 'node:child_process'
 import { apply } from '../plugin/index.mjs'
-import { existsSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { importFromDsh, SKIP_HINT } from './support.mjs'
 
 const PWSH = process.env.PWSH_BIN ?? 'pwsh'
-const WS = process.cwd()
-// 工作区外的一个位置：围栏必须拦住它。
-const OUTSIDE = resolve(dirname(WS), '_skadi_sbx_outside.txt')
-const INSIDE = WS + '\\_skadi_sbx_inside.txt'
+// 越界探针仍留在仓库临时区，只改变子进程获准的根。
+const WS = resolve(process.cwd(), '_skadi_temp', 'sandbox', 'allowed-A')
+const ROOT_B = resolve(dirname(WS), 'allowed-B')
+mkdirSync(WS, { recursive: true }); mkdirSync(ROOT_B, { recursive: true })
+const OUTSIDE = resolve(ROOT_B, 'outside.txt')
+const INSIDE = resolve(WS, 'inside.txt')
 
 const subprocess = {
   async resolveExecutable(command) { return command === 'pwsh' ? PWSH : command },
@@ -154,6 +156,30 @@ WS_POLICY.mode = 'workspace-write'
   for (const d of disposed3.reverse()) if (typeof d === 'function') d()
 }
 
+// 同 ID 的降权及切根必须在真实受限令牌上生效。
+WS_POLICY.mode = 'read-only'
+let sameIdError = ''
+const afterDowngrade = resolve(WS, 'after-downgrade.txt')
+try { await run("Set-Content -LiteralPath '" + afterDowngrade.replace(/'/g, "''") + "' -Value unexpected") }
+catch (error) { sameIdError = String(error) }
+check('same-id-downgrade-refused', sameIdError.includes('read-only') && !existsSync(afterDowngrade), sameIdError)
+WS_POLICY.mode = 'workspace-write'
+WS_POLICY.workspaceRoot = ROOT_B
+r = await run("try { Set-Content -LiteralPath '" + INSIDE.replace(/'/g, "''") + "' -Value unexpected -EA Stop; 'WROTE' } catch { 'DENIED' }")
+check('changed-root-old-denied', r.text.trim() === 'DENIED', JSON.stringify(r.text))
+r = await run("Set-Content -LiteralPath '" + OUTSIDE.replace(/'/g, "''") + "' -Value allowed -EA Stop; 'WROTE'")
+check('changed-root-new-writable', r.text.trim() === 'WROTE' && existsSync(OUTSIDE), JSON.stringify(r.text))
+r = await run("#requires -Version 999.0\n'NEVER'")
+check('requires-checked-in-sandbox', r.text.includes('Script requires PowerShell 999.0') && !r.text.includes('NEVER'), JSON.stringify(r.text))
+WS_POLICY.workspaceRoot = WS
+const raceExec = { agent: { session: { id: 'sbx-race', header: { cwd: WS } } } }
+const concurrent = await Promise.all([
+  registration.execute({ script: '$global:raceValue = 1; [string]$PID' }, raceExec),
+  registration.execute({ script: '$global:raceValue++; [string]$PID' }, raceExec),
+])
+const count = await registration.execute({ script: '[string]$global:raceValue' }, raceExec)
+check('first-concurrent-same-process', concurrent[0].text === concurrent[1].text && count.text === '2', JSON.stringify({ pids: concurrent.map((x) => x.text), value: count.text }))
+
 for (const d of disposed.reverse()) if (typeof d === 'function') d()
 await new Promise((res) => setTimeout(res, 500))
 rmSync(INSIDE, { force: true })
@@ -162,4 +188,4 @@ rmSync(OUTSIDE, { force: true })
 console.log(results.join('\n'))
 const fails = results.filter((x) => x.startsWith('FAIL')).length
 console.log('\nSUMMARY pass=' + (results.length - fails) + ' fail=' + fails)
-process.exit(0)
+process.exit(fails > 0 ? 1 : 0)

@@ -123,6 +123,42 @@ const decoded = r.out.join("\n");
 check("child-utf8-output", r.sentinel === "ok" && decoded.includes("中文") && decoded.includes("café"),
   "sentinel=" + r.sentinel + " out=" + JSON.stringify(decoded));
 
+// 顶层语法与默认对象格式必须沿真实 PowerShell 管线验证。
+r = await s.run("using namespace System.Text\n[StringBuilder]::new().Append('TOPLEVEL').ToString()", 10000);
+check("using-top-level", r.sentinel === "ok" && r.out.includes("TOPLEVEL"), JSON.stringify(r));
+r = await s.run("param([string]$Name='PARAM-OK')\n$Name", 10000);
+check("param-top-level", r.sentinel === "ok" && r.out.includes("PARAM-OK"));
+r = await s.run("#requires -Version 999.0\n'NEVER'", 10000);
+check("requires-enforced", r.sentinel === "threw" && !r.out.includes("NEVER"), JSON.stringify(r.exceptions));
+r = await s.run("#requires -PSEdition Desktop\n'NEVER'", 10000);
+check("requires-edition-enforced", r.sentinel === "threw" && !r.out.includes("NEVER"));
+r = await s.run("#requires -Version 7.0\n#requires -PSEdition Core\n#requires -Modules Microsoft.PowerShell.Utility\n'REQUIREMENTS-OK'", 10000);
+check("requires-supported", r.sentinel === "ok" && r.out.includes("REQUIREMENTS-OK"), JSON.stringify(r.exceptions));
+r = await s.run("#requires -Modules PwshRun.Audit.NonexistentModule\n'NEVER'", 10000);
+check("requires-module-enforced", r.sentinel === "threw" && !r.out.includes("NEVER"));
+r = await s.run("[pscustomobject]@{Name='audit';Value=42}", 10000);
+check("object-formatting", r.sentinel === "ok" && r.out.join("\n").includes("Name") && r.out.join("\n").includes("42"));
+r = await s.run("Get-Process -Id $PID", 10000);
+check("process-formatting", r.sentinel === "ok" && r.out.join("\n").includes("ProcessName") && !r.out.join("\n").includes("System.Diagnostics.Process ("));
+r = await s.run("Write-Host 'HOST'; Write-Information 'INFO' -InformationAction Continue; Write-Debug 'DBG' -Debug", 10000);
+check("information-debug-streams", r.information.some((x) => x.includes("HOST")) && r.information.includes("INFO") && r.debug.includes("DBG") && r.out.length === 0);
+await s.run("$ErrorActionPreference='Stop'", 10000);
+r = await s.run("Write-Error 'PREFERENCE-KEPT'\n'NEVER'", 10000);
+check("preference-persisted", r.sentinel === "threw" && !r.out.includes("NEVER"));
+await s.run("$ErrorActionPreference='Continue'", 10000);
+const capped = await startSession(subprocess, { executable: PWSH, serverSource: SERVER, cwd: process.cwd(), label: "capped", maxOutputBytes: 8 });
+try {
+  r = await capped.run("'中文中文'\nWrite-Error 'ERROR-AFTER-CAP'", 10000);
+  check("server-utf8-cap-error-reserve", r.truncated && r.bytes <= 8 && r.out.join("").includes("中文") && !r.out.join("").includes("�") && r.err.some((x) => x.includes("ERROR-AFTER-CAP")), JSON.stringify(r));
+  r = await capped.run("1..10000 | ForEach-Object { '' }", 10000);
+  check("server-empty-record-cap", r.truncated && r.out.length <= 9, "records=" + r.out.length);
+} finally { await capped.dispose(); }
+r = await s.run("[Console]::Write('X' * 4000000); [GC]::Collect(); [GC]::GetTotalMemory($true)", 10000);
+const memBefore = Number(r.out.at(-1));
+r = await s.run("1..5 | ForEach-Object { [Console]::Write('X' * 4000000) }; [GC]::Collect(); [GC]::GetTotalMemory($true)", 10000);
+const memAfter = Number(r.out.at(-1));
+check("console-no-retained-buffer", memAfter - memBefore < 2000000, "retainedDelta=" + (memAfter - memBefore));
+
 // 10. 崩溃 → 会话死亡可见
 const before = s.dead;
 r = await s.run("[Environment]::Exit(9)", 10000).catch((e) => ({ rejected: String(e) }));
@@ -139,3 +175,4 @@ await s.dispose();
 console.log(results.join("\n"));
 const fails = results.filter(x => x.startsWith("FAIL")).length;
 console.log("\nSUMMARY pass=" + (results.length - fails) + " fail=" + fails);
+process.exitCode = fails > 0 ? 1 : 0

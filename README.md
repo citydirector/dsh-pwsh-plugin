@@ -127,13 +127,14 @@ The three files in `plugin/` (`index.mjs`, `session.mjs`, `session-server.ps1`) 
 |---|---|---|
 | `script` | yes | PowerShell script text. Reaches the server **verbatim** — do not escape `$`, do not wrap it in `pwsh -c`, do not add outer quotes. |
 | `workdir` | no | `Set-Location` first. The session is stateful, so later calls inherit it. An invalid path fails this call without running the script. |
-| `timeoutMs` | no | Per-call timeout, default 120000. |
+| `timeoutMs` | no | Execution timeout, excluding queue waiting; default 120000. Integer milliseconds from 1 to 2147478647. |
 
-Output: stdout as-is, warnings prefixed `WARNING: `, verbose prefixed `VERBOSE: `, a thrown exception
-carries `[script threw]` plus the innermost message. Errors (`Write-Error`, a child process's stderr)
-come **after** stdout — the server merges every stream through `*>&1` and tags lines by type, so
-**line-by-line interleaving of stdout and stderr is not preserved** (the built-in tool keeps two columns).
-When order matters, merge them yourself: `2>&1` or `*>&1`.
+Output uses PowerShell formatting at width 200; objects appear as tables or lists. Use `ConvertTo-Json`
+when structured fields are needed. Warning, Verbose, Information and Debug have separate labels; errors
+and innermost exceptions follow ordinary output. Streams are grouped by type, so cross-stream order is
+not preserved; merge them in the script with `2>&1` or `*>&1` when needed. The script stays at top level
+for `using` and `param`. `#requires` is checked before the body; unsupported `-ShellId` / `-Assembly`
+requirements are explicitly refused.
 
 ## Configuration
 
@@ -142,8 +143,8 @@ When order matters, merge them yourself: `2>&1` or `*>&1`.
 | `pwshPath` | `pwsh` | Executable; resolved through `PATH` by default. |
 | `timeoutMs` | `120000` | Default per-call timeout. |
 | `idleMs` | `1800000` | Recycle an idle session (30 minutes). |
-| `maxSessions` | `4` | How many sessions may live at once (one per agent workspace). |
-| `maxOutputBytes` | `8388608` | Output collection cap per call (8 MB). Truncation is reported honestly, never silently. |
+| `maxSessions` | `4` | Per-plugin process limit, isolated by DSH session ID. If all are busy, new sessions are refused with a retry message. |
+| `maxOutputBytes` | `8388608` | UTF-8 payload budget per call, including record separators; errors have a separate 65536-byte budget. Framing and display labels are excluded. Truncation is reported. |
 | `allowUnconfined` | `false` | `true` = start a session even when the sandbox policy service is missing. |
 
 `allowUnconfined` is the one deliberate escape hatch. In a normal deployment `ctx.sandboxPolicy` is always
@@ -160,9 +161,12 @@ returns. The Windows ACL sandbox uses a `WRITE_RESTRICTED` token, and a token is
 after that single confine, every later read and write in the session obeys the same workspace boundary as
 the built-in `pwsh` tool.
 
-Policy is resolved against the **real session at launch time** (`session` must be passed into
-`sandboxPolicy.resolve`): the session's `sandbox/mode` wins, and the boundary root comes from the
-session's `header.cwd`.
+Every call resolves policy against the **current real session** (`session` must reach
+`sandboxPolicy.resolve`) and checks the effective policy, workspace and sandbox backend. A change
+disposes the old process before any new script; read-only refuses the body. Permission or workspace
+changes therefore clear persistent state too. Working-directory service errors are surfaced instead
+of falling back to stale paths. Creation and execution share one queue per ID; only sessions with no
+executing, queued or starting requests can be evicted.
 
 A trap worth knowing: passing the ToolExecution instead (`agent` lives on `exec.agent`) means `resolve`
 never sees a session and **silently falls back to the deployment default** (mode + configured
@@ -246,9 +250,12 @@ your own machine — it derives every path from its own location and re-checks t
 | Output looks reordered | stdout and stderr are merged by type, not by time. Merge them yourself with `2>&1`. |
 | `exit N` code is not reported | Runspace semantics — use `Write-Output` or read `$LASTEXITCODE`. |
 | A child process keeps a file locked after the call | The session holds the `Process` object. Wait for `idleMs`, or force a rebuild with a timeout. |
-| `Program 'node.exe' failed to run: Access is denied.` (or `拒绝访问`) | Expected under `workspace-write`: the restricted token cannot create anonymous pipes, so **any** launch that captures a child's stdio fails — `& exe` included. Use `Start-Process -RedirectStandardOutput/-RedirectStandardError <file>` (captures output, no exit code), `[Diagnostics.Process]::Start` with `UseShellExecute=$false` and no redirection (exit code, child inherits stdout), or a `.cmd` wrapper that writes stdout, stderr and `%ERRORLEVEL%` to three files. The tool appends this same advice to the output. |
+| `Program 'node.exe' failed to run: Access is denied.` (or `拒绝访问`) | The current Windows restricted token cannot create some child pipes, so `& exe` can fail. For output and an exit code, use `[Diagnostics.Process]::Start` on `cmd.exe /c "<exe> <args> > out.txt 2> err.txt"` with `UseShellExecute=$false`; or `Start-Process -NoNewWindow -PassThru -Wait -RedirectStandardOutput/-RedirectStandardError <file>` (the exit code may be empty). Avoid a new console; directly inherited output goes to `NUL`. |
 
 ## Known limitations
+
+The [audit and local fix record](docs/pwsh-run-audit.zh-CN.md) covers the nine issue groups.
+The host TLS failure has a separate [Schannel investigation](docs/dsh-windows-schannel.zh-CN.md).
 
 The full list — session semantics, detached child std handles, UAC differences, and what an update does to a
 session — lives in **[docs/runtime-notes.md](docs/runtime-notes.md)**. The short version:
@@ -268,6 +275,8 @@ plugin/
   session-server.ps1  the PowerShell side: runspace, stream tagging, sentinels
 test/
   support.mjs         locates a DSH install; converts Windows paths to /mnt form
+  protocoltest.mjs    frame limits, UTF-8 budgets, startup cleanup
+  lifecycletest.mjs   policy changes, session pool, cancellation
   itest.mjs           protocol and session core
   plugintest.mjs      the whole plugin path against a mock context
   e2e-real-subprocess.mjs  real DSH subprocess runtime
@@ -287,17 +296,19 @@ FINDINGS.md          every measurement and the reasoning behind the design
 
 ```bash
 cd <checkout>
-PWSH_BIN='pwsh' node test/itest.mjs          # 17: protocol and session core
+node test/protocoltest.mjs                  #  6: frame limits, UTF-8 budgets, startup cleanup
+node test/lifecycletest.mjs                 # 16: policy, pool, concurrency, cancellation, unload
+PWSH_BIN='pwsh' node test/itest.mjs          # 30: protocol and session core
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15: full plugin path
 node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
-node test/sandboxtest.mjs                    #  7: real sandbox boundary + fail-closed
+node test/sandboxtest.mjs                    # 12: real sandbox, downgrade, root switch, first concurrency
 node test/bashtest.mjs                       # 31: custom-bash fence triage, bash fallback, exec-bit repair
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
 node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
 node test/metatest.mjs                       # 23: plugin-page metadata (no spawn, runs anywhere)
 ```
 
-Eight scripts, **123 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Ten scripts, **163 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 instead of failing when none is found.
