@@ -24,10 +24,12 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./client": "./client/index.js"
   },
   "files": [
     "plugin",
+    "client",
     "wsl",
     "docs",
     "locale",
@@ -42,6 +44,12 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   },
   "engines": {
@@ -51,7 +59,17 @@
     "@deepseek-ai/dsh": ">=0.2.0-rc.2 <0.3.0"
   },
   "scripts": {
-    "test": "node test/protocoltest.mjs && node test/lifecycletest.mjs && node test/itest.mjs && node test/plugintest.mjs && node test/denialtest.mjs && node test/metatest.mjs",
-    "test:all": "node test/protocoltest.mjs && node test/lifecycletest.mjs && node test/itest.mjs && node test/plugintest.mjs && node test/e2e-real-subprocess.mjs && node test/sandboxtest.mjs && node test/bashtest.mjs && node test/bash-e2e.mjs && node test/denialtest.mjs && node test/metatest.mjs"
+    "test": "node test/settingstest.mjs && node test/routingtest.mjs && node test/protocoltest.mjs && node test/lifecycletest.mjs && node test/itest.mjs && node test/plugintest.mjs && node test/denialtest.mjs && node test/metatest.mjs",
+    "test:all": "node test/settingstest.mjs && node test/routingtest.mjs && node test/protocoltest.mjs && node test/lifecycletest.mjs && node test/itest.mjs && node test/plugintest.mjs && node test/e2e-real-subprocess.mjs && node test/sandboxtest.mjs && node test/bashtest.mjs && node test/bash-e2e.mjs && node test/denialtest.mjs && node test/metatest.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.19.0"
+  },
+  "devDependencies": {
+    "clsx": "2.1.1",
+    "immer": "10.1.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zustand": "4.5.7"
   }
 }

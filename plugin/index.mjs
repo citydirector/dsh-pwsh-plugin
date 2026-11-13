@@ -29,6 +29,8 @@
  */
 
 import { readFileSync } from 'node:fs'
+export { Config } from './config.mjs'
+import { installNativePwshGuard } from './native-pwsh-guard.mjs'
 import { DEFAULT_MAX_OUTPUT_BYTES, MAX_TIMEOUT_MS, bootArgv, startSession, validateTimeout, abortable } from './session.mjs'
 
 /** 加载器诊断里显示的插件名。 */
@@ -144,6 +146,12 @@ export function apply(ctx, config) {
     const session = agent?.session
     return sandboxPolicy.resolve(session === undefined ? {} : { session })
   }
+
+  installNativePwshGuard(ctx, config?.enforcePwshRun, resolvePolicy)
+  // 页面复用 settings 服务的持久化与 revision 校验，不创建额外的配置文件。
+  ctx.inject?.(['settings'], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber), 'pwsh-run.settings-page')
+  })
 
   // 槽位在第一次 await 前登记；同 ID 的创建、边界切换与执行共用队列。
   const sessions = new Map()

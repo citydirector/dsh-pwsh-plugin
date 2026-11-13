@@ -101,7 +101,7 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
   合成后的配置树里就有两条；注册按名字查重，第二个 `pwsh_run` 在启动时是硬错误。`--dump-config` 一眼就能看出重复 ——
   切换后跑这一条。
 
-`plugin/` 下三个文件（`index.mjs`、`session.mjs`、`session-server.ps1`）必须放在一起：
+`plugin/` 下的 `index.mjs`、`config.mjs`、`native-pwsh-guard.mjs`、`session.mjs`、`session-server.ps1` 必须放在一起：
 `index.mjs` 在加载时读那个 `.ps1`，再以 `-EncodedCommand` 送给子进程。
 
 ## 工具接口
@@ -129,12 +129,42 @@ Warning、Verbose、Information、Debug 分别带类型前缀，错误和最内�
 | `maxSessions` | `4` | 每个插件实例的会话上限，以 DSH session ID 隔离；全部忙时拒绝新会话并提示重试。 |
 | `maxOutputBytes` | `8388608` | 每次调用普通输出正文的 UTF-8 字节预算（含记录换行）；错误另留 65536 字节。协议与显示标签不计入，截断会明确提示。 |
 | `allowUnconfined` | `false` | `true` = 沙箱策略服务缺席时也起会话。 |
+| `enforcePwshRun` | `false` | 开启后，在执行前拒绝普通原生 `pwsh` 调用，提示改用 `pwsh_run`。 |
 
 `allowUnconfined` 是唯一一条「明知故犯」的开关。正常部署下 `ctx.sandboxPolicy` 一定在；缺席说明组合
 不完整，这时插件**拒绝启动**，而不是悄悄跑一个不受约束的会话。
 
 热重载（`patchReload: live`）会重新 `apply`。工具注册与进程清理都挂在 `ctx.effect` 上，不会触发
 `tool "pwsh_run" is already registered`。
+
+### 强制使用 pwsh_run
+
+这是 profile 的公共插件配置：同一 profile 只需设置一次，覆盖其中不同 preset 和会话，
+不需要在每个 preset 中重复添加。插件已由 bundle 加载时，也不要重复插入 `pwsh-run` 条目。
+
+在设置侧栏打开 **pwsh 设置**，开启 **强制使用 pwsh_run**，再点 **保存**。插件列表的配置按钮也会打开同一张表单。编辑只产生草稿，离开页面会丢弃未保存的修改；**恢复配置默认值** 会移除当前 profile 的覆盖。
+
+保存通过 DSH 设置服务热更新路由开关，保留正在运行的 PowerShell 进程和会话状态。页面显示宿主确认的已保存值，校验配置修订冲突，并在只读部署下禁用修改。页面随宿主语言显示中文或英文。
+
+没有设置界面的宿主仍可在 profile 的 `cordis.patch.yml` 中覆盖已有插件条目：
+
+```yaml
+- id: pwsh-run
+  config:
+    enforcePwshRun: true
+```
+
+守卫会在命令执行前拒绝普通原生 `pwsh` 调用，并提示模型把 `command` 改为
+`pwsh_run` 的 `script`；`workdir` 和 `timeoutMs` 保持原值。原生命令不会先执行一次，
+也不会自动重放。原生工具和 PTC 中的 `tools.pwsh(...)` 都经过同一道检查。
+
+三个必要入口仍交给原生工具：只读会话（常驻会话不支持）、`run_in_background: true`
+的后台任务、以及带非空 `justification` 且申请权限确实高于当前模式的逐次提权请求。
+提权仍需宿主审批；同级权限标记不放行。每次按实际会话读取模式，切换权限后立即按新模式判断。
+
+配置关闭、热重载移除守卫或卸载插件后，原生 `pwsh` 恢复原有行为。
+开关默认关闭。热更新配置需要宿主提供 `ctx.tools.guard()`；缺少此 API 时会明确拒绝加载，避免设置开启后实际没有拦截。
+它只管理 DSH 的 `pwsh` 工具入口，不解析 `bash`、Node 或其他脚本内启动的 PowerShell。
 
 ## 沙箱
 
@@ -239,10 +269,15 @@ Windows 上打，那份文件到手时是 `0644` —— 探测发现它属于当
 ```
 plugin/
   index.mjs           工具注册、沙箱接线、超时
+  config.mjs          宿主配置 schema；路由开关支持热更新
+  native-pwsh-guard.mjs  可选的原生 pwsh 调用守卫
   session.mjs         会话对象：分帧、队列、base64、启动 argv
   session-server.ps1  PowerShell 侧：runspace、流打标、哨兵
+client/index.js      使用宿主原生控件的双语设置页
 test/
+  settingstest.mjs    配置持久化、冲突、即时路由与进程保留
   support.mjs         定位 DSH 安装；Windows 路径转 /mnt 形式
+  routingtest.mjs     原生与 PTC 路由、必要例外及卸载恢复
   protocoltest.mjs    分帧、UTF-8 预算、启动清理
   lifecycletest.mjs   权限切换、会话池与取消
   itest.mjs           协议与会话本体
@@ -264,6 +299,9 @@ FINDINGS.md          全部实测数据与设计理由
 
 ```bash
 cd <检出目录>
+pnpm install --ignore-scripts --config.auto-install-peers=false
+node test/settingstest.mjs                  # 19：原生设置表单、持久化、路由和进程保留
+node test/routingtest.mjs                   # 30：原生/PTC 路由、例外、关闭与卸载
 node test/protocoltest.mjs                  #  6：帧边界、字节预算、启动清理
 node test/lifecycletest.mjs                 # 16：权限切换、池、并发、取消、卸载
 PWSH_BIN='pwsh' node test/itest.mjs          # 30：协议与会话本体
@@ -276,9 +314,10 @@ node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起�
 node test/metatest.mjs                       # 23：插件页元数据（不起子进程，哪儿都能跑）
 ```
 
-十份脚本合计 **163 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十二份脚本合计 **212 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
-或从工作目录逐级向上），找不到时打一行 `SKIP` 提示而不是失败。
+或从工作目录逐级向上），找不到时打印 `SKIP` 提示。设置集成测试缺少宿主模块时会非零退出；
+发版验收必须跑完全部测试，不能有跳过。
 
 ### 发版
 

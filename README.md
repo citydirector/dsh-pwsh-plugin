@@ -116,7 +116,7 @@ Three constraints that cost real time to find:
   will hold two of them; registration is keyed by name, and a second `pwsh_run` is a hard error at boot.
   `--dump-config` shows the duplicate plainly — that is the check to run after switching.
 
-The three files in `plugin/` (`index.mjs`, `session.mjs`, `session-server.ps1`) must stay together —
+The files in `plugin/` (`index.mjs`, `config.mjs`, `native-pwsh-guard.mjs`, `session.mjs`, `session-server.ps1`) must stay together —
 `index.mjs` reads the `.ps1` at load time and ships it to the child as `-EncodedCommand`.
 
 ## The tools
@@ -146,6 +146,7 @@ requirements are explicitly refused.
 | `maxSessions` | `4` | Per-plugin process limit, isolated by DSH session ID. If all are busy, new sessions are refused with a retry message. |
 | `maxOutputBytes` | `8388608` | UTF-8 payload budget per call, including record separators; errors have a separate 65536-byte budget. Framing and display labels are excluded. Truncation is reported. |
 | `allowUnconfined` | `false` | `true` = start a session even when the sandbox policy service is missing. |
+| `enforcePwshRun` | `false` | Refuse ordinary native `pwsh` calls before execution and direct the model to `pwsh_run`. |
 
 `allowUnconfined` is the one deliberate escape hatch. In a normal deployment `ctx.sandboxPolicy` is always
 present; when it is missing the composition is incomplete, and the plugin **refuses to start** rather than
@@ -153,6 +154,39 @@ quietly running an unconstrained session.
 
 Hot reload (`patchReload: live`) re-runs `apply`. Tool registration and process cleanup both hang off
 `ctx.effect`, so it does not trip `tool "pwsh_run" is already registered`.
+
+### Enforce pwsh_run
+
+This is a profile-wide plugin setting. Configure it once for all presets and sessions in that profile;
+do not add it to each preset or insert a second `pwsh-run` entry when the bundle already provides one.
+
+Open **pwsh settings** in the settings sidebar, enable **Require pwsh_run**, then select **Save**. The plugin row's configuration button opens the same form. Changes stay as a draft until saved; leaving the page discards the draft. **Restore configuration default** removes the profile override.
+
+Saving updates only the routing switch through DSH's settings service and preserves running PowerShell processes and session state. The page reports the value accepted by the host, protects against conflicting writes, and disables editing on read-only deployments. It follows the host's Chinese or English language setting.
+
+For hosts without the settings UI, override the existing plugin entry in the profile's `cordis.patch.yml`:
+
+```yaml
+- id: pwsh-run
+  config:
+    enforcePwshRun: true
+```
+
+Ordinary native `pwsh` calls are refused before execution. The response tells the model to move
+`command` into `pwsh_run`'s `script` and preserve `workdir` and `timeoutMs`.
+The command is neither executed first nor replayed automatically. Both native dispatch and
+PTC's `tools.pwsh(...)` pass through this check.
+
+Three native entry points remain available: read-only sessions (unsupported by the persistent
+session), jobs with `run_in_background: true`, and per-call escalation requests with a nonempty
+`justification` and a requested mode strictly wider than the current one. Escalation still needs
+host approval; a same-mode flag does not qualify. The guard resolves the actual session policy
+on each call, so mode changes take effect on the next invocation.
+
+Disabling the option, removing the guard through hot reload, or uninstalling restores native
+`pwsh` behavior. The option defaults to off. Live configuration requires `ctx.tools.guard()`;
+a host without this API is rejected explicitly so enabling the setting cannot silently go unprotected.
+The guard covers the DSH `pwsh` tool entry, not PowerShell launched inside bash, Node or other scripts.
 
 ## Sandbox
 
@@ -271,10 +305,15 @@ session — lives in **[docs/runtime-notes.md](docs/runtime-notes.md)**. The sho
 ```
 plugin/
   index.mjs           tool registration, sandbox wiring, timeouts
+  config.mjs          native schema; the routing switch is volatile
+  native-pwsh-guard.mjs  optional native pwsh invocation guard
   session.mjs         the session object: framing, queue, base64 encode, boot argv
   session-server.ps1  the PowerShell side: runspace, stream tagging, sentinels
+client/index.js      localized settings page using DSH native controls
 test/
+  settingstest.mjs    persistence, conflicts, live routing and process preservation
   support.mjs         locates a DSH install; converts Windows paths to /mnt form
+  routingtest.mjs     native/PTC routing, exceptions, unload and reload
   protocoltest.mjs    frame limits, UTF-8 budgets, startup cleanup
   lifecycletest.mjs   policy changes, session pool, cancellation
   itest.mjs           protocol and session core
@@ -296,6 +335,9 @@ FINDINGS.md          every measurement and the reasoning behind the design
 
 ```bash
 cd <checkout>
+pnpm install --ignore-scripts --config.auto-install-peers=false
+node test/settingstest.mjs                  # 19: native settings form, persistence, routing and state
+node test/routingtest.mjs                   # 30: native/PTC routing, exceptions, disable and unload
 node test/protocoltest.mjs                  #  6: frame limits, UTF-8 budgets, startup cleanup
 node test/lifecycletest.mjs                 # 16: policy, pool, concurrency, cancellation, unload
 PWSH_BIN='pwsh' node test/itest.mjs          # 30: protocol and session core
@@ -308,10 +350,11 @@ node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn
 node test/metatest.mjs                       # 23: plugin-page metadata (no spawn, runs anywhere)
 ```
 
-Ten scripts, **163 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Twelve scripts, **212 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
-instead of failing when none is found.
+when none is found. The settings integration test exits unsuccessfully if its host modules are unavailable;
+a release validation must complete every suite without skips.
 
 ### Releasing
 
