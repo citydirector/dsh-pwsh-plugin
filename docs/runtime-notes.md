@@ -8,8 +8,7 @@ Implementation details and historical measurements follow. Behavior depends on t
 
 - **`read-only` mode is unsupported**; use the built-in `pwsh` tool there.
 - **Refuses to start when the sandbox policy service is absent**, unless `allowUnconfined: true`.
-- **A timeout kills the whole session** (and reaps its child process tree). State is lost; the next call
-  rebuilds automatically.
+- **A timeout in persistent mode kills that session** (and reaps its child process tree). State is lost; the next persistent call rebuilds automatically. `mode: "isolated"` instead starts and disposes a separate process per call; its timeout or cancellation preserves the persistent process and state. It uses the same sandbox and guards, counts toward the process limit, and refuses a full pool instead of evicting a persistent process.
 - **`exit N` exit codes are not observable** (runspace semantics).
 - **stdout / stderr interleaving is not preserved** — streams are collected separately and grouped by type.
 - **Direct Console output is discarded.** `Console.Out` and `Console.Error` use null writers rather than
@@ -17,10 +16,10 @@ Implementation details and historical measurements follow. Behavior depends on t
   cannot read requests or inject protocol lines. PowerShell-captured native output, `Write-Error` and
   `throw` still return; launches that directly inherit the detached handles lose their output.
   Handle-detachment failure refuses startup. `NUL` can change native-launch denial wording, not permissions.
-- **A session is serial**: creation and execution share one queue per DSH ID. The execution timeout
+- **Persistent calls are serial**: creation and execution share one queue per DSH ID. The execution timeout
   excludes queue waiting. Cancelling a queued request affects only itself; active cancellation kills its process.
 - **Reuse rechecks boundaries**: changes to effective policy, workspace or sandbox backend rebuild the
-  process. A missing session ID is rejected instead of sharing a default process.
+  process. A missing session ID is rejected instead of sharing a default process. Cordis creates new tracing proxies per lookup; comparisons unwrap only the service identity while service operations still use the tracing proxy.
 - **Pool pressure and idle expiry never evict busy sessions.** A full busy pool refuses new sessions
   with a retry message. Idle age starts after the last call completes.
 - **UTF-8 payload budgets are enforced on both sides.** Ordinary streams share `maxOutputBytes`; errors
@@ -59,3 +58,11 @@ Implementation details and historical measurements follow. Behavior depends on t
   Nothing asks whether a call is in flight. The host performs the update; this plugin does not get a say and
   does not gate it. The version is worth more than the session state, but it is not "nothing happened" — do
   not hold unrecoverable state in a session across an upgrade.
+
+## Diagnosing system queries
+
+Neither the routing guard nor the deletion guard disables `Get-Process`, `Get-NetTCPConnection` or `Get-CimInstance`. Success still depends on the host token, the system provider and access to the target resource. Empty output does not establish a sandbox denial.
+
+Use `-ErrorAction Stop` during diagnosis and retain the exception type, `FullyQualifiedErrorId` and original message. `-ErrorAction SilentlyContinue` hides non-terminating errors, and `try/catch` does not catch every non-terminating error by itself. Distinguish an empty result, a missing resource and an access denial. `Get-NetTCPConnection` reporting `No matching MSFT_NetTCPConnection objects found by CIM query` means that invocation found no matching object; it does not by itself establish a permission denial or an invalid `-State Listen` value. Compare the exact query and timing, then check the target port in unfiltered results.
+
+In one historical trace, a native `pwsh` script successfully listed processes before `Get-CimInstance Win32_Process` returned an access denial. A different script printed its own “Get-NetTCPConnection unavailable” message for an empty port query; that was not a tool rejection. All three queries succeeded in the current restricted workspace session. The exact permission conditions behind the historical CIM denial remain unresolved, so this does not guarantee CIM access on every host.

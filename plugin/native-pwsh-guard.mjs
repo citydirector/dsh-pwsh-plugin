@@ -3,7 +3,7 @@ const MODE_RANK = new Map([
 ])
 
 const DENIAL = 'Ordinary native pwsh calls are disabled by config.enforcePwshRun. '
-  + 'Use pwsh_run instead: pass the PowerShell command as script, and keep workdir and timeoutMs when supplied. '
+  + 'Use pwsh_run instead: pass the PowerShell command as script, and keep workdir and timeoutMs when supplied. For a fresh one-shot process use mode=isolated; it preserves any existing persistent state. Turn off enforcePwshRun in pwsh settings to permit ordinary native calls. '
   + 'The native command was not executed.'
 
 /** 守卫在宿主执行前策略之后检查；不用可被后续监听器改回 allow 的瀑布钩子。 */

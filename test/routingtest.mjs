@@ -95,6 +95,7 @@ if ([cordis, toolsModule, nativeModule, ptcModule].some((value) => value === und
     result = await call('pwsh', { command: 'must never run', workdir: process.cwd(), timeoutMs: 1234 })
     check('enabled-blocks-native-before-body', () => assert(result.isError && nativeCalls.length === before))
     check('denial-explains-argument-mapping', () => assert(/script/.test(text(result)) && /workdir/.test(text(result)) && /timeoutMs/.test(text(result))))
+    check('denial-offers-isolated-mode-and-settings-exit', () => assert(/mode=isolated/.test(text(result)) && /settings/.test(text(result))))
     result = await call('pwsh', {}, agents.full)
     check('full-access-still-routes-ordinary-calls', () => assert(result.isError && nativeCalls.length === before))
     result = await call('other_tool')

@@ -10,12 +10,13 @@ if(!cordis||!local||!sandboxModule)throw Error('Real DSH runtime is required for
 const [toolModule,nativeModule]=await Promise.all([importFromDsh('dsh-tools/lib/index.js'),importFromDsh('dsh-tool-executor-native/lib/index.js')])
 const boot=new cordis.Context();boot.provide('systemPrompt',{tools(){return()=>{}},getSectionOrder(){return 0}});new toolModule.ToolsService(boot)
 boot.plugin(sandboxModule.default??sandboxModule,{});await new Promise(r=>setTimeout(r,600))
-const subprocess=new local.LocalSubprocessRuntime(boot), sandbox=boot.get('sandbox')
+const subprocess=new local.LocalSubprocessRuntime(boot)
+let replacementSandbox
 const root=resolve('_skadi_temp/file-tools-test-'+Date.now());mkdirSync(root,{recursive:true})
-let mode='danger-full-access', approvalResult='allowed-once', approvalHook, approvals=0, pass=0
+let mode='danger-full-access', approvalResult='allowed-once', approvalHook, approvals=0, pass=0, currentCwd=root
 const effects=[],tools=new Map(), guards=[]
 const policy=()=>({mode,workspaceRoot:root})
-const ctx={subprocess,tools:{register(def){tools.set(def.name,def);const d=boot.tools.register(def);return()=>{d();tools.delete(def.name)}},guard(fn){guards.push(fn);const d=boot.tools.guard(fn);return()=>{d();guards.splice(guards.indexOf(fn),1)}}},effect(fn){const d=fn();effects.push(d);return d},get(name){if(name==='sandbox')return sandbox;if(name==='workingDirectory')return{async ensure(){return root}};if(name==='approval')return{async request(q){assert(q.reason.includes('fixed targets'));approvals++;approvalHook?.();return approvalResult}}}}
+const ctx={subprocess,tools:{register(def){tools.set(def.name,def);const d=boot.tools.register(def);return()=>{d();tools.delete(def.name)}},guard(fn){guards.push(fn);const d=boot.tools.guard(fn);return()=>{d();guards.splice(guards.indexOf(fn),1)}}},effect(fn){const d=fn();effects.push(d);return d},get(name){if(name==='sandbox')return replacementSandbox??boot.get('sandbox');if(name==='workingDirectory')return{async ensure(){return currentCwd}};if(name==='approval')return{async request(q){assert(q.reason.includes('fixed targets'));approvals++;approvalHook?.();return approvalResult}}}}
 installFileTools(ctx,{pwshPath:process.env.PWSH_BIN??'pwsh'},policy)
 const exec={agent:{ctx:boot,session:{id:'files-test',header:{cwd:root},append(){}}},callId:'test-removal'}
 const native=new nativeModule.NativeToolExecutor(boot)
@@ -26,15 +27,18 @@ const check=(name,fn)=>{fn();pass++;console.log('PASS '+name)}
 const plan=p=>call('file_remove',{action:'plan',paths:[p]})
 const remove=planId=>call('file_remove',{action:'execute',planId,sandbox_permissions:'danger-full-access',justification:'Recycle only the generated integration-test fixture after reviewing its plan.'})
 try {
+ check('real-service-proxies-change-between-lookups',()=>assert.notEqual(boot.get('sandbox'),boot.get('sandbox')))
  check('windows-mount-selects-real-recycle-bin',()=>assert.deepEqual(fileBackend(['/mnt/d/a'],'win32'),{backend:'windows',paths:['D:\\a']}))
  check('mixed-backends-refused',()=>assert.throws(()=>fileBackend(['/home/a','D:/a'],'win32')))
  check('workspace-and-home-ancestors-protected',()=>{assert.throws(()=>assertRemovable(['C:/Users'],'D:/project','C:/Users/u',true));assert.throws(()=>assertRemovable(['D:/project'],'D:/project','C:/Users/u',true))})
  const target=join(root,'one.txt');writeFileSync(target,'one')
  const dispatched=await dispatch('file_remove',{action:'plan',paths:[target]})
  check('real-native-pipeline-accepts-file-tool-schema',()=>assert(!dispatched.isError&&dispatched.content.some(x=>x.type==='text'&&x.text.includes('planId'))))
- let p=await plan(target)
+ let p=JSON.parse(dispatched.content.filter(x=>x.type==='text').map(x=>x.text).join('\n'))
  check('planning-does-not-delete',()=>assert(existsSync(target)&&p.entries.length===1&&p.targets[0]===target))
- const r=await remove(p.planId)
+ const nativeRemoved=await dispatch('file_remove',{action:'execute',planId:p.planId})
+ assert(!nativeRemoved.isError,JSON.stringify(nativeRemoved))
+ const r=JSON.parse(nativeRemoved.content.filter(x=>x.type==='text').map(x=>x.text).join('\n'))
  check('windows-recycle-bin-executed',()=>assert(!existsSync(target)&&r.method==='windows-recycle-bin'&&r.removed.length===1))
  const q=s=>"'"+s.replaceAll("'","''")+"'"
  const verification=spawnSync(process.env.PWSH_BIN??'pwsh',['-NoProfile','-NonInteractive','-Command',
@@ -43,10 +47,39 @@ try {
  check('recycle-sink-vetoes-permanent-delete',()=>assert(verified.refused<0&&verified.allowed===0))
  check('recycled-item-visible-in-windows-bin',()=>assert(verified.inRecycleBin===1))
  await assert.rejects(()=>remove(p.planId),/used|Unknown/);check('plans-are-single-use',()=>{})
+ // 每次 PTC 程序各自绑定 SDK，计划跨程序调用仍归属于同一真实会话。
+ const {PtcExecutor}=await importFromDsh('dsh-tool-executor-ptc/lib/index.js')
+ const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor
+ boot.provide('workingDirectory',{async ensure(){return root}})
+ boot.provide('ptcRuntime',{
+  language:'typescript',programFormat:'function-body',retainsState:false,
+  resolve(request){return {...request,timeoutMs:20000}},
+  async run(spec){try{return {logs:[],value:await new AsyncFunction('tools',spec.program)(spec.bindings[0].functions)}}catch(e){return {logs:[],error:{kind:'exception',message:String(e.message)}}}},
+  async release(){},
+ })
+ const ptc=new PtcExecutor(boot)
+ const ptcCall=async args=>{
+  const out=await ptc.execute({agent:exec.agent,signal:new AbortController().signal,calls:[{type:'tool-call',id:'file-ptc-'+(++seq),name:'run_code',arguments:JSON.stringify({code:'return (await tools.file_remove('+JSON.stringify(args)+')).text',description:'Exercise fixed removal plan across PTC programs'})}]})
+  const result=out.results[0].result;assert(!result.isError,JSON.stringify(result))
+  return JSON.parse(result.content.filter(x=>x.type==='text').map(x=>x.text).join('\n'))
+ }
+ const ptcRoot=join(root,'ptc-inventory');mkdirSync(ptcRoot)
+ for(let i=0;i<180;i++)writeFileSync(join(ptcRoot,'fixture-'+i+'.txt'),'fixture')
+ const ptcPlan=await ptcCall({action:'plan',paths:[ptcRoot]})
+ check('real-ptc-plan-lists-180-files',()=>assert.equal(ptcPlan.entries.length,181))
+ const ptcRemoved=await ptcCall({action:'execute',planId:ptcPlan.planId})
+ check('real-ptc-execute-survives-new-service-proxies',()=>assert(!existsSync(ptcRoot)&&ptcRemoved.removed.length===1))
+
  writeFileSync(target,'before');p=await plan(target);writeFileSync(target,'after larger')
  await assert.rejects(()=>remove(p.planId),/changed/);check('changed-file-retained',()=>assert(existsSync(target)))
  p=await plan(target)
  await assert.rejects(()=>call('file_remove',{action:'execute',planId:p.planId},{...exec,agent:{session:{id:'other',header:{cwd:root}}}}),/another session/);check('cross-session-plan-refused',()=>assert(existsSync(target)))
+ p=await plan(target);replacementSandbox={confine(){throw Error('must not run')}}
+ try{await assert.rejects(()=>remove(p.planId),/sandbox boundary/)}finally{replacementSandbox=undefined}
+ check('real-backend-replacement-invalidates-plan',()=>assert(existsSync(target)))
+ p=await plan(target);currentCwd=resolve(root,'different-cwd')
+ try{await assert.rejects(()=>remove(p.planId),/directory/)}finally{currentCwd=root}
+ check('working-directory-change-invalidates-plan',()=>assert(existsSync(target)))
  p=await plan(target);mode='read-only'
  await assert.rejects(()=>remove(p.planId),/boundary|read-only/);check('policy-change-invalidates-plan',()=>assert(existsSync(target)))
  mode='danger-full-access';p=await plan(target);const now=Date.now;Date.now=()=>now()+130000
@@ -63,6 +96,9 @@ try {
  p=await plan(clockTarget);approvalHook=()=>{mode='read-only'}
  try{await assert.rejects(()=>remove(p.planId),/boundary changed/)}finally{mode='workspace-write';approvalHook=undefined}
  check('approval-rechecks-live-sandbox',()=>assert(existsSync(clockTarget)))
+ p=await plan(clockTarget);approvalHook=()=>{replacementSandbox={confine(){throw Error('must not run')}}}
+ try{await assert.rejects(()=>remove(p.planId),/boundary changed/)}finally{replacementSandbox=undefined;approvalHook=undefined}
+ check('approval-rechecks-real-backend-identity',()=>assert(existsSync(clockTarget)))
  const cancelled=new AbortController();cancelled.abort()
  await assert.rejects(()=>call('file_remove',{action:'plan',paths:[clockTarget]},{...exec,signal:cancelled.signal}),/cancelled/)
  check('cancelled-request-never-inspects-or-deletes',()=>assert(existsSync(clockTarget)))
@@ -79,6 +115,9 @@ try {
  mode='workspace-write'
  const temp=await call('file_temp',{action:'create'})
  check('low-creates-user-readable-managed-directory',()=>assert(existsSync(temp.path)&&readFileSync(join(temp.path,'.file-temp-owner'),'utf8')===temp.tempId))
+ replacementSandbox={confine(){throw Error('must not run')}}
+ try{await assert.rejects(()=>call('file_temp',{action:'clean',tempId:temp.tempId}),/boundary/)}finally{replacementSandbox=undefined}
+ check('managed-temp-rejects-real-backend-replacement',()=>assert(existsSync(temp.path)))
  writeFileSync(join(temp.path,'from-normal-token.txt'),'normal')
  await call('file_temp',{action:'clean',tempId:temp.tempId})
  check('low-cleanup-preserves-normal-user-access',()=>assert(!existsSync(temp.path)))

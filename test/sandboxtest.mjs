@@ -45,7 +45,7 @@ const ctx = {
   tools: { register(def) { registration = def; return () => { registration = null } } },
   get(name) {
     if (name === 'workingDirectory') return { async ensure() { return WS } }
-    if (name === 'sandbox') return LocalSandbox
+    if (name === 'sandbox') return boot.get('sandbox')
     if (name === 'sandboxPolicy') return { resolve() { return WS_POLICY } }
     return undefined
   },
@@ -78,6 +78,16 @@ await run('$global:sbx = 7')
 r = await run('Write-Output $global:sbx')
 check('state-in-sandbox', r.text.trim() === '7', JSON.stringify(r.text.trim()))
 
+const persistentPid = (await run('[string]$PID')).text
+const isolatedInside = resolve(WS, 'isolated-inside.txt')
+r = await run("Set-Content -LiteralPath '" + isolatedInside.replace(/'/g, "''") + "' -Value ok -EA Stop; 'WROTE'", { mode: 'isolated' })
+check('isolated-inside-writable', r.text.trim() === 'WROTE' && existsSync(isolatedInside), JSON.stringify(r.text))
+r = await run("try { Set-Content -LiteralPath '" + OUTSIDE.replace(/'/g, "''") + "' -Value x -EA Stop; 'WROTE' } catch { 'DENIED' }", { mode: 'isolated' })
+check('isolated-outside-denied', r.text.trim() === 'DENIED' && !existsSync(OUTSIDE), JSON.stringify(r.text))
+r = await run('[string]$PID; [string]$global:sbx')
+check('real-proxies-and-isolated-calls-preserve-persistent-state', r.text === persistentPid + '\n7', JSON.stringify(r.text))
+rmSync(isolatedInside, { force: true })
+
 // 5. read-only 模式拒绝启动并给出明确指引
 WS_POLICY.mode = 'read-only'
 const exec2 = { agent: { session: { id: 'sbx-ro', header: { cwd: WS } } }, signal: undefined }
@@ -95,7 +105,7 @@ WS_POLICY.mode = 'workspace-write'
     tools: { register(def) { reg2 = def; return () => { reg2 = null } } },
     get(name) {
       if (name === 'workingDirectory') return { async ensure() { return WS } }
-      if (name === 'sandbox') return LocalSandbox
+      if (name === 'sandbox') return boot.get('sandbox')
       return undefined // 故意不给 sandboxPolicy
     },
     effect(fn) { const d = fn(); disposed2.push(d); return d },

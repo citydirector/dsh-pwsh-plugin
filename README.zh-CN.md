@@ -110,8 +110,11 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `script` | 是 | PowerShell 脚本正文。**原样**送达 —— 不要转义 `$`，不要包 `pwsh -c`，不要加外层引号。 |
-| `workdir` | 否 | 先 `Set-Location` 过去。会话有状态，后续调用会继承。路径无效则本次脚本不执行。 |
+| `mode` | 否 | `persistent`（默认）跨调用保留状态；`isolated` 每次新建独立进程，结束后销毁，保留已有常驻状态。 |
+| `workdir` | 否 | 先 `Set-Location` 过去。常驻调用会继承目录；独立调用只改自己的进程。路径无效则不执行脚本。 |
 | `timeoutMs` | 否 | 实际执行的超时，默认 120000；不含排队等待。必须为 1–2147478647 的整数毫秒。 |
+
+短命令可用 `{"script":"Get-Process", "mode":"isolated"}`。独立进程经过同样的沙箱与删除护栏，不继承常驻进程修改过的变量或环境；超时或取消只终止自己。它占用 `maxSessions` 的容量，容量不足时提示重试，不挤掉已有常驻进程；每次调用都有启动开销。
 
 输出使用 PowerShell 标准格式化（宽度 200），对象按表格或列表显示；需要结构化字段时显式 `ConvertTo-Json`。
 Warning、Verbose、Information、Debug 分别带类型前缀，错误和最内层异常排在普通输出之后。各流按类型分组，
@@ -155,7 +158,7 @@ Warning、Verbose、Information、Debug 分别带类型前缀，错误和最内�
 ```
 
 守卫会在命令执行前拒绝普通原生 `pwsh` 调用，并提示模型把 `command` 改为
-`pwsh_run` 的 `script`；`workdir` 和 `timeoutMs` 保持原值。原生命令不会先执行一次，
+`pwsh_run` 的 `script`；`workdir` 和 `timeoutMs` 保持原值。提示同时给出一次性 `mode: "isolated"` 与关闭路由开关的出口。原生命令不会先执行一次，
 也不会自动重放。原生工具和 PTC 中的 `tools.pwsh(...)` 都经过同一道检查。
 
 三个必要入口仍交给原生工具：只读会话（常驻会话不支持）、`run_in_background: true`
@@ -186,7 +189,8 @@ Windows 新临时目录保留父级沙箱能力与拒绝项，并在创建时补
 每次调用先按**当前真实 session** 重新解析策略（`session` 必须传进 `sandboxPolicy.resolve`），并核对
 有效策略、工作区和沙箱后端。任一项变化就销毁旧进程，再按新边界创建；切到只读时拒绝正文。
 因此权限或工作区切换也会清空常驻状态。工作目录服务出错时直接报错，不回退到旧目录。
-同一 ID 的创建与执行共用队列；只淘汰没有执行、排队或启动请求的空闲会话。
+Cordis 服务代理按底层服务身份比较，新代理不会误清状态或误拒删除计划；真正更换后端仍会使边界失效。
+常驻模式下，同一 ID 的创建与执行共用队列；只淘汰没有执行、排队或启动请求的空闲会话。
 
 一个值得记住的坑：早先传的是 ToolExecution（`agent` 挂在 `exec.agent` 上），`resolve` 拿不到
 session，**静默退回部署默认值**（mode + 配置里的 `workspaceRoot`），边界于是跑到 profile 目录去了 ——
@@ -317,22 +321,22 @@ FINDINGS.md          全部实测数据与设计理由
 cd <检出目录>
 pnpm install --ignore-scripts --config.auto-install-peers=false
 node test/settingstest.mjs                  # 24：原生设置、即时开关与进程保留
-node test/filetoolstest.mjs                  # 35：Windows 回收站、Low 目录、审批与取消
+node test/filetoolstest.mjs                  # 42：Windows 回收站、Low 目录、审批与取消
 node test/filetools-wsl.mjs                  #  7：WSL 临时清理、回收站与后端边界
-node test/routingtest.mjs                   # 30：原生/PTC 路由、例外、关闭与卸载
+node test/routingtest.mjs                   # 31：原生/PTC 路由、例外、关闭与卸载
 node test/protocoltest.mjs                  #  6：帧边界、字节预算、启动清理
-node test/lifecycletest.mjs                 # 16：权限切换、池、并发、取消、卸载
+node test/lifecycletest.mjs                 # 21：权限切换、池、并发、取消、卸载
 PWSH_BIN='pwsh' node test/itest.mjs          # 30：协议与会话本体
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15：插件完整路径
-node test/e2e-real-subprocess.mjs            #  8：真 DSH subprocess
-node test/sandboxtest.mjs                    # 12：真沙箱边界、降权、切根、首次并发
+node test/e2e-real-subprocess.mjs            # 12：真 DSH subprocess
+node test/sandboxtest.mjs                    # 15：真沙箱边界、降权、切根、首次并发
 node test/bashtest.mjs                       # 31：custom-bash 围栏分诊、bash 后备、执行位自修复、SSH agent
 node test/bash-e2e.mjs                       # 11：custom-bash 端到端
 node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起子进程，哪儿都能跑）
 node test/metatest.mjs                       # 23：插件页元数据（不起子进程，哪儿都能跑）
 ```
 
-十四份脚本合计 **259 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十四份脚本合计 **279 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打印 `SKIP` 提示。设置集成测试缺少宿主模块时会非零退出；
 发版验收必须跑完全部测试，不能有跳过。

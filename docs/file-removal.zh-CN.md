@@ -18,6 +18,8 @@
 
 计划只用一次，两分钟到期；最多 64 个根目标、512 个树条目、32 个待确认计划。目标、目录内容、当前会话、工作目录或沙箱策略发生变化，需要重新计划。审批等待不会延长有效期。链接、reparse point、设备/特殊文件、磁盘根、用户主目录及其祖先、当前 workspace 及其祖先、`.git` 路径均拒绝。只支持最后一个路径组件的通配，不求值 PowerShell 变量或任意脚本。
 
+0.2.20 曾错误地比较 `ctx.get("sandbox")` 的代理对象引用：同一服务在两次调用间也会拿到不同代理，导致计划存在却报 `Plan belongs to another session, directory or sandbox boundary.`。修复后按底层服务身份比较；native 调用和两次独立 PTC 程序均已验证。真正换会话、工作目录、权限或后端时仍拒绝，不放松归属校验。
+
 Windows 使用 `IFileOperation` 的 `FOFX_RECYCLEONDELETE`，执行前回调拒绝永久删除模式，错误停止操作；不会自动修 ACL 或改成永久删除。`/mnt/c`、`/mnt/d` 等路径在 Windows 宿主上转交真正的 Windows 回收站，不使用盘根的 `.Trash-1000`。Linux 路径使用 `gio trash`；不可回收时保留并报错，不回退到 `rm`。
 
 Agent 确认清单与宿主审批是两件事。`workspace-write` 下回收站通常在工作区外，执行还需显式提供：

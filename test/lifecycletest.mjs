@@ -73,7 +73,7 @@ function harness(config = {}, options = {}) {
     subprocess,
     get(name) {
       if (name === 'workingDirectory') return { ensure: () => h.ensure ? h.ensure() : h.cwd }
-      if (name === 'sandbox') return h.sandbox
+      if (name === 'sandbox') return h.lookupSandbox ? h.lookupSandbox() : h.sandbox
       if (name === 'sandboxPolicy' && h.policy) return { resolve() { h.resolutions++; return h.policy } }
     },
     tools: { register(value) { registration = value; return () => {} } },
@@ -84,6 +84,50 @@ function harness(config = {}, options = {}) {
 }
 
 const opts = { timeout: 10000 }
+test('different tracing proxies of one backend preserve state', opts, async (t) => {
+  const h = harness(); t.after(h.close)
+  h.lookupSandbox = () => new Proxy(h.sandbox, { get(target, key) { return key === Symbol.for('cordis.original') ? target : Reflect.get(target, key) } })
+  assert.notEqual(h.lookupSandbox(), h.lookupSandbox())
+  assert.equal((await h.run('increment')).text, '1')
+  assert.equal((await h.run('increment')).text, '2')
+  assert.equal(h.subprocess.handles.length, 1)
+})
+test('isolated calls start fresh and dispose without changing persistent state', opts, async (t) => {
+  const h = harness(); t.after(h.close)
+  assert.equal((await h.run('increment')).text, '1')
+  for (let i = 0; i < 2; i++) assert.equal((await h.run('increment', 'A', { mode: 'isolated' })).text, '1')
+  assert.equal((await h.run('increment')).text, '2')
+  assert.equal(h.subprocess.handles.length, 3)
+  assert.equal(h.subprocess.handles[0].terminated, 0)
+  assert.equal(h.subprocess.handles.slice(1).every(x => x.terminated === 1), true)
+})
+test('isolated calls never evict an idle persistent session at capacity', opts, async (t) => {
+  const h = harness({ maxSessions: 1 }); t.after(h.close)
+  await h.run('increment')
+  await assert.rejects(h.run('increment', 'A', { mode: 'isolated' }), /isolated calls do not evict persistent sessions/)
+  assert.equal((await h.run('increment')).text, '2')
+  assert.equal(h.subprocess.handles[0].terminated, 0)
+})
+test('cancelling an isolated call leaves a concurrent persistent call alive', opts, async (t) => {
+  const h = harness(); t.after(h.close)
+  const persistent = h.run('hold')
+  const first = await h.subprocess.request('hold')
+  const controller = new AbortController()
+  const isolated = h.run('hold', 'A', { mode: 'isolated' }, controller.signal)
+  while (h.subprocess.requests.filter(x => x.script === 'hold').length < 2) await sleep(1)
+  controller.abort()
+  assert.match((await isolated).text, /persistent state is unchanged/)
+  assert.equal(first.handle.terminated, 0)
+  first.handle.reply(first.id, ['O:ZG9uZQ=='])
+  assert.equal((await persistent).text, 'done')
+})
+test('isolated requests still reject read-only policy and invalid modes', opts, async (t) => {
+  const h = harness(); t.after(h.close)
+  h.policy.mode = 'read-only'
+  await assert.rejects(h.run('never', 'A', { mode: 'isolated' }), /read-only/)
+  await assert.rejects(h.run('never', 'A', { mode: 'typo' }), /mode must/)
+  assert.equal(h.subprocess.handles.length, 0)
+})
 test('same ID rechecks read-only and removes the old process', opts, async (t) => {
   const h = harness(); t.after(h.close)
   await h.run('first')

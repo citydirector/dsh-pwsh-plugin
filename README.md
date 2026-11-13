@@ -125,8 +125,11 @@ Keep the entire `plugin/` directory together. The entry module loads the session
 | Argument | Required | Meaning |
 |---|---|---|
 | `script` | yes | PowerShell script text. Reaches the server **verbatim** — do not escape `$`, do not wrap it in `pwsh -c`, do not add outer quotes. |
-| `workdir` | no | `Set-Location` first. The session is stateful, so later calls inherit it. An invalid path fails this call without running the script. |
+| `mode` | no | `persistent` (default) retains state between calls. `isolated` starts a fresh process for this call and disposes it afterward, preserving existing persistent state. |
+| `workdir` | no | `Set-Location` first. Persistent calls inherit this directory later; an isolated call changes only its own process. An invalid path refuses the script. |
 | `timeoutMs` | no | Execution timeout, excluding queue waiting; default 120000. Integer milliseconds from 1 to 2147478647. |
+
+Use `{"script":"Get-Process", "mode":"isolated"}` for a short stateless command. It uses the same sandbox and deletion guards, starts without the persistent process's variables or environment changes, and cannot terminate that process on timeout or cancellation. Isolated calls count toward `maxSessions`; when capacity is exhausted they refuse with a retry message rather than evicting a persistent process. Each call pays startup cost.
 
 Output uses PowerShell formatting at width 200; objects appear as tables or lists. Use `ConvertTo-Json`
 when structured fields are needed. Warning, Verbose, Information and Debug have separate labels; errors
@@ -174,6 +177,7 @@ For hosts without the settings UI, override the existing plugin entry in the pro
 
 Ordinary native `pwsh` calls are refused before execution. The response tells the model to move
 `command` into `pwsh_run`'s `script` and preserve `workdir` and `timeoutMs`.
+It also points to `mode: "isolated"` for one-shot calls and the settings switch for restoring ordinary native calls.
 The command is neither executed first nor replayed automatically. Both native dispatch and
 PTC's `tools.pwsh(...)` pass through this check.
 
@@ -210,7 +214,7 @@ Every call resolves policy against the **current real session** (`session` must 
 `sandboxPolicy.resolve`) and checks the effective policy, workspace and sandbox backend. A change
 disposes the old process before any new script; read-only refuses the body. Permission or workspace
 changes therefore clear persistent state too. Working-directory service errors are surfaced instead
-of falling back to stale paths. Creation and execution share one queue per ID; only sessions with no
+of falling back to stale paths. Cordis tracing proxies are compared through their underlying service identity, so a fresh proxy does not invalidate state or deletion plans; an actual backend replacement still does. Persistent creation and execution share one queue per ID; only sessions with no
 executing, queued or starting requests can be evicted.
 
 A trap worth knowing: passing the ToolExecution instead (`agent` lives on `exec.agent`) means `resolve`
@@ -353,22 +357,22 @@ FINDINGS.md          every measurement and the reasoning behind the design
 cd <checkout>
 pnpm install --ignore-scripts --config.auto-install-peers=false
 node test/settingstest.mjs                  # 24: native settings, live switches and preserved state
-node test/filetoolstest.mjs                  # 35: Windows recycling, Low directories, approval and cancellation
+node test/filetoolstest.mjs                  # 42: Windows recycling, Low directories, approval and cancellation
 node test/filetools-wsl.mjs                  #  7: WSL scratch cleanup, trash and backend boundaries
-node test/routingtest.mjs                   # 30: native/PTC routing, exceptions, disable and unload
+node test/routingtest.mjs                   # 31: native/PTC routing, exceptions, disable and unload
 node test/protocoltest.mjs                  #  6: frame limits, UTF-8 budgets, startup cleanup
-node test/lifecycletest.mjs                 # 16: policy, pool, concurrency, cancellation, unload
+node test/lifecycletest.mjs                 # 21: policy, pool, concurrency, cancellation, unload
 PWSH_BIN='pwsh' node test/itest.mjs          # 30: protocol and session core
 PWSH_BIN='pwsh' node test/plugintest.mjs     # 15: full plugin path
-node test/e2e-real-subprocess.mjs            #  8: real DSH subprocess
-node test/sandboxtest.mjs                    # 12: real sandbox, downgrade, root switch, first concurrency
+node test/e2e-real-subprocess.mjs            # 12: real DSH subprocess
+node test/sandboxtest.mjs                    # 15: real sandbox, downgrade, root switch, first concurrency
 node test/bashtest.mjs                       # 31: custom-bash fence triage, bash fallback, exec-bit repair
 node test/bash-e2e.mjs                       # 11: custom-bash end to end
 node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn, runs anywhere)
 node test/metatest.mjs                       # 23: plugin-page metadata (no spawn, runs anywhere)
 ```
 
-Fourteen scripts, **259 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Fourteen scripts, **279 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 when none is found. The settings integration test exits unsuccessfully if its host modules are unavailable;

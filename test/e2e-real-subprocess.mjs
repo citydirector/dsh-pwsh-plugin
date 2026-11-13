@@ -42,6 +42,17 @@ await run("$global:e2e = 10");
 r = await run("$global:e2e += 5\nWrite-Output $global:e2e");
 check("persist", r.text === "15", JSON.stringify(r.text));
 
+const persistentPid = (await run('[string]$PID')).text;
+const isolatedFirst = await run("$global:e2e = 999; $env:PWSH_ISOLATED_FIXTURE = 'isolated'; [string]$PID", { mode: 'isolated' });
+const isolatedSecond = await run("[string]$PID; [string]::IsNullOrEmpty($global:e2e); [string]::IsNullOrEmpty($env:PWSH_ISOLATED_FIXTURE); 'the session was terminated and is rebuilt on the next call'", { mode: 'isolated' });
+const isolatedLines = isolatedSecond.text.split(/\r?\n/);
+check('isolated-process-is-fresh', isolatedFirst.text !== persistentPid && isolatedLines[0] !== persistentPid && isolatedLines[0] !== isolatedFirst.text && isolatedLines.slice(1, 3).join('|') === 'True|True', JSON.stringify(isolatedSecond.text));
+check('isolated-output-preserves-user-text', isolatedLines[3] === 'the session was terminated and is rebuilt on the next call', JSON.stringify(isolatedSecond.text));
+const isolatedTimeout = await run('Start-Sleep -Seconds 3', { mode: 'isolated', timeoutMs: 200 });
+check('isolated-timeout-is-explicit', isolatedTimeout.text.includes('timed out') && isolatedTimeout.text.includes('persistent state is unchanged'), JSON.stringify(isolatedTimeout.text));
+const afterIsolated = await run('[string]$PID; [string]$global:e2e; [string]::IsNullOrEmpty($env:PWSH_ISOLATED_FIXTURE)');
+check('isolated-timeout-preserves-persistent-pid-and-state', afterIsolated.text === persistentPid + '\n15\nTrue', JSON.stringify(afterIsolated.text));
+
 r = await run("Write-Output $PWD.Path");
 check("cwd", r.text.trim() === process.cwd(), JSON.stringify(r.text));
 

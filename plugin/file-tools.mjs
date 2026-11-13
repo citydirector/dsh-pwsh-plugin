@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
 import path from 'node:path'
+import { serviceIdentity } from './service-identity.mjs'
 import { apply as applyBash } from '../wsl/custom-bash.mjs'
 
 const recycleSource = readFileSync(new URL('./file-recycle.cs', import.meta.url), 'utf8')
@@ -48,7 +49,8 @@ export function installFileTools(ctx, config, resolvePolicy) {
   if(typeof cwd!=='string'||!cwd) throw Error('File tools require a working directory.')
   policy=resolvePolicy(exec.agent)
   if(stopped||exec?.signal?.aborted||!policy) throw Error('File operation cancelled or sandbox policy disappeared.')
-  return {policy,cwd,session:session.id,key:stable([session.id,cwd,policy]),sandbox:ctx.get('sandbox')}
+  const sandbox=ctx.get('sandbox')
+  return {policy,cwd,session:session.id,key:stable([session.id,cwd,policy]),sandbox,backendIdentity:serviceIdentity(sandbox)}
  }
  const run=async(q, c, exec, policy=c.policy)=>{
   const signal=AbortSignal.any([shutdown.signal,AbortSignal.timeout(30000),...(exec?.signal?[exec.signal]:[])])
@@ -94,7 +96,7 @@ export function installFileTools(ctx, config, resolvePolicy) {
   const decision=await approval.request({agent:exec.agent,toolName:'file_remove',callId:exec.callId??exec.id,reason:'escalate sandbox to danger-full-access: recycle these fixed targets only: '+JSON.stringify(targets)+'. '+args.justification,displayReason:'将已确认的固定清单送入回收站（回收站位于工作区外）：'+targets.join(', '),signal:exec.signal})
   if(decision!=='allowed-once') throw Error('Host approval '+decision+'; deletion remains denied. Do not work around this decision.')
   const current=await context(exec)
-  if(current.key!==c.key||current.sandbox!==c.sandbox) throw Error('Sandbox boundary changed during approval; create a new plan.')
+  if(current.key!==c.key||current.backendIdentity!==c.backendIdentity) throw Error('Sandbox boundary changed during approval; create a new plan.')
   return {...c.policy,mode:'danger-full-access'}
  }
  const register=(name,description,properties,required,execute)=>ctx.effect(()=>ctx.tools.register({name,description,parameters:{type:'object',properties,required,additionalProperties:false},output,execute}),'pwsh-run.'+name)
@@ -115,13 +117,13 @@ export function installFileTools(ctx, config, resolvePolicy) {
    for(const [id,p] of plans) if(p.expires<=Date.now()) plans.delete(id)
    if(plans.size>=32) throw Error('Too many pending removal plans; wait for one to expire.')
    const planId=randomUUID(), expires=Date.now()+TTL
-   plans.set(planId,{...result,backend,cwd,key:c.key,sandbox:c.sandbox,expires})
+   plans.set(planId,{...result,backend,cwd,key:c.key,backendIdentity:c.backendIdentity,expires})
    return response({action:'plan',planId,expiresAt:new Date(expires).toISOString(),method:backend==='windows'?'windows-recycle-bin':'linux-trash',targets:result.paths,entries:result.entries,requiresHostApproval:c.policy.mode!=='danger-full-access',next:'Review every target, then call file_remove action=execute with this planId. This is an Agent confirmation, not a Host approval.'})
   }
   if(args.action!=='execute'||typeof args.planId!=='string') throw Error('Expected action=plan or action=execute with planId.')
   const plan=plans.get(args.planId); plans.delete(args.planId)
   if(!plan||plan.expires<=Date.now()) throw Error('Unknown, expired or already-used plan; create a new plan.')
-  if(plan.key!==c.key||plan.sandbox!==c.sandbox) throw Error('Plan belongs to another session, directory or sandbox boundary.')
+  if(plan.key!==c.key||plan.backendIdentity!==c.backendIdentity) throw Error('Plan belongs to another session, directory or sandbox boundary.')
   const policy=await approve(args,c,exec,plan.paths)
   if(plan.expires<=Date.now()) throw Error('Plan expired while waiting for approval; create a new plan.')
   const result=await run({op:'recycle',backend:plan.backend,paths:plan.paths,cwd:plan.cwd,digest:plan.digest},c,exec,policy)
@@ -137,11 +139,11 @@ export function installFileTools(ctx, config, resolvePolicy) {
    const parent=workerCwd(backend,c.policy.workspaceRoot??c.cwd), cwd=workerCwd(backend,c.cwd), id=randomUUID()
    if(backend==='wsl'&&/^\/mnt\/[a-z](\/|$)/i.test(parent)) throw Error('This workspace is on a Windows drive. Use the Windows temporary backend for its Recycle Bin and ACL semantics.')
    const result=await run({op:'create',backend,parent,cwd,id},c,exec)
-   temporary.set(id,{...result,backend,cwd,key:c.key,sandbox:c.sandbox})
+   temporary.set(id,{...result,backend,cwd,key:c.key,backendIdentity:c.backendIdentity})
    return response({tempId:id,path:result.path,cleanup:'Call file_temp action=clean with this tempId. Only this new directory is authorized for permanent temporary cleanup.'})
   }
   const t=temporary.get(args.tempId)
-  if(args.action!=='clean'||!t||t.key!==c.key||t.sandbox!==c.sandbox) throw Error('Unknown temporary directory or changed session/sandbox boundary.')
+  if(args.action!=='clean'||!t||t.key!==c.key||t.backendIdentity!==c.backendIdentity) throw Error('Unknown temporary directory or changed session/sandbox boundary.')
   const result=await run({op:'clean',backend:t.backend,cwd:t.cwd,paths:[t.path],id:args.tempId,identity:t.id},c,exec)
   temporary.delete(args.tempId)
   return response(result)

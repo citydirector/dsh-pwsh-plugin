@@ -29,6 +29,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { serviceIdentity } from './service-identity.mjs'
 export { Config } from './config.mjs'
 import { installNativePwshGuard } from './native-pwsh-guard.mjs'
 import { installDeletionGuard } from './deletion-guard.mjs'
@@ -52,11 +53,16 @@ const parameters = {
   properties: {
     script: {
       type: 'string',
-      description: 'The PowerShell script body to run. Sent verbatim to a persistent pwsh session — do not escape $, do not wrap it in pwsh -c.',
+      description: 'The PowerShell script body to run. Sent verbatim to pwsh — do not escape $, do not wrap it in pwsh -c.',
+    },
+    mode: {
+      type: 'string',
+      enum: ['persistent', 'isolated'],
+      description: 'Defaults to persistent. isolated starts a fresh confined process for this call and always disposes it afterward; it neither reads nor changes an existing persistent session.',
     },
     workdir: {
       type: 'string',
-      description: 'Optional Windows working directory to Set-Location into before running (e.g. D:\\proj). It persists for later calls in the same session; an invalid path fails the call before the script runs.',
+      description: 'Optional Windows working directory to Set-Location into before running (e.g. D:\\proj). In persistent mode it persists for later calls; isolated mode changes only its own process. An invalid path fails the call before the script runs.',
     },
     timeoutMs: {
       type: 'integer',
@@ -180,7 +186,8 @@ export function apply(ctx, config) {
     if (stopped) throw new Error('pwsh_run plugin was stopped')
     const sandbox = ctx.get('sandbox')
     const identity = fingerprint({ policy, cwd })
-    if (slot.session && (slot.identity !== identity || slot.sandbox !== sandbox || slot.session.dead)) {
+    const backendIdentity = serviceIdentity(sandbox)
+    if (slot.session && (slot.identity !== identity || slot.backendIdentity !== backendIdentity || slot.session.dead)) {
       await evict(slot, slot.session, 'pwsh session boundary changed')
     }
     if (policy === null && !allowUnconfined) {
@@ -198,9 +205,11 @@ export function apply(ctx, config) {
     const live = [...sessions.values()].filter((item) => item.session || item.starting)
     let retiring
     if (live.length >= maxSessions) {
-      const victim = live.filter((item) => item !== slot && item.users === 0 && !item.starting)
+      const victim = live.filter((item) => !slot.isolated && item !== slot && item.users === 0 && !item.starting)
         .sort((a, b) => a.session.lastUsed - b.session.lastUsed)[0]
-      if (!victim) throw new Error('pwsh_run: all ' + maxSessions + ' sessions are busy; retry when a call finishes')
+      if (!victim) throw new Error(slot.isolated
+        ? 'pwsh_run: the process pool is full (' + maxSessions + '); isolated calls do not evict persistent sessions. Retry when capacity is available.'
+        : 'pwsh_run: all ' + maxSessions + ' sessions are busy; retry when a call finishes')
       retiring = evict(victim, victim.session, 'pwsh session evicted while idle')
       if (sessions.get(victim.key) === victim) sessions.delete(victim.key)
     }
@@ -225,14 +234,14 @@ export function apply(ctx, config) {
         catch (error) { throw new Error(describeConfineFailure(error, policy.workspaceRoot)) }
       }
       const session = await startSession(ctx.subprocess, { executable, argv, cwd: workdir ?? cwd,
-        serverSource: SERVER_SOURCE, label: slot.key, maxOutputBytes, signal: startupSignal })
+        serverSource: SERVER_SOURCE, label: slot.label, maxOutputBytes, signal: startupSignal })
       if (stopped || startupSignal.aborted) {
         await session.dispose('pwsh session startup cancelled')
         throw new Error('pwsh_run session startup cancelled')
       }
       slot.session = session
       slot.identity = identity
-      slot.sandbox = sandbox
+      slot.backendIdentity = backendIdentity
       return session
     } finally { slot.starting = false; slot.startup = null }
   }
@@ -261,6 +270,9 @@ export function apply(ctx, config) {
 
   const runScript = async (args, exec, slot) => {
     const requested = args.timeoutMs ?? defaultTimeoutMs
+    const terminated = slot.isolated
+      ? 'the isolated process was terminated; persistent state is unchanged'
+      : 'the session was terminated and is rebuilt on the next call'
     const workdir = typeof args.workdir === 'string' && args.workdir.length > 0 ? args.workdir : undefined
     // 工作目录用 API 设置，避免在正文前拼语句破坏 using / param / #requires。
     let session
@@ -274,16 +286,18 @@ export function apply(ctx, config) {
     catch (error) {
       await evict(slot, session, 'pwsh session execution failed')
       return { text: exec?.signal?.aborted
-        ? '[cancelled; the session was terminated and is rebuilt on the next call]'
-        : '[' + String(error) + '; a new session starts on the next call]' }
+        ? '[cancelled; ' + terminated + ']'
+        : '[' + String(error) + '; ' + (slot.isolated
+          ? 'the isolated process was discarded; persistent state is unchanged'
+          : 'a new session starts on the next call') + ']' }
     }
     const notes = []
     if (response.truncated) notes.push('[output truncated at ' + maxOutputBytes + ' output bytes plus a separate 65536-byte error budget; redirect to a file if you need it all]')
     if (response.cancelled || response.noResponse || response.timedOut || session.dead) {
       await evict(slot, session)
-      if (response.cancelled) notes.push('[cancelled; the session was terminated and is rebuilt on the next call]')
-      else if (response.timedOut) notes.push('[timed out after ' + requested + 'ms; partial output above; the session was terminated and is rebuilt on the next call]')
-      else notes.push('[no response from the pwsh session within ' + requested + 'ms; the session was terminated and is rebuilt on the next call]')
+      if (response.cancelled) notes.push('[cancelled; ' + terminated + ']')
+      else if (response.timedOut) notes.push('[timed out after ' + requested + 'ms; partial output above; ' + terminated + ']')
+      else notes.push('[no response from the pwsh session within ' + requested + 'ms; ' + terminated + ']')
     }
     const body = [...response.out,
       ...response.warn.map((line) => 'WARNING: ' + line),
@@ -300,12 +314,15 @@ export function apply(ctx, config) {
   const enqueue = (args, exec) => {
     validateTimeout(args?.timeoutMs ?? defaultTimeoutMs)
     if (typeof args?.script !== 'string') throw new Error('pwsh_run script must be a string')
+    if (args.mode !== undefined && args.mode !== 'persistent' && args.mode !== 'isolated') throw new Error('pwsh_run mode must be persistent or isolated')
     if (exec?.signal?.aborted) throw new Error('pwsh_run cancelled before execution')
-    const key = exec?.agent?.session?.id
-    if (typeof key !== 'string' || !key) throw new Error('pwsh_run requires a session ID to isolate persistent state')
+    const sessionId = exec?.agent?.session?.id
+    if (typeof sessionId !== 'string' || !sessionId) throw new Error('pwsh_run requires a session ID to isolate persistent state')
+    const isolated = args.mode === 'isolated'
+    const key = isolated ? Symbol(sessionId) : sessionId
     let slot = sessions.get(key)
     if (!slot) {
-      slot = { key, tail: Promise.resolve(), session: null, users: 0, starting: false }
+      slot = { key, label: isolated ? sessionId + ':isolated' : sessionId, isolated, tail: Promise.resolve(), session: null, users: 0, starting: false }
       sessions.set(key, slot)
     }
     slot.users++
@@ -315,7 +332,8 @@ export function apply(ctx, config) {
       if (exec?.signal?.aborted) throw new Error('pwsh_run cancelled before execution')
       if (stopped) throw new Error('pwsh_run plugin was stopped')
       return runScript(args, exec, slot)
-    }).finally(() => {
+    }).finally(async () => {
+      if (slot.isolated) await evict(slot, slot.session, 'isolated pwsh call completed')
       slot.users--
       if (slot.session) slot.session.lastUsed = Date.now()
       if (!slot.session && slot.users === 0 && sessions.get(key) === slot) sessions.delete(key)
@@ -329,12 +347,13 @@ export function apply(ctx, config) {
   ctx.effect(() => ctx.tools.register({
     name: 'pwsh_run',
     description: [
-      'Run a PowerShell script in a **persistent** pwsh 7 session.',
+      'Run a PowerShell script in a pwsh 7 process: persistent by default, or mode=isolated for a fresh process used only by this call.',
+      '* Use mode=isolated for short stateless commands. It keeps the same sandbox and deletion checks, disposes its process afterward, and cannot clear or change existing persistent state even on timeout or cancellation. If the process pool is full it refuses the call rather than evicting a persistent session.',
       '* Send the script body verbatim: do NOT escape $, do NOT wrap it in pwsh -c, do NOT add shell quotes. There is no shell in between — the script goes straight to pwsh over stdin.',
       '* Prefer this over the pwsh tool when the script contains $variables, here-strings (@\'...\'@ / @"..."@), backticks, quotes, non-ASCII text, or is longer than a few thousand characters. The pwsh tool is capped by the Windows command line (~32K) and every call is a fresh process.',
-      '* State persists while the session ID, sandbox policy and workspace stay the same: variables, current directory, $env: entries and imported modules. Do not assume a clean slate; reset explicitly when you need to.',
+      '* In persistent mode, state persists while the session ID, sandbox policy and workspace stay the same: variables, current directory, $env: entries and imported modules. Do not assume a clean slate; reset explicitly when you need to.',
       '* Output uses PowerShell formatting; streams are labelled and grouped by type, so inter-stream ordering is not preserved.',
-      '* Execution time excludes queue waiting. Each call times out after ' + String(Math.round(defaultTimeoutMs / 1000)) + 's by default (override with timeoutMs). On timeout the whole session process is terminated and rebuilt — persisted state is lost.',
+      '* Execution time excludes queue waiting. Each call times out after ' + String(Math.round(defaultTimeoutMs / 1000)) + 's by default (override with timeoutMs). On timeout, persistent mode terminates and rebuilds its session, losing that state; isolated mode terminates only its own process.',
       '* exit N inside the script only ends that call; its exit code is NOT observable. Use $LASTEXITCODE or Write-Output instead.',
       '* Sandbox: the persistent process is confined once at launch, and because the Windows ACL restricted token applies to the whole process, every later read/write in this session obeys the same workspace boundary as the native pwsh tool. In read-only mode this tool refuses to start (a persistent session needs FullLanguage) — use the native pwsh tool there.',
       '* Not for interactive programs or anything that needs a TTY.',
