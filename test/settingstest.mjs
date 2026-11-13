@@ -46,7 +46,7 @@ root.provide('configEditor', {
     writeFileSync(this.documentPath, JSON.stringify(next))
     override = next
     entry.options.config = { ...base, ...next }
-    cosmos.updateVolatile(config.enforcePwshRun, resolved.enforcePwshRun)
+    for (const field of ['enforcePwshRun', 'enforceFileRemoval']) cosmos.updateVolatile(config[field], resolved[field])
   },
 })
 const settings = new settingsModule.SettingsForms(root)
@@ -95,7 +95,7 @@ const run = script => definitions.get('pwsh_run').execute({ script }, exec)
 const waitSaved = async () => { for (let i = 0; i < 100 && state().saving; i++) await new Promise(r => setTimeout(r, 10)); assert(!state().saving) }
 try {
   check('schema-default-is-live-false', () => assert.equal(config.enforcePwshRun.get(), false))
-  check('form-projects-only-routing', () => assert(JSON.stringify(descriptor().schema).includes('enforcePwshRun') && !JSON.stringify(descriptor().schema).includes('timeoutMs')))
+  check('form-projects-both-live-switches', () => assert(['enforcePwshRun','enforceFileRemoval'].every(field=>JSON.stringify(descriptor().schema).includes(field)) && !JSON.stringify(descriptor().schema).includes('timeoutMs')))
   check('automatic-page-disabled', () => assert.equal(descriptor().autoGenerate, false))
   check('sidebar-and-plugin-row-registered', () => assert.equal(slots.length, 2))
   check('sidebar-localized-title', () => assert.equal(section().options.label, 'pwsh 设置'))
@@ -114,6 +114,16 @@ try {
     const second = await run('Write-Output $PID; Write-Output $global:settingsProbe')
     check('save-preserves-process-and-state', () => assert.equal(second.text, first.text + '\n42'))
   }
+  const deletion = { name: 'pwsh_run', arguments: { script: 'Remove-Item fixture' } }
+  check('removal-default-off', () => assert(!config.enforceFileRemoval.get() && !state().removalAccepted))
+  props.edit('enforceFileRemoval', 'true')
+  check('removal-draft-does-not-block', () => assert(!guards[1](deletion) && state().dirty))
+  props.save(); await waitSaved()
+  check('removal-save-is-durable-and-live', () => assert(JSON.parse(readFileSync(root.configEditor.documentPath)).enforceFileRemoval && state().removalAccepted && guards[1](deletion)))
+  const afterRemoval = formOnly ? null : await run('Write-Output $PID; Write-Output $global:settingsProbe')
+  if (!formOnly) check('removal-save-keeps-pwsh-session', () => assert.equal(afterRemoval.text, first.text+'\n42'))
+  props.resetField('enforceFileRemoval'); props.save(); await waitSaved()
+  check('removal-reset-unsets-override', () => assert(!config.enforceFileRemoval.get() && !Object.hasOwn(override,'enforceFileRemoval') && !guards[1](deletion)))
   props.edit('enforcePwshRun', 'false'); props.discard()
   check('discard-keeps-saved-state', () => assert(!state().dirty && config.enforcePwshRun.get()))
   props.resetField('enforcePwshRun'); props.save(); await waitSaved()

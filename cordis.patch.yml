@@ -14,6 +14,7 @@
         idleMs: 1800000
         maxSessions: 4
         enforcePwshRun: false
+        enforceFileRemoval: false
 
     # Windows 上的 bash：官方 persistent bash 依赖 PTY，PTY 后端只支持 linux/darwin，
     # 而官方 bash 工具在 win32 上被禁用，Windows 会话因此没有 bash。这一行补上它，

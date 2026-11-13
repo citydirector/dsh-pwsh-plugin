@@ -116,8 +116,7 @@ Three constraints that cost real time to find:
   will hold two of them; registration is keyed by name, and a second `pwsh_run` is a hard error at boot.
   `--dump-config` shows the duplicate plainly — that is the check to run after switching.
 
-The files in `plugin/` (`index.mjs`, `config.mjs`, `native-pwsh-guard.mjs`, `session.mjs`, `session-server.ps1`) must stay together —
-`index.mjs` reads the `.ps1` at load time and ships it to the child as `-EncodedCommand`.
+Keep the entire `plugin/` directory together. The entry module loads the session server and fixed file workers, including their C# recycle helper, from adjacent files.
 
 ## The tools
 
@@ -147,6 +146,7 @@ requirements are explicitly refused.
 | `maxOutputBytes` | `8388608` | UTF-8 payload budget per call, including record separators; errors have a separate 65536-byte budget. Framing and display labels are excluded. Truncation is reported. |
 | `allowUnconfined` | `false` | `true` = start a session even when the sandbox policy service is missing. |
 | `enforcePwshRun` | `false` | Refuse ordinary native `pwsh` calls before execution and direct the model to `pwsh_run`. |
+| `enforceFileRemoval` | `false` | Block common direct deletion commands and require the Agent to review a `file_remove` inventory before recycling. |
 
 `allowUnconfined` is the one deliberate escape hatch. In a normal deployment `ctx.sandboxPolicy` is always
 present; when it is missing the composition is incomplete, and the plugin **refuses to start** rather than
@@ -162,7 +162,7 @@ do not add it to each preset or insert a second `pwsh-run` entry when the bundle
 
 Open **pwsh settings** in the settings sidebar, enable **Require pwsh_run**, then select **Save**. The plugin row's configuration button opens the same form. Changes stay as a draft until saved; leaving the page discards the draft. **Restore configuration default** removes the profile override.
 
-Saving updates only the routing switch through DSH's settings service and preserves running PowerShell processes and session state. The page reports the value accepted by the host, protects against conflicting writes, and disables editing on read-only deployments. It follows the host's Chinese or English language setting.
+Saving updates the switches through DSH's settings service and preserves running PowerShell processes and session state. The page reports the value accepted by the host, protects against conflicting writes, and disables editing on read-only deployments. It follows the host's Chinese or English language setting.
 
 For hosts without the settings UI, override the existing plugin entry in the profile's `cordis.patch.yml`:
 
@@ -187,6 +187,17 @@ Disabling the option, removing the guard through hot reload, or uninstalling res
 `pwsh` behavior. The option defaults to off. Live configuration requires `ctx.tools.guard()`;
 a host without this API is rejected explicitly so enabling the setting cannot silently go unprotected.
 The guard covers the DSH `pwsh` tool entry, not PowerShell launched inside bash, Node or other scripts.
+
+### Removal confirmation and temporary cleanup
+
+The same **pwsh settings** page has **Review targets before deletion**, off by default. Saving it preserves running sessions. When enabled, common deletion commands in `pwsh`, `pwsh_run` and `bash` are refused before the script runs. The response directs the Agent to these tools:
+
+- `file_remove action=plan paths=[...]` expands relative paths and final-component wildcards into a fixed inventory. The Agent reviews it, then separately calls `action=execute planId=...`. Plans are single-use, expire in two minutes, and refuse observed changes to targets, session or sandbox policy. The limits are 64 root targets, 512 tree entries and 32 pending plans.
+- `file_temp action=create` makes a new registered directory inside the workspace and returns a `tempId`. `action=clean tempId=...` authorizes permanent cleanup of only that registered directory, after checking its identity, marker and tree. Existing directories cannot be registered; a name such as `temp` grants no exception. Test programs can keep their own internal cleanup.
+
+Ordinary removal uses the real Windows Recycle Bin, including for Windows paths written as `/mnt/c/...`, or `gio trash` for native Linux paths. A failed recycle never falls back to permanent deletion. Roots, home/workspace ancestors, `.git`, links and special paths are refused. A restricted session must explicitly request wider access for the exact recycle plan; the host must approve it. Agent confirmation does not replace host approval, and read-only sessions cannot use these file tools.
+
+New Windows scratch directories retain the parent's sandbox capability and deny entries while adding inheritable access for the current user. Low-token creation, writing and cleanup are tested. Existing broken ACLs are reported, never repaired automatically. The guard recognizes common script syntax; it does not inspect arbitrary child programs or prevent every filesystem deletion. A snapshot-to-operation concurrency window remains. See the [detailed guide in Chinese](docs/file-removal.zh-CN.md) for failure handling and backend limits.
 
 ## Sandbox
 
@@ -305,13 +316,18 @@ session — lives in **[docs/runtime-notes.md](docs/runtime-notes.md)**. The sho
 ```
 plugin/
   index.mjs           tool registration, sandbox wiring, timeouts
-  config.mjs          native schema; the routing switch is volatile
+  config.mjs          native schema; routing and removal switches are volatile
   native-pwsh-guard.mjs  optional native pwsh invocation guard
+  deletion-guard.mjs  common deletion syntax guard
+  file-tools.mjs      fixed removal plans, approvals and registered scratch directories
+  file-worker.ps1 file-worker.cjs file-recycle.cs  sandboxed filesystem workers
   session.mjs         the session object: framing, queue, base64 encode, boot argv
   session-server.ps1  the PowerShell side: runspace, stream tagging, sentinels
 client/index.js      localized settings page using DSH native controls
 test/
-  settingstest.mjs    persistence, conflicts, live routing and process preservation
+  settingstest.mjs    persistence, conflicts, live switches and process preservation
+  filetoolstest.mjs   real Windows recycling, Low scratch directories and refusal paths
+  filetools-wsl.mjs   real WSL scratch cleanup, trash and backend boundaries
   support.mjs         locates a DSH install; converts Windows paths to /mnt form
   routingtest.mjs     native/PTC routing, exceptions, unload and reload
   protocoltest.mjs    frame limits, UTF-8 budgets, startup cleanup
@@ -336,7 +352,9 @@ FINDINGS.md          every measurement and the reasoning behind the design
 ```bash
 cd <checkout>
 pnpm install --ignore-scripts --config.auto-install-peers=false
-node test/settingstest.mjs                  # 19: native settings form, persistence, routing and state
+node test/settingstest.mjs                  # 24: native settings, live switches and preserved state
+node test/filetoolstest.mjs                  # 35: Windows recycling, Low directories, approval and cancellation
+node test/filetools-wsl.mjs                  #  7: WSL scratch cleanup, trash and backend boundaries
 node test/routingtest.mjs                   # 30: native/PTC routing, exceptions, disable and unload
 node test/protocoltest.mjs                  #  6: frame limits, UTF-8 budgets, startup cleanup
 node test/lifecycletest.mjs                 # 16: policy, pool, concurrency, cancellation, unload
@@ -350,7 +368,7 @@ node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn
 node test/metatest.mjs                       # 23: plugin-page metadata (no spawn, runs anywhere)
 ```
 
-Twelve scripts, **212 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Fourteen scripts, **259 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 when none is found. The settings integration test exits unsuccessfully if its host modules are unavailable;

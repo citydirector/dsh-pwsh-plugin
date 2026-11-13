@@ -101,8 +101,7 @@ $env:DSH_HOME = '<DSH_HOME>'        # 桌面 App 自己用的那个数据根
   合成后的配置树里就有两条；注册按名字查重，第二个 `pwsh_run` 在启动时是硬错误。`--dump-config` 一眼就能看出重复 ——
   切换后跑这一条。
 
-`plugin/` 下的 `index.mjs`、`config.mjs`、`native-pwsh-guard.mjs`、`session.mjs`、`session-server.ps1` 必须放在一起：
-`index.mjs` 在加载时读那个 `.ps1`，再以 `-EncodedCommand` 送给子进程。
+`plugin/` 整个目录必须一起分发：入口会从相邻文件加载会话服务、固定文件工作进程及 C# 回收站辅助代码。
 
 ## 工具接口
 
@@ -130,6 +129,7 @@ Warning、Verbose、Information、Debug 分别带类型前缀，错误和最内�
 | `maxOutputBytes` | `8388608` | 每次调用普通输出正文的 UTF-8 字节预算（含记录换行）；错误另留 65536 字节。协议与显示标签不计入，截断会明确提示。 |
 | `allowUnconfined` | `false` | `true` = 沙箱策略服务缺席时也起会话。 |
 | `enforcePwshRun` | `false` | 开启后，在执行前拒绝普通原生 `pwsh` 调用，提示改用 `pwsh_run`。 |
+| `enforceFileRemoval` | `false` | 拒绝常见的直接删除命令，引导 Agent 先审阅 `file_remove` 清单，再确认回收。 |
 
 `allowUnconfined` 是唯一一条「明知故犯」的开关。正常部署下 `ctx.sandboxPolicy` 一定在；缺席说明组合
 不完整，这时插件**拒绝启动**，而不是悄悄跑一个不受约束的会话。
@@ -144,7 +144,7 @@ Warning、Verbose、Information、Debug 分别带类型前缀，错误和最内�
 
 在设置侧栏打开 **pwsh 设置**，开启 **强制使用 pwsh_run**，再点 **保存**。插件列表的配置按钮也会打开同一张表单。编辑只产生草稿，离开页面会丢弃未保存的修改；**恢复配置默认值** 会移除当前 profile 的覆盖。
 
-保存通过 DSH 设置服务热更新路由开关，保留正在运行的 PowerShell 进程和会话状态。页面显示宿主确认的已保存值，校验配置修订冲突，并在只读部署下禁用修改。页面随宿主语言显示中文或英文。
+保存通过 DSH 设置服务热更新这些开关，保留正在运行的 PowerShell 进程和会话状态。页面显示宿主确认的已保存值，校验配置修订冲突，并在只读部署下禁用修改。页面随宿主语言显示中文或英文。
 
 没有设置界面的宿主仍可在 profile 的 `cordis.patch.yml` 中覆盖已有插件条目：
 
@@ -165,6 +165,17 @@ Warning、Verbose、Information、Debug 分别带类型前缀，错误和最内�
 配置关闭、热重载移除守卫或卸载插件后，原生 `pwsh` 恢复原有行为。
 开关默认关闭。热更新配置需要宿主提供 `ctx.tools.guard()`；缺少此 API 时会明确拒绝加载，避免设置开启后实际没有拦截。
 它只管理 DSH 的 `pwsh` 工具入口，不解析 `bash`、Node 或其他脚本内启动的 PowerShell。
+
+### 删除确认与临时清理
+
+同一张 **pwsh 设置** 页面新增 **删除前先确认范围**，默认关闭。保存后，常见的 `pwsh`、`pwsh_run`、`bash` 删除命令会在原脚本执行前被拒绝，引导 Agent 使用：
+
+- `file_remove action=plan paths=[...]`：展开相对路径和最后一段通配符，返回固定目录树清单。Agent 阅读后再单独调用 `action=execute planId=...`。计划单次使用、两分钟到期，观察到目标、会话或权限边界变化即拒绝；最多 64 个根目标、512 个树条目和 32 个待确认计划。
+- `file_temp action=create`：在工作区新建并登记随机临时目录，返回 `tempId`；`action=clean tempId=...` 明确授权永久清理这个登记目录，清理前核验身份、标记与完整树。已有目录不能注册，名字叫 `temp` 也不豁免。测试程序内部原有的清理可以继续工作。
+
+普通删除只走真正的 Windows 回收站或原生 Linux 的 `gio trash`，失败不转永久删除；`/mnt/c/...` 这类 Windows 路径也交给 Windows 回收站。根目录、用户主目录/工作区及其祖先、`.git`、链接和特殊路径拒绝。受限会话回收时仍需显式请求更宽权限，并由宿主审批；Agent 的清单确认不能代替这一步。只读会话不可使用这些文件工具。
+
+Windows 新临时目录保留父级沙箱能力与拒绝项，并在创建时补当前用户继承授权，已实测 Low 进程创建、写入和清理。已有异常 ACL 只报告，不自动修改。这个护栏识别常见脚本语法，不覆盖任意子程序；快照检查到实际操作之间仍有并发窗口。失败处理与后端限制见[完整指南](docs/file-removal.zh-CN.md)。
 
 ## 沙箱
 
@@ -269,13 +280,18 @@ Windows 上打，那份文件到手时是 `0644` —— 探测发现它属于当
 ```
 plugin/
   index.mjs           工具注册、沙箱接线、超时
-  config.mjs          宿主配置 schema；路由开关支持热更新
+  config.mjs          宿主配置 schema；路由与删除开关支持热更新
   native-pwsh-guard.mjs  可选的原生 pwsh 调用守卫
+  deletion-guard.mjs  常见删除语法入口护栏
+  file-tools.mjs      固定回收计划、审批、登记临时目录
+  file-worker.ps1 file-worker.cjs file-recycle.cs  沙箱文件工作进程
   session.mjs         会话对象：分帧、队列、base64、启动 argv
   session-server.ps1  PowerShell 侧：runspace、流打标、哨兵
 client/index.js      使用宿主原生控件的双语设置页
 test/
-  settingstest.mjs    配置持久化、冲突、即时路由与进程保留
+  settingstest.mjs    配置持久化、冲突、即时开关与进程保留
+  filetoolstest.mjs   真 Windows 回收站、Low 临时目录与失败路径
+  filetools-wsl.mjs   真 WSL 临时清理、回收站与后端边界
   support.mjs         定位 DSH 安装；Windows 路径转 /mnt 形式
   routingtest.mjs     原生与 PTC 路由、必要例外及卸载恢复
   protocoltest.mjs    分帧、UTF-8 预算、启动清理
@@ -300,7 +316,9 @@ FINDINGS.md          全部实测数据与设计理由
 ```bash
 cd <检出目录>
 pnpm install --ignore-scripts --config.auto-install-peers=false
-node test/settingstest.mjs                  # 19：原生设置表单、持久化、路由和进程保留
+node test/settingstest.mjs                  # 24：原生设置、即时开关与进程保留
+node test/filetoolstest.mjs                  # 35：Windows 回收站、Low 目录、审批与取消
+node test/filetools-wsl.mjs                  #  7：WSL 临时清理、回收站与后端边界
 node test/routingtest.mjs                   # 30：原生/PTC 路由、例外、关闭与卸载
 node test/protocoltest.mjs                  #  6：帧边界、字节预算、启动清理
 node test/lifecycletest.mjs                 # 16：权限切换、池、并发、取消、卸载
@@ -314,7 +332,7 @@ node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起�
 node test/metatest.mjs                       # 23：插件页元数据（不起子进程，哪儿都能跑）
 ```
 
-十二份脚本合计 **212 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十四份脚本合计 **259 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打印 `SKIP` 提示。设置集成测试缺少宿主模块时会非零退出；
 发版验收必须跑完全部测试，不能有跳过。
