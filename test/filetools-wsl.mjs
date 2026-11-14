@@ -35,6 +35,33 @@ try{
  const approved=await call('file_remove',{action:'plan',paths:[file]})
  const result=await call('file_remove',{action:'execute',planId:approved.planId})
  check('wsl-gio-recycles-without-permanent-fallback',()=>assert(!inspect(file).exists&&result.method==='linux-trash'))
+ const settle=async(name,r)=>{
+  if(!r.operationId)return r
+  for(let i=0;i<30&&r.status==='running';i++)r=await call(name,{action:'status',operationId:r.operationId,waitMs:10000})
+  assert.equal(r.status,'completed',r.error);return r.result
+ }
+ const base=fixture.root, large=base+'/node_modules',external=base+'/external'
+ shell('const fs=require("fs");const base='+JSON.stringify(base)+';fs.mkdirSync(base+"/external");fs.writeFileSync(base+"/external/KEEP","outside");fs.mkdirSync(base+"/node_modules");for(let i=0;i<700;i++)fs.writeFileSync(base+"/node_modules/f"+i,"test");fs.symlinkSync(base+"/external",base+"/node_modules/dependency");fs.symlinkSync(base+"/missing",base+"/node_modules/broken");')
+ const largePlan=await settle('file_remove',await call('file_remove',{action:'plan',paths:[large],waitMs:0}))
+ check('wsl-large-summary-includes-internal-and-dangling-links',()=>assert(largePlan.summary.entries===703&&largePlan.summary.files===700&&largePlan.summary.links===2&&!largePlan.entries))
+ const inventory=[];let offset=0
+ do{const page=await call('file_remove',{action:'list',planId:largePlan.planId,offset,limit:256});inventory.push(...page.entries);offset=page.nextOffset}while(offset!==null)
+ check('wsl-large-inventory-paginates-without-link-traversal',()=>assert(inventory.length===703&&!inventory.some(e=>e.path.endsWith('/KEEP'))))
+ await assert.rejects(()=>call('file_remove',{action:'plan',paths:[large+'/dependency']}),/Link/)
+ check('wsl-direct-symlink-target-remains-refused',()=>{})
+ shell('require("fs").writeFileSync('+JSON.stringify(large+'/f699')+',"changed since planning")')
+ await assert.rejects(async()=>settle('file_remove',await call('file_remove',{action:'execute',planId:largePlan.planId,waitMs:0})),/changed/)
+ check('wsl-large-plan-revalidation-detects-deep-change',()=>assert(inspect(large).exists))
+ const again=await settle('file_remove',await call('file_remove',{action:'plan',paths:[large],waitMs:0}))
+ await settle('file_remove',await call('file_remove',{action:'execute',planId:again.planId,waitMs:0}))
+ check('wsl-large-gio-recycle-preserves-external-target',()=>assert(!inspect(large).exists&&inspect(external+'/KEEP').exists))
+ mode='workspace-write'
+ const largeTemp=await call('file_temp',{action:'create',backend:'wsl'})
+ shell('const fs=require("fs"),p='+JSON.stringify(largeTemp.path)+';for(let i=0;i<600;i++)fs.writeFileSync(p+"/f"+i,"temporary");fs.symlinkSync('+JSON.stringify(external)+',p+"/dependency");')
+ const cleaned=await settle('file_temp',await call('file_temp',{action:'clean',tempId:largeTemp.tempId,waitMs:0}))
+ check('wsl-fenced-large-temp-cleanup-preserves-symlink-target',()=>assert(cleaned.summary.files===601&&cleaned.summary.links===1&&!inspect(largeTemp.path).exists&&inspect(external+'/KEEP').exists))
+ mode='danger-full-access'
+ const externalPlan=await call('file_remove',{action:'plan',paths:[external]});await call('file_remove',{action:'execute',planId:externalPlan.planId})
  const source=readFileSync(new URL('../plugin/file-worker.cjs',import.meta.url),'utf8')
  const run=q=>JSON.parse(shell('(()=>{const fs=require("node:fs"),orig=fs.readFileSync;fs.readFileSync=function(p,...a){return p===0?'+JSON.stringify(JSON.stringify(q))+':orig.call(this,p,...a)}})();'+source,1))
  // 只做只读路径校验，不在 Windows 挂载盘创建伪回收站。

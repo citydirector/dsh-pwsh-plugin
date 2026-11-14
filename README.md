@@ -150,6 +150,10 @@ requirements are explicitly refused.
 | `allowUnconfined` | `false` | `true` = start a session even when the sandbox policy service is missing. |
 | `enforcePwshRun` | `false` | Refuse ordinary native `pwsh` calls before execution and direct the model to `pwsh_run`. |
 | `enforceFileRemoval` | `false` | Block common direct deletion commands and require the Agent to review a `file_remove` inventory before recycling. |
+| `fileScanMaxEntries` | `250000` | Complete-tree entry budget; maximum 2000000. |
+| `fileScanMaxBytes` | `67108864` | Serialized inventory byte budget, shared by retained plans; maximum 536870912. |
+| `fileScanTimeoutMs` | `120000` | Complete scan time budget; maximum 1800000 ms. |
+| `fileOperationTimeoutMs` | `300000` | File operation timeout, independent of the tool wait budget; maximum 1800000 ms. |
 
 `allowUnconfined` is the one deliberate escape hatch. In a normal deployment `ctx.sandboxPolicy` is always
 present; when it is missing the composition is incomplete, and the plugin **refuses to start** rather than
@@ -196,10 +200,14 @@ The guard covers the DSH `pwsh` tool entry, not PowerShell launched inside bash,
 
 The same **pwsh settings** page has **Review targets before deletion**, off by default. Saving it preserves running sessions. When enabled, common deletion commands in `pwsh`, `pwsh_run` and `bash` are refused before the script runs. The response directs the Agent to these tools:
 
-- `file_remove action=plan paths=[...]` expands relative paths and final-component wildcards into a fixed inventory. The Agent reviews it, then separately calls `action=execute planId=...`. Plans are single-use, expire in two minutes, and refuse observed changes to targets, session or sandbox policy. The limits are 64 root targets, 512 tree entries and 32 pending plans.
+- `file_remove action=plan paths=[...]` expands relative paths and final-component wildcards into a fixed inventory. The Agent reviews it, then separately calls `action=execute planId=...`. Plans are single-use, expire two minutes after a complete scan, and refuse observed changes to targets, session or sandbox policy. Up to 64 roots and 32 pending plans are supported. Small inventories show every entry; large ones show exact roots, full counts and byte totals, a digest and a preview. Use `action=list planId=... offset=0 limit=128` and follow `nextOffset` to read the complete inventory.
 - `file_temp action=create` makes a new registered directory inside the workspace and returns a `tempId`. `action=clean tempId=...` authorizes permanent cleanup of only that registered directory, after checking its identity, marker and tree. Existing directories cannot be registered; a name such as `temp` grants no exception. Test programs can keep their own internal cleanup.
 
-Ordinary removal uses the real Windows Recycle Bin, including for Windows paths written as `/mnt/c/...`, or `gio trash` for native Linux paths. A failed recycle never falls back to permanent deletion. Roots, home/workspace ancestors, `.git`, links and special paths are refused. A restricted session must explicitly request wider access for the exact recycle plan; the host must approve it. Agent confirmation does not replace host approval, and read-only sessions cannot use these file tools.
+Long scans, recycling and registered temporary cleanup return an `operationId` when the wait budget ends. Use `action=status operationId=... waitMs=10000` on the same tool until it finishes; `action=cancel` requests cancellation. A completed status carries the original response in `result`. Cancellation does not undo already recycled roots: inspect `removed` and the remaining targets before making a new plan.
+
+Scans default to 250000 entries, 64 MiB of serialized inventory and 120 seconds; file operations have a separate 300-second timeout. The byte budget is shared by retained plans. These limits are independent of the display page size. Hitting a limit or receiving truncated output fails without an executable plan.
+
+Ordinary removal uses the real Windows Recycle Bin, including for Windows paths written as `/mnt/c/...`, or `gio trash` for native Linux paths. A failed recycle never falls back to permanent deletion. Roots, home/workspace ancestors, `.git`, target/ancestor links, mounted filesystems and special paths are refused. Ordinary symlinks and Windows junctions inside a selected directory are inventoried and handled as links; their destinations are never scanned. A restricted session must explicitly request wider access for the exact recycle plan; the host must approve it. Agent confirmation does not replace host approval, and read-only sessions cannot use these file tools.
 
 New Windows scratch directories retain the parent's sandbox capability and deny entries while adding inheritable access for the current user. Low-token creation, writing and cleanup are tested. Existing broken ACLs are reported, never repaired automatically. The guard recognizes common script syntax; it does not inspect arbitrary child programs or prevent every filesystem deletion. A snapshot-to-operation concurrency window remains. See the [detailed guide in Chinese](docs/file-removal.zh-CN.md) for failure handling and backend limits.
 
@@ -324,6 +332,7 @@ plugin/
   native-pwsh-guard.mjs  optional native pwsh invocation guard
   deletion-guard.mjs  common deletion syntax guard
   file-tools.mjs      fixed removal plans, approvals and registered scratch directories
+  file-scan.mjs       streaming inventory, budgets, pages and cancellable operation state
   file-worker.ps1 file-worker.cjs file-recycle.cs  sandboxed filesystem workers
   session.mjs         the session object: framing, queue, base64 encode, boot argv
   session-server.ps1  the PowerShell side: runspace, stream tagging, sentinels
@@ -331,6 +340,7 @@ client/index.js      localized settings page using DSH native controls
 test/
   settingstest.mjs    persistence, conflicts, live switches and process preservation
   filetoolstest.mjs   real Windows recycling, Low scratch directories and refusal paths
+  filelarge.mjs       large Windows trees, paging, budgets, cancellation and internal links
   filetools-wsl.mjs   real WSL scratch cleanup, trash and backend boundaries
   support.mjs         locates a DSH install; converts Windows paths to /mnt form
   routingtest.mjs     native/PTC routing, exceptions, unload and reload
@@ -358,7 +368,8 @@ cd <checkout>
 pnpm install --ignore-scripts --config.auto-install-peers=false
 node test/settingstest.mjs                  # 24: native settings, live switches and preserved state
 node test/filetoolstest.mjs                  # 42: Windows recycling, Low directories, approval and cancellation
-node test/filetools-wsl.mjs                  #  7: WSL scratch cleanup, trash and backend boundaries
+node test/filelarge.mjs                      # 18: large trees, complete pages, budgets, links and cancellation
+node test/filetools-wsl.mjs                  # 13: WSL large trees, scratch cleanup, trash and boundaries
 node test/routingtest.mjs                   # 31: native/PTC routing, exceptions, disable and unload
 node test/protocoltest.mjs                  #  6: frame limits, UTF-8 budgets, startup cleanup
 node test/lifecycletest.mjs                 # 21: policy, pool, concurrency, cancellation, unload
@@ -372,7 +383,7 @@ node test/denialtest.mjs                     # 11: sandbox-denial hint (no spawn
 node test/metatest.mjs                       # 23: plugin-page metadata (no spawn, runs anywhere)
 ```
 
-Fourteen scripts, **279 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
+Fifteen scripts, **303 assertions**, none of which needs DSH to be running — just node 24, PowerShell 7 and a
 DSH install to borrow `node_modules` from. Tests that need a DSH runtime locate one automatically
 (`DSH_MODULES`, `DSH_MODULES_ASAR`, or by walking up from the working directory) and print a `SKIP` hint
 when none is found. The settings integration test exits unsuccessfully if its host modules are unavailable;

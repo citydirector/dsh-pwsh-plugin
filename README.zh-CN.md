@@ -133,6 +133,10 @@ Warning、Verbose、Information、Debug 分别带类型前缀，错误和最内�
 | `allowUnconfined` | `false` | `true` = 沙箱策略服务缺席时也起会话。 |
 | `enforcePwshRun` | `false` | 开启后，在执行前拒绝普通原生 `pwsh` 调用，提示改用 `pwsh_run`。 |
 | `enforceFileRemoval` | `false` | 拒绝常见的直接删除命令，引导 Agent 先审阅 `file_remove` 清单，再确认回收。 |
+| `fileScanMaxEntries` | `250000` | 完整目录树条目预算，上限 2000000。 |
+| `fileScanMaxBytes` | `67108864` | 序列化清单字节预算，保留的计划共享，上限 536870912。 |
+| `fileScanTimeoutMs` | `120000` | 完整扫描时间预算，上限 1800000 毫秒。 |
+| `fileOperationTimeoutMs` | `300000` | 文件操作超时，与工具等待预算独立，上限 1800000 毫秒。 |
 
 `allowUnconfined` 是唯一一条「明知故犯」的开关。正常部署下 `ctx.sandboxPolicy` 一定在；缺席说明组合
 不完整，这时插件**拒绝启动**，而不是悄悄跑一个不受约束的会话。
@@ -173,10 +177,14 @@ Warning、Verbose、Information、Debug 分别带类型前缀，错误和最内�
 
 同一张 **pwsh 设置** 页面新增 **删除前先确认范围**，默认关闭。保存后，常见的 `pwsh`、`pwsh_run`、`bash` 删除命令会在原脚本执行前被拒绝，引导 Agent 使用：
 
-- `file_remove action=plan paths=[...]`：展开相对路径和最后一段通配符，返回固定目录树清单。Agent 阅读后再单独调用 `action=execute planId=...`。计划单次使用、两分钟到期，观察到目标、会话或权限边界变化即拒绝；最多 64 个根目标、512 个树条目和 32 个待确认计划。
+- `file_remove action=plan paths=[...]`：展开相对路径和最后一段通配符，返回固定目录树清单。Agent 阅读后再单独调用 `action=execute planId=...`。计划单次使用，从完整扫描结束起两分钟到期，观察到目标、会话或权限边界变化即拒绝；最多 64 个根目标和 32 个待确认计划。小清单完整展示；大目录返回绝对根目标、完整计数与字节数、摘要哈希和预览。使用 `action=list planId=... offset=0 limit=128` 并跟随 `nextOffset` 读取全部明细。
 - `file_temp action=create`：在工作区新建并登记随机临时目录，返回 `tempId`；`action=clean tempId=...` 明确授权永久清理这个登记目录，清理前核验身份、标记与完整树。已有目录不能注册，名字叫 `temp` 也不豁免。测试程序内部原有的清理可以继续工作。
 
-普通删除只走真正的 Windows 回收站或原生 Linux 的 `gio trash`，失败不转永久删除；`/mnt/c/...` 这类 Windows 路径也交给 Windows 回收站。根目录、用户主目录/工作区及其祖先、`.git`、链接和特殊路径拒绝。受限会话回收时仍需显式请求更宽权限，并由宿主审批；Agent 的清单确认不能代替这一步。只读会话不可使用这些文件工具。
+扫描、回收和登记临时目录清理耗时较长时，工具返回 `operationId`。在同一工具上调用 `action=status operationId=... waitMs=10000` 等待终态；完成后从 `result` 取原始结果，也可用 `action=cancel` 请求取消。取消不会回滚已经回收的根目标，应核对 `removed` 与现场，再为剩余目标生成新计划。
+
+默认完整扫描预算为 250000 个条目、64 MiB 序列化清单和 120 秒，文件操作另有 300 秒超时；清单字节预算在保留的计划之间共享。它们与展示分页大小分开，超预算或输出截断均不产生可执行计划。
+
+普通删除只走真正的 Windows 回收站或原生 Linux 的 `gio trash`，失败不转永久删除；`/mnt/c/...` 这类 Windows 路径也交给 Windows 回收站。根目录、用户主目录/工作区及其祖先、`.git`、根目标或祖先为链接、挂载点和特殊路径拒绝。选定目录内部的普通符号链接与 Windows junction 只记录、处理链接本体，不扫描目标目录。受限会话回收时仍需显式请求更宽权限，并由宿主审批；Agent 的清单确认不能代替这一步。只读会话不可使用这些文件工具。
 
 Windows 新临时目录保留父级沙箱能力与拒绝项，并在创建时补当前用户继承授权，已实测 Low 进程创建、写入和清理。已有异常 ACL 只报告，不自动修改。这个护栏识别常见脚本语法，不覆盖任意子程序；快照检查到实际操作之间仍有并发窗口。失败处理与后端限制见[完整指南](docs/file-removal.zh-CN.md)。
 
@@ -288,6 +296,7 @@ plugin/
   native-pwsh-guard.mjs  可选的原生 pwsh 调用守卫
   deletion-guard.mjs  常见删除语法入口护栏
   file-tools.mjs      固定回收计划、审批、登记临时目录
+  file-scan.mjs       流式清单、预算、分页和可取消操作状态
   file-worker.ps1 file-worker.cjs file-recycle.cs  沙箱文件工作进程
   session.mjs         会话对象：分帧、队列、base64、启动 argv
   session-server.ps1  PowerShell 侧：runspace、流打标、哨兵
@@ -295,6 +304,7 @@ client/index.js      使用宿主原生控件的双语设置页
 test/
   settingstest.mjs    配置持久化、冲突、即时开关与进程保留
   filetoolstest.mjs   真 Windows 回收站、Low 临时目录与失败路径
+  filelarge.mjs       Windows 大目录、完整分页、预算、取消与内部链接
   filetools-wsl.mjs   真 WSL 临时清理、回收站与后端边界
   support.mjs         定位 DSH 安装；Windows 路径转 /mnt 形式
   routingtest.mjs     原生与 PTC 路由、必要例外及卸载恢复
@@ -322,7 +332,8 @@ cd <检出目录>
 pnpm install --ignore-scripts --config.auto-install-peers=false
 node test/settingstest.mjs                  # 24：原生设置、即时开关与进程保留
 node test/filetoolstest.mjs                  # 42：Windows 回收站、Low 目录、审批与取消
-node test/filetools-wsl.mjs                  #  7：WSL 临时清理、回收站与后端边界
+node test/filelarge.mjs                      # 18：大目录、完整分页、预算、链接与取消
+node test/filetools-wsl.mjs                  # 13：WSL 大目录、临时清理、回收站与边界
 node test/routingtest.mjs                   # 31：原生/PTC 路由、例外、关闭与卸载
 node test/protocoltest.mjs                  #  6：帧边界、字节预算、启动清理
 node test/lifecycletest.mjs                 # 21：权限切换、池、并发、取消、卸载
@@ -336,7 +347,7 @@ node test/denialtest.mjs                     # 11：沙箱拒绝提示（不起�
 node test/metatest.mjs                       # 23：插件页元数据（不起子进程，哪儿都能跑）
 ```
 
-十四份脚本合计 **279 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
+十五份脚本合计 **303 项**，都不需要 DSH 在跑 —— 只要 node 24、PowerShell 7，以及一个能借
 `node_modules` 的 DSH 安装。需要 DSH 运行时的测试会自动找（`DSH_MODULES`、`DSH_MODULES_ASAR`，
 或从工作目录逐级向上），找不到时打印 `SKIP` 提示。设置集成测试缺少宿主模块时会非零退出；
 发版验收必须跑完全部测试，不能有跳过。
