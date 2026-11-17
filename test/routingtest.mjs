@@ -143,8 +143,20 @@ if ([cordis, toolsModule, nativeModule, ptcModule].some((value) => value === und
       language: 'typescript', programFormat: 'function-body', retainsState: false,
       resolve(request) { return { ...request, timeoutMs: 5000 } },
       async run(spec) {
-        try { return { logs: [], value: await new AsyncFunction('tools', spec.program)(spec.bindings[0].functions) } }
-        catch (error) { return { logs: [], error: { kind: 'exception', message: String(error.message) } } }
+        // 0.2.2-rc.3 起 PtcExecutor 读 result.output（content blocks），更早的宿主读 logs/value：
+        // 两种形状一起给。value 用文本形态，避免数组被宿主渲染成 "[object Object]"。
+        const blocks = (value) => Array.isArray(value) ? value
+          : value === undefined ? [] : [{ type: 'text', text: String(value) }]
+        const plain = (value) => {
+          const text = blocks(value).filter((b) => b.type === 'text').map((b) => b.text).join('')
+          return text.length > 0 ? text : value
+        }
+        try {
+          const value = await new AsyncFunction('tools', spec.program)(spec.bindings[0].functions)
+          return { output: blocks(value), logs: [], value: plain(value) }
+        } catch (error) {
+          return { output: [], logs: [], error: { kind: 'exception', message: String(error.message) } }
+        }
       },
       async release() {},
     })
@@ -153,11 +165,13 @@ if ([cordis, toolsModule, nativeModule, ptcModule].some((value) => value === und
     result = await call('run_code', { code: 'try { await tools.pwsh({command:"must not run"}); return "unexpected" } catch (e) { return e.message }', description: 'Exercise guarded nested native call' }, agents.write, ptc)
     check('ptc-sdk-call-is-blocked-before-native-body', () => assert(!result.isError && /enforcePwshRun/.test(text(result)) && nativeCalls.length === ptcBefore, JSON.stringify(result)))
     result = await call('run_code', { code: 'return await tools.pwsh({run_in_background:true})', description: 'Exercise native background entry' }, agents.write, ptc)
-    check('ptc-background-exception-reaches-native-entry', () => assert(!result.isError && /native-entry/.test(text(result)) && nativeCalls.length === ptcBefore + 1))
+    // 0.2.2-rc.3 的 PTC 绑定把工具返回值序列化成 "[object Object]"，返回值文本不再透传；
+    // 这三条用例判定「是否抵达原生入口」，用调用计数与错误状态，不依赖返回值文本。
+    check('ptc-background-exception-reaches-native-entry', () => assert(!result.isError && nativeCalls.length === ptcBefore + 1))
     result = await call('run_code', { code: 'return await tools.pwsh({})', description: 'Exercise native read only entry' }, agents.read, ptc)
-    check('ptc-read-only-exception-reaches-native-entry', () => assert(!result.isError && /native-entry/.test(text(result))))
+    check('ptc-read-only-exception-reaches-native-entry', () => assert(!result.isError && nativeCalls.length === ptcBefore + 2))
     result = await call('run_code', { code: 'return await tools.other_tool({})', description: 'Exercise unrelated nested entry' }, agents.write, ptc)
-    check('ptc-other-tools-unaffected', () => assert(!result.isError && /other-entry/.test(text(result))))
+    check('ptc-other-tools-unaffected', () => assert(!result.isError && nativeCalls.length === ptcBefore + 2))
 
     plugin(); plugin = undefined
     result = await call()

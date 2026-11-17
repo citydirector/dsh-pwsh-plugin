@@ -54,7 +54,13 @@ try {
  boot.provide('ptcRuntime',{
   language:'typescript',programFormat:'function-body',retainsState:false,
   resolve(request){return {...request,timeoutMs:20000}},
-  async run(spec){try{return {logs:[],value:await new AsyncFunction('tools',spec.program)(spec.bindings[0].functions)}}catch(e){return {logs:[],error:{kind:'exception',message:String(e.message)}}}},
+  async run(spec){
+   // 0.2.2-rc.3 起宿主读 output（content blocks），更早的读 logs/value；两种形状一起给。
+   const blocks=value=>Array.isArray(value)?value:value===undefined?[]:[{type:'text',text:String(value)}]
+   const plain=value=>{const text=blocks(value).filter(b=>b.type==='text').map(b=>b.text).join('');return text.length>0?text:value}
+   try{const value=await new AsyncFunction('tools',spec.program)(spec.bindings[0].functions);return {output:blocks(value),logs:[],value:plain(value)}}
+   catch(e){return {output:[],logs:[],error:{kind:'exception',message:String(e.message)}}}
+  },
   async release(){},
  })
  const ptc=new PtcExecutor(boot)

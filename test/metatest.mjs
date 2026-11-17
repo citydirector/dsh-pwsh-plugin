@@ -142,6 +142,16 @@ for (const [language, origin, path] of [['zh-CN', 'locale', 'README.zh-CN.md'], 
 }
 check('readme-zh-not-a-readme', !README_PATTERN.test('README.zh-CN.md'), 'README.zh-CN.md 只能靠 meta.detail 触达')
 
+// 6. 客户端模块注入：宿主只把 dsh.client.inject 里列出的包交给客户端工厂，
+// require 了却没声明，浏览器里就是一句 Cannot find module。
+const clientSource = readFileSync(join(ROOT, 'client/index.js'), 'utf8')
+const clientRequires = [...clientSource.matchAll(/require\('(@deepseek-ai\/[^']+)'\)/gu)].map((match) => match[1])
+const clientInject = manifest.dsh?.client?.inject
+const injectIsArray = Array.isArray(clientInject) && clientInject.every((name) => typeof name === 'string')
+check('client-inject-is-array', injectIsArray, JSON.stringify(clientInject ?? null))
+check('client-inject-declares-primitives', injectIsArray && clientInject.includes('@deepseek-ai/dsh-client-ui-primitives'), JSON.stringify(clientInject ?? null))
+check('client-inject-covers-requires', clientRequires.length > 0 && clientRequires.every((name) => injectIsArray && clientInject.includes(name)), clientRequires.join(',') + ' ⊆ ' + JSON.stringify(clientInject ?? null))
+
 function statSafe(file) {
   try {
     return statSync(file).size
