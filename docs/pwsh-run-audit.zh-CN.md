@@ -178,6 +178,6 @@ Schannel / curl / Invoke-WebRequest 的对照矩阵、令牌变量隔离、来�
 
 完整回归：protocoltest 6、lifecycletest 16、itest 30、plugintest 15、e2e-real-subprocess 8、sandboxtest 12、bashtest 31、bash-e2e 11、denialtest 11、metatest 23，合计 **163 项**。回归失败会返回非零退出码。
 
-平台复验仍限 Windows 11 / PowerShell 7.6.8 / Node 24.22.1 与本机 DSH LocalSandboxProvider。Linux/macOS、其它 PowerShell 小版本、UAC 标准用户尚未重测。`#requires -RunAsAdministrator` 不能用“这是受限令牌”作为必然拒绝的测试前提：受限令牌仍可能保留管理员组身份，因此沙箱负向用例采用确定不满足的版本 999.0。
+平台复验仍限 Windows 11 / PowerShell 7.6.8 / Node 24.22.1 与测试机 DSH LocalSandboxProvider。Linux/macOS、其它 PowerShell 小版本、UAC 标准用户尚未重测。`#requires -RunAsAdministrator` 不能用“这是受限令牌”作为必然拒绝的测试前提：受限令牌仍可能保留管理员组身份，因此沙箱负向用例采用确定不满足的版本 999.0。
 
 宿主 Schannel 故障不由这些修复解决，仍见独立记录。

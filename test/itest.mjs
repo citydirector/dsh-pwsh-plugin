@@ -43,8 +43,8 @@ let r = await s.run("Write-Output 'takeover-probe'", 10000);
 check("std-handles-takeover", r.sentinel === "ok" && r.warn.length === 0, "warn=" + JSON.stringify(r.warn));
 
 // 1. 本工具要解决的两件事：`$` 展开与 here-string
-r = await s.run("$n='Skadi'\nWrite-Output \"hi $n\"\n$h=@'\nlit $n\n'@\nWrite-Output $h", 10000);
-check("dollar+heredoc", r.out[0] === "hi Skadi" && r.out[1] === "lit $n" && r.sentinel === "ok", JSON.stringify(r.out));
+r = await s.run("$n='world'\nWrite-Output \"hi $n\"\n$h=@'\nlit $n\n'@\nWrite-Output $h", 10000);
+check("dollar+heredoc", r.out[0] === "hi world" && r.out[1] === "lit $n" && r.sentinel === "ok", JSON.stringify(r.out));
 
 // 2. 流分离与顺序
 r = await s.run("Write-Output 'L1'\nWrite-Error 'E1'\nWrite-Output 'L2'\nWrite-Warning 'W1'\nWrite-Output 'L3'", 10000);

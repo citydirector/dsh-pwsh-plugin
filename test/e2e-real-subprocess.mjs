@@ -35,8 +35,8 @@ const run = (script, extra) => registration.execute({ script, ...(extra ?? {}) }
 
 check("registered", registration !== null && registration.name === "pwsh_run");
 
-let r = await run("$n='Skadi'\nWrite-Output \"hi $n\"\n@'\nlit $n\n'@");
-check("verbatim", r.text === "hi Skadi\nlit $n", JSON.stringify(r.text));
+let r = await run("$n='world'\nWrite-Output \"hi $n\"\n@'\nlit $n\n'@");
+check("verbatim", r.text === "hi world\nlit $n", JSON.stringify(r.text));
 
 await run("$global:e2e = 10");
 r = await run("$global:e2e += 5\nWrite-Output $global:e2e");

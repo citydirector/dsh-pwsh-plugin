@@ -21,7 +21,7 @@
  *   3) /var/tmp 挂载封印（默认开）：
  *      在 userns 的 mountns 内 bind 自身后 remount,ro。
  *      landlock 封不住子目录——父子规则取并集，"/var 全权" 会吞掉 "/var/tmp 只读"，
- *      只有 mount 能精细封印。/var/tmp 是 ext4 磁盘、本机无程序依赖它，
+ *      只有 mount 能精细封印。/var/tmp 是 ext4 磁盘、实测环境中没有程序依赖它，
  *      封掉零代价（SemLock / SharedMemory / gcc / git / curl 实测全正常）。
  *      /tmp 与 /dev/shm 必须保留：/tmp 是所有工具的默认临时目录，
  *      /dev/shm 是 POSIX 共享内存挂载点，封掉后 python multiprocessing 直接崩。

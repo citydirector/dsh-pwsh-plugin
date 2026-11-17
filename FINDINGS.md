@@ -86,7 +86,7 @@ node 24.22.1，全部数字均为实测，不是估算。
 
 | 卖点 | 实测 |
 |---|---|
-| 零转义 | `$n='Skadi'; "hi $n"` → `hi Skadi`；`@' lit $n '@` 原样 |
+| 零转义 | `$n='world'; "hi $n"` → `hi world`；`@' lit $n '@` 原样 |
 | 无长度限制 | 81,798 字符脚本 61ms 跑完；挂载后再测 91,741 字符照常（原生 32,700 就挂） |
 | 省启动 | 首调用约 370ms（含服务端 boot），此后往返 **1.3ms/次**（50 次共 64ms）；原生每次 300–500ms |
 | 状态保留 | `$plain` / `$global:` / `Set-Location` / `$env:` / `Import-Module` 全保留 |
@@ -202,7 +202,7 @@ read-only 下 pwsh 以 **ConstrainedLanguage** 运行：
   - `tools/pre-execute` 钩子：`PreToolDecision` 只有 `allow` / `deny` / `cancel` / `ask`，
     **没有 replace 语义**；改 `exec.arguments` 是踩未文档化的洞（官方注释：call identity immutable）。
   - per-agent / preset realm 注册同名 `pwsh`：类型上可行（`ScopedLayers.merge` 注释：Scoped tools shadow globals），
-    `custom-bash.mjs` 就是同款手法；但本机 presets 里 `agent.ctx.tools.register` **零先例**，风险高一档，
+    `custom-bash.mjs` 就是同款手法；但测试机 presets 里 `agent.ctx.tools.register` **零先例**，风险高一档，
     而且真要保留审批/截断就得自己重做一遍执行器。
 - **不存在「拿到原实现再包装」的公开 API**（`get(name)` 拿得到 definition，但同名注册必须先自己占位）。
 
@@ -220,7 +220,7 @@ read-only 下 pwsh 以 **ConstrainedLanguage** 运行：
 ### 1. 为什么 landlock 能成
 
 landlock 是**进程级、不可回退、不需要 root** 的文件系统访问控制（syscall 444/445/446），
-本机内核 `6.18.33.2-microsoft-standard-WSL2` 的 **ABI = 7**。
+测试机内核 `6.18.33.2-microsoft-standard-WSL2` 的 **ABI = 7**。
 
 关键洞察是 **`/init` 不进白名单**：WSL 的所有 Windows interop 都要经 `/init` 中转，
 它一被 landlock 挡住，`cmd.exe` / `pwsh.exe` / 任意绝对路径 PE **全部无法执行**。
@@ -474,7 +474,7 @@ allow(rs, "/dev", all);   allow(rs, "/dev/shm", ro);  → /dev/shm/_llt  WROTE
 ### 15. `/var/tmp` 与 `/dev/shm` 的定性（这两个什么时候用到）
 
 性质：`/var/tmp` = **ext4 磁盘**（重启保留）；`/tmp` 与 `/dev/shm` = **tmpfs 内存**。
-本机 `/var/tmp` 只有 2 个 `systemd-private-*`（polkit / systemd-logind），`TMPDIR` 未设置，
+测试机 `/var/tmp` 只有 2 个 `systemd-private-*`（polkit / systemd-logind），`TMPDIR` 未设置，
 `tempfile.gettempdir()` = `/tmp`，git 无 `core.tempdir` → **封它零代价**（已封）。
 
 `/dev/shm` 是 POSIX `shm_open` / 信号量的挂载点，**是硬需求**：
@@ -594,7 +594,7 @@ full-access 不挂围栏、流分离 + `exit code: 7`、2000 行大输出 ——
 
 外部有两条路：
 
-1. **`dsh plugin` CLI**（本机可用的那条）：
+1. **`dsh plugin` CLI**（测试机可用的那条）：
 
    ```powershell
    $env:DSH_HOME = '<DSH_HOME>'
@@ -915,7 +915,7 @@ bundle 模式给不出新 URL，所以 `dsh plugin add …#vX.Y.Z` 装新版本�
 同一实验也顺手确认了恢复路径：把文件写回原内容后，五个承重文件（`plugin/index.mjs`、`session.mjs`、
 `session-server.ps1`、`package.json`、`cordis.patch.yml`）与工作区 md5 全同。
 
-## 二十二、llrun 候选探测与两种「非本机」环境（2026-10-24）
+## 二十二、llrun 候选探测与两种「非测试机」环境（2026-10-24）
 
 ### 1. 默认路径改候选探测，且探测脚本必须走 stdin
 
@@ -949,7 +949,7 @@ collect 时才存在，不该把可用性押在它上面。
 
 ### 3.「UAC 正常」：决定因素是 DACL 的两条权限位，不是属主
 
-本机 UAC 关闭（`EnableLUA = 0`），进程带完整令牌。用 `runas /trustlevel:0x20000` 造受限令牌
+测试机 UAC 关闭（`EnableLUA = 0`），进程带完整令牌。用 `runas /trustlevel:0x20000` 造受限令牌
 （只剩 `SeChangeNotifyPrivilege`，等价于 UAC 开着的标准用户）做对照，三组目录各测一次 `confine`：
 
 | 目录 | 属主 | DACL（当前用户） | 受限令牌下 confine |
@@ -958,8 +958,8 @@ collect 时才存在，不该把可用性押在它上面。
 | 同上 + `icacls /grant <user>:(OI)(CI)F` | 当前用户 | 全控制 | **OK**（`enforcement=partial`）|
 | `C:\Users\<user>\<dir>`（用户目录下）| 当前用户 | 继承 `FullControl` | **OK** |
 
-对照全令牌（本机现状）：三组都 OK，包括盘符根下只有 `Modify` 的目录 —— 完整令牌能自己改写 DACL，
-受限令牌不能。这就是「本机能跑不代表开了 UAC 也能跑」的全部原因。
+对照全令牌（测试机现状）：三组都 OK，包括盘符根下只有 `Modify` 的目录 —— 完整令牌能自己改写 DACL，
+受限令牌不能。这就是「测试机能跑不代表开了 UAC 也能跑」的全部原因。
 
 源码依据（`dsh-sandbox-windows-acl`）：`grantWrite` 用 `SetNamedSecurityInfoW(path, 1, 20, …)` 同时写
 DACL 与 SACL（低完整性标签），注释原文：`The directory must be owned by the caller AND grant
@@ -996,8 +996,8 @@ workspace 取用户目录下的一个临时目录）：
 | `presets/` 是否存在 | **False** |
 | 该 profile patch 里 `custom-bash` 计数 | **0** |
 
-→ `presets/shared/custom-bash.mjs` 只是本机预设（skadi / skadi-route / skadi-ptc）的私有物，不是 DSH 的通用组件。
-方案 C 只对本机有效，换个用户就无从下手，达不到「别人不用麻烦」。
+→ `presets/shared/custom-bash.mjs` 只是测试机预设（skadi / skadi-route / skadi-ptc）的私有物，不是 DSH 的通用组件。
+方案 C 只对测试机有效，换个用户就无从下手，达不到「别人不用麻烦」。
 
 ### 2. 方案 D：让 bundle 的 patch 自己插这一行
 
@@ -1055,14 +1055,14 @@ function packagedLlrunPath() {
 }
 ```
 
-**llrun 在 git 里丢了可执行位。** `git ls-files -s wsl/llrun` 原本是 `100644`。本机侥幸能跑纯属 9p 挂载的
+**llrun 在 git 里丢了可执行位。** `git ls-files -s wsl/llrun` 原本是 `100644`。测试机侥幸能跑纯属 9p 挂载的
 功劳（`/proc/mounts`: `9p rw,noatime,aname=drvfs;path=D:\;uid=1000;...`，Windows 侧一律给 `rwxrwxrwx`）；
 在 ext4 上模拟 clone（`chmod 644`）→ 探测 `test -x` 失败 → fail-closed。用
 `git update-index --chmod=+x wsl/llrun` 改成 `100755`（`core.filemode false` 时只改索引）。
 
 ### 4. 反证实验：负向用例为什么一开始没抓到
 
-把 `wsl/llrun` 临时改名后跑负向探针，结果是 `UNEXPECTED: ran` —— 因为本机
+把 `wsl/llrun` 临时改名后跑负向探针，结果是 `UNEXPECTED: ran` —— 因为测试机
 `/home/<user>/.local/bin/llrun` 真实存在，探测命中了它。捕获探测脚本的 stdin 才看清候选顺序。
 把 `HOME` 指到空目录后才真正走到包内那份（`RESULT: "PACKAGED-ONLY-HOME"`）。
 `test/bashtest.mjs` 的 `llrun-packaged-candidate` 因此必须同时挪开 `HOME`。
@@ -1085,7 +1085,7 @@ function packagedLlrunPath() {
 
 `_sky`（克隆 desktop 的 patch + `presets/` 后再装 bundle）：`id: custom-bash` 共 **4 条**（1 条 bundle + 3 条手写）。
 patch 层不去重（`applyEntryPatches` 的 insert 分支就是 `data.push(...insert)`），boot 时同名注册是硬错误
-→ **本机 desktop 直接装会撞双行陷阱，必须先删那三处手写行。**
+→ **测试机 desktop 直接装会撞双行陷阱，必须先删那三处手写行。**
 
 那三处已在 2026-10-25 删掉（`profiles/desktop/cordis.patch.yml` 1769 → 1736 行），删后
 `grep 'id: custom-bash'` 在该文件里为 **0**，`pwsh-run` 也只剩 bundle 那一条。
@@ -1201,7 +1201,7 @@ while ($null -ne $__e.InnerException) { $__e = $__e.InnerException }
 第二道门（`拒绝访问|Access is denied|StandardOutputEncoding…`）不动。denialtest 补 2 项
 「内层编码文案命中」与「只有拒绝访问、没有编码线索时不触发（太泛）」，9 → 11 项。
 
-### 提示里的走法必须真的在本机跑得通
+### 提示里的走法必须真的在测试机跑得通
 
 19 组探针（`$env:TEMP\pr*_<guid>`，跑完即删）的结论：
 
@@ -1509,7 +1509,7 @@ if (this.ownerContext.get("hmr") !== void 0 && known !== void 0 && Object.hasOwn
 前两种都不该发起安装：第一种装完就会生效，第二种装了也是同一份字节。第三种最阴 —— 标签变了、声明
 的版本没变，于是每一轮检查都判 `available`、每一轮都想装、每一轮都被拒。`attempted` 这个「装过别
 再装」的集合建在 `startAutoUpdate()` 里，热替换重建后清空，所以退避会一路爬到 2 小时封顶，从此每 2 小时
-重装一次同样的字节，**且只写 `ctx.logger.info`** —— 本机 `data/logs` 里 2026-10-25 一条 pwsh-run 日志
+重装一次同样的字节，**且只写 `ctx.logger.info`** —— 测试机 `data/logs` 里 2026-10-25 一条 pwsh-run 日志
 都没有落盘，对用户完全静默。
 
 ### 解法：安装前拿三个已有的事实比对
@@ -1644,7 +1644,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/us
 000644    16706 package/wsl/custom-bash.mjs
 ```
 
-本机一直没人发现，是因为仓库在工作区 `/mnt/d`（9p 挂载一律 `rwxrwxrwx`），开发机上又真装过 llrun，
+测试机一直没人发现，是因为仓库在工作区 `/mnt/d`（9p 挂载一律 `rwxrwxrwx`），开发机上又真装过 llrun，
 前四个候选总有命中的。而在真实 Linux 上用 registry 装的用户，五个候选全落空，
 `bash` 工具在 workspace-write / read-only 下 **直接 fail-closed，完全不能用**。
 
@@ -1814,7 +1814,7 @@ No authorization header was set for the request.
 
 ### 测试
 
-`test/support.mjs` 里加了 `startRegistry`：用 `node:http` 起一个本机假 registry，记录每次请求的
+`test/support.mjs` 里加了 `startRegistry`：用 `node:http` 起一个测试机假 registry，记录每次请求的
 `accept` 头，可随时 `set(name, doc)`。**每个响应都带 `connection: close`** —— undici 会为 keep-alive
 空闲连接挂一个解析器超时计时器，而退避测试要压缩全局 `setTimeout`，那个计时器会被提前触发并抛
 `TypeError: Cannot read properties of undefined (reading 'deref') at Timeout.onParserTimeout`。
@@ -1826,7 +1826,7 @@ No authorization header was set for the request.
 
 ### 决定
 
-博士原话：「我们换成了 NPM 发版，使用 DSH 自带的版本管理和更新功能，就不再需要旧的自动更新机制。」
+决定改为走 npm registry 发布，把版本管理与更新交回 DSH 自带的机制，旧的自动更新链路整体移除。
 
 于是 `plugin/update-check.mjs`、`plugin/update-apply.mjs`、`plugin/auto-update.mjs` 与对应的三份测试
 （`updatetest` 118 项、`autoupdatetest` 46 项、`wiringtest` 24 项）整体删除；`pwsh_run_update` 工具、
@@ -1891,7 +1891,7 @@ pid/uid/gid 相同，identities 请求回 541 字节的 type 12。四格矩阵�
 围栏确实挡了一件事：它屏蔽 `/init`，于是 `wsl2-ssh-agent` 在围栏内起不来 —— 那个桥要调
 `powershell.exe` 去读 Windows 侧的 `\\.\pipe\openssh-ssh-agent`，在围栏内是 `Permission denied`。
 所以守护进程只能在围栏外活，靠一个 systemd 用户单元持续拉起：
-`/home/lihao/.config/systemd/user/skadi-ssh-agent.service`，内容是
+`/home/<user>/.config/systemd/user/skadi-ssh-agent.service`，内容是
 `ExecStart=%h/.local/bin/wsl2-ssh-agent -foreground`、`ExecStartPre` 先删残留 socket、
 `Restart=on-failure`。实测四种保活方式里只有它稳：`eval "$(wsl2-ssh-agent)"` 与
 `setsid nohup ... &` 都在父 shell 退出后几十秒内消失，`systemd-run --user --scope` 直接不返回
@@ -1913,3 +1913,46 @@ fi
 
 计数因此从 117 涨到 **123**（bash 25 → 31）。`docs/llrun.md` 里的 25 与两份 README 的 117 同批改过。
 
+
+## 三十六、适配 DSH 0.2.2-rc.3：PTC 结果形状与客户端注入（2026-11-17）
+
+适配目标是桌面版 `0.2.2-rc.3`（`<desktop install>/resources/app.asar` 的 `package.json`，`dshBuildCommit` `39163dd30f703a79079e2d2446545cff3c453738`）；便携版运行时 `0.2.0-rc.1` 不参与运行。
+
+### 一、生产实现未改，改的是测试夹具
+
+rc.3 的 `PtcExecutor` 读 `result.output`（content blocks）再 `flatMap`，而测试里的 `ptcRuntime.run()` 一直返回 `{logs, value}`：
+
+```
+{"isError":true,"error":{"message":"Cannot read properties of undefined (reading 'flatMap')"}}
+```
+
+这是夹具与宿主契约脱节，不是插件工具的问题 —— `register()` 的 `definition.output` 自 rc.1 起就带 `render`，rc.3 的 `ToolsService.register` 同样要求它。修法是让夹具同时给出三种形状：
+
+```js
+const blocks = (value) => Array.isArray(value) ? value : value === undefined ? [] : [{ type: 'text', text: String(value) }]
+const plain = (value) => { const text = blocks(value).filter((b) => b.type === 'text').map((b) => b.text).join(''); return text.length > 0 ? text : value }
+return { output: blocks(value), logs: [], value: plain(value) }
+```
+
+一处细节：rc.3 的 PTC 绑定把工具返回值渲染成 `"[object Object]"`（实测 `value:{"logs":["[object Object]"]}`），所以 `routingtest` 的三条 PTC 用例改成按调用计数判定，不再断言返回值文本。
+
+### 二、客户端依赖必须写进 `dsh.client.inject`
+
+rc.3 的 349 个官方包里 93 个声明了 `dsh.client`，其中 6 个 inject `@deepseek-ai/dsh-client-ui-primitives`（`dsh-client-ui-agent-team`、`-jobs`、`-schedule`、`-subagent`、`dsh-experimental-client-ui-voice-input`、`dsh-experimental-liveshare`），没有一个 inject `react`。本插件的 `client/index.js` 同时 `require('react')` 和 primitives，原先只声明了 settings —— 补上 primitives，并让 `metatest` 从源码里抽出所有 `require('@deepseek-ai/…')` 逐项比对 inject（`client-inject-covers-requires`），漏声明会当场红。
+
+### 三、没有 web 入口，所以准入契约没有落点
+
+本 bundle 不注册 HTTP、WebSocket 或静态路由（`webServer|createServer|peer` 在 `plugin/` `client/` `wsl/` 零命中），宿主 rc.3 的 `admit()` 与 peer 认证没有入口可挂。设置页只走 `settings.section` 与 `plugins.row.config` 两个客户端槽位；服务端用 `ctx.inject(['settings'], child => …)` 在子作用域取服务，本来就符合依赖分层的要求。
+
+### 四、验收
+
+15 组 **306 项**在 rc.3 宿主下全绿、无跳过：routing 31 / settings 24 / sandbox 15 / e2e 12 / filetools 42 / filelarge 18 / protocol 6 / lifecycle 21 / itest 30 / plugin 15 / bash 31 / bash-e2e 11 / filetools-wsl 13 / denial 11 / meta 26。
+
+两点环境差异需要说明：
+
+- 在 Electron 的 run_code 里跑 `itest`，进程环境缺 PATH 会让 `child-stdio-detached` / `child-utf8-output` 变红；换系统安装的 Node 跑即 30/30 —— 跑法差异，不是插件行为。
+- `DSH_MODULES_ASAR` 只在 Electron 内有效。独立 Node 读 `app.asar/dsh/node_modules/@deepseek-ai` 会 `ENOENT … scandir`：asar 对 Electron 是目录，对普通进程是一个文件。
+
+### 五、asar 读取的两个偏移量
+
+`readUInt32LE(4)` 是 pickle 长度、`readUInt32LE(12)` 才是 header JSON 长度，header 从 16 起，**文件数据起点 = 8 + pickleLength**（不是 16 + headerLength）。本包 entries 25134 / files 22271。走错这一步，读到的偏移会全错。

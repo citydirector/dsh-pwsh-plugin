@@ -19,6 +19,8 @@ PowerShell sessions, optional tool guards and planned file removal for DeepSeek 
 
 Requires **PowerShell 7** and a compatible **DSH 0.2.x** host with settings and tool-guard support. The Windows Bash feature also needs WSL.
 
+Verified against **DSH 0.2.2-rc.3** (desktop). The bundle registers no HTTP, WebSocket or static route, so the host's admission and peer-authentication contract does not apply. The client half uses only the `settings.section` and `plugins.row.config` slots and declares `@deepseek-ai/dsh-client-ui-settings` and `@deepseek-ai/dsh-client-ui-primitives` in `dsh.client.inject`.
+
 In DSH, open **Plugins → Add plugin**, enter `dsh-pwsh-plugin`, and enable it. The bundle registers its tools and settings page automatically.
 
 For the desktop CLI:
@@ -29,7 +31,7 @@ $env:DSH_HOME = '<DSH data directory>'
 & $dsh plugin --profile desktop add 'dsh-pwsh-plugin'
 ```
 
-Use `dsh-pwsh-plugin@<version>` to select a release. The reserved `desktop` profile requires the desktop application's CLI. Remove an old manual `pwsh-run` entry before switching to the bundle to avoid duplicate registration.
+Use `dsh-pwsh-plugin@<version>` to select a release. The reserved `desktop` profile requires the desktop application's CLI. If you previously added a manual `pwsh-run` entry, remove it before installing the bundle to avoid duplicate registration.
 
 ## Run PowerShell
 
@@ -143,7 +145,7 @@ pnpm test
 pnpm run test:all
 ```
 
-The full regression suite currently has **15 scripts / 303 assertions**. It needs Windows, Node.js 24, PowerShell 7, WSL and a loadable DSH runtime. Use `DSH_MODULES` or `DSH_MODULES_ASAR` when automatic runtime discovery is unavailable; release validation must finish without skips. Run `bash wsl/acceptance.sh` from a plain WSL shell, outside the plugin's fence.
+The full regression suite currently has **15 scripts / 306 assertions**. It needs Windows, Node.js 24, PowerShell 7, WSL and a loadable DSH runtime. Use `DSH_MODULES` or `DSH_MODULES_ASAR` when automatic runtime discovery is unavailable; release validation must finish without skips. Run `bash wsl/acceptance.sh` from a plain WSL shell, outside the plugin's fence.
 
 For a release, commit changes, then run:
 

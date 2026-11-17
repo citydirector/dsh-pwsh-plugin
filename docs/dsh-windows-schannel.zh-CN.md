@@ -1,6 +1,6 @@
 # DSH Windows 沙箱与 Schannel 兼容性记录
 
-记录日期：2026-11-12。来源为本机隔离实验及上游代码追溯；与本插件九组修复分开维护。
+记录日期：2026-11-12。来源为测试机隔离实验及上游代码追溯；与本插件九组修复分开维护。
 
 ## 补充核实：curl 联网与 Windows PATH（2026-11-11）
 
@@ -31,7 +31,7 @@ Windows curl 的原始错误：
 
 > curl: (35) schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e)
 
-受限进程的完整性 SID 为 S-1-16-4096（Low），正常对照为 S-1-16-12288（High）。这个对照确认问题随当前 Windows 沙箱令牌出现；本轮没有进一步分离 Low 完整性和 WRITE_RESTRICTED 各自的贡献，也没有证明所有 Windows 主机必然如此。此前记忆中有类似结论，本段以本轮本机实测为依据。
+受限进程的完整性 SID 为 S-1-16-4096（Low），正常对照为 S-1-16-12288（High）。这个对照确认问题随当前 Windows 沙箱令牌出现；本轮没有进一步分离 Low 完整性和 WRITE_RESTRICTED 各自的贡献，也没有证明所有 Windows 主机必然如此。此前记忆中有类似结论，本段以本轮测试机实测为依据。
 
 ### PATH 核对
 
@@ -44,7 +44,7 @@ Windows curl 的原始错误：
 
 Windows 沙箱内需要 HTTPS 时，Windows Node.js 的 https 已验证可用；纯 Linux 网络操作可使用 WSL curl；读取网页也可以用宿主提供的抓取工具。Windows 路径与文件操作仍走 Windows 工具。
 
-如果程序必须依赖 Schannel，应作为 Windows 沙箱后端的兼容性问题单独处理，不能通过修改 PATH 解决，也不应默认放开全部文件权限来掩盖。只读模式的独立进程、本机其它 curl 构建、UAC 标准用户和其它主机未在本段补测；不把这张矩阵扩大成所有环境的保证。
+如果程序必须依赖 Schannel，应作为 Windows 沙箱后端的兼容性问题单独处理，不能通过修改 PATH 解决，也不应默认放开全部文件权限来掩盖。只读模式的独立进程、测试机其它 curl 构建、UAC 标准用户和其它主机未在本段补测；不把这张矩阵扩大成所有环境的保证。
 
 ## 归因追溯：Schannel 故障由谁引入（2026-11-12）
 
@@ -52,7 +52,7 @@ Windows 沙箱内需要 HTTPS 时，Windows Node.js 的 https 已验证可用；
 
 ### 归属结论
 
-**故障触发点在 DSH 上游 Windows ACL 后端的受限令牌构造。** 当前系统 curl 使用 Schannel，在带 restricting SIDs 的 WRITE_RESTRICTED 令牌下无法取得出站 TLS 凭据。这是该安全机制在本机暴露的兼容性缺陷；不能解释成产品有意禁止联网。
+**故障触发点在 DSH 上游 Windows ACL 后端的受限令牌构造。** 当前系统 curl 使用 Schannel，在带 restricting SIDs 的 WRITE_RESTRICTED 令牌下无法取得出站 TLS 凭据。这是该安全机制在测试机暴露的兼容性缺陷；不能解释成产品有意禁止联网。
 
 - pwsh_run 只是委托宿主：plugin/index.mjs:204 解析策略，:226 调用 sandbox.confine(plain, policy, signal)，:230 使用返回的 confined.argv 启动。它没有实现 CreateRestrictedToken。
 - 原生 pwsh 在同一策略下同样失败，排除插件独有的会话协议或编码处理。
@@ -90,14 +90,14 @@ flags 9 = DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED；flags 13 另含历史 LUA_T
 
 | 上游提交 | 日期 | 内容及本轮判断 |
 |---|---|---|
-| [f64ba40](https://github.com/deepseek-ai/deepseek-harness/commit/f64ba40f43961fc65b7e1724132708a0b6d163cf) | 2026-08-07 17:24:33 | Huanqi Cao，feat(sandbox): Windows ACL write-restriction sandbox (restricted-token runner)。首次加入该后端及受限令牌构造；本机重建初版参数也复现同一 TLS 错误，是可追溯的机制来源。 |
+| [f64ba40](https://github.com/deepseek-ai/deepseek-harness/commit/f64ba40f43961fc65b7e1724132708a0b6d163cf) | 2026-08-07 17:24:33 | Huanqi Cao，feat(sandbox): Windows ACL write-restriction sandbox (restricted-token runner)。首次加入该后端及受限令牌构造；测试机重建初版参数也复现同一 TLS 错误，是可追溯的机制来源。 |
 | [441927c](https://github.com/deepseek-ai/deepseek-harness/commit/441927c5268e1abd2be024d3b5bb69e3869b6f06) | 2026-08-08 | 为封堵 C 盘根的越界写入而移除 Authenticated Users；本轮恢复该 SID 仍失败，不能把本次故障归给这一处收紧。 |
 | [d5ad3ba](https://github.com/deepseek-ai/deepseek-harness/commit/d5ad3baeb5d531e31da5e586c3ec3ebedd825169) | 2026-09-18 | 增加 Low 完整性及目录标签，堵 FILE_DELETE_CHILD 删除旁路；仅 Low 的 TLS 对照成功，不能把它当作本次故障引入点。 |
 | [bdd75ca](https://github.com/deepseek-ai/deepseek-harness/commit/bdd75ca1a0ce122a4801fa0e24d26f19159c071b) | 2026-10-26 | Huo Yaoyuan，去掉 LUA_TOKEN 以支持内置 Administrator / WDAGUtilityAccount；带/不带 LUA 的已测组合均失败，不是该修补造成。 |
 
 首次提交的父提交为 4c2d20dbf7709ce88da5f01b163c8daaa1f087aa。初版 token.ts 的关键调用是 DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED，列表为 world / logonSid / authUser / interactive / local / writeSid。当前桌面编译件的调用为 flags 9，read-only 列表为 logonSid / world，workspace-write 另加写能力 SID。
 
-这是一条**代码来源 + 本机参数复现**的归因链；未安装并运行全部历史 DSH 版本，不能宣称已证明每个旧版本在当时 Windows 系统上的表现。当前版本上游 runner.spec.ts 中未检出 curl / Schannel / HTTPS / Invoke-WebRequest 用例；这只能说明该测试文件未覆盖，不能扩大成全仓所有测试都没有。
+这是一条**代码来源 + 测试机参数复现**的归因链；未安装并运行全部历史 DSH 版本，不能宣称已证明每个旧版本在当时 Windows 系统上的表现。当前版本上游 runner.spec.ts 中未检出 curl / Schannel / HTTPS / Invoke-WebRequest 用例；这只能说明该测试文件未覆盖，不能扩大成全仓所有测试都没有。
 
 ### 记录更正与后续方向
 
@@ -105,13 +105,13 @@ flags 9 = DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED；flags 13 另含历史 LUA_T
 
 后续应在 DSH Windows ACL 后端增加 Schannel / curl / Invoke-WebRequest 回归，并研究保留文件写入与删除边界的兼容方案。不能直接撤 Low（会回开删除旁路，且本轮 High + 写限制仍然失败），也不能恢复宽 SID 列表（本轮无效，历史上还会回开越界写入）。Node.js HTTPS / WSL OpenSSL 的可用性已在前段实测，可作为沙箱内现有的网络路径。
 
-本轮没有修改上游、应用归档、生产权限或系统网络配置，没有创建公开 issue / PR；归因实验只覆盖本机 Windows 构建，其他系统及 UAC 标准用户仍需独立验证。
+本轮没有修改上游、应用归档、生产权限或系统网络配置，没有创建公开 issue / PR；归因实验只覆盖测试机 Windows 构建，其他系统及 UAC 标准用户仍需独立验证。
 
 ## 新版上游复核（2026-11-12）
 
 联网核对时，最新标签为 [dsh-v0.2.2-rc.2](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.2-rc.2)，commit ddac96760b6edf8fa0fe17cbdcf0b512f4c12b2c；master 为 e8f7b93a344964de3dca1ace9e72b6e4d6de87cb，提交时间2026-11-11T02:49:46Z。发布标签与master的Windows ACL后端src树相同。
 
-与本机fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159相比，token.ts、runner.ts、spawn.ts、ffi.ts、acl.ts、grant.ts均为相同Git blob；tests树也完全相同。src仅index.ts新增导出isTempRootInsideWorkspace，path-boundary.ts把既有临时目录包含关系判断抽成该函数；没有改变Schannel、令牌、进程启动或凭据处理。token.ts仍为DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED加logon SID / Everyone / 写能力SID。
+与测试机fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159相比，token.ts、runner.ts、spawn.ts、ffi.ts、acl.ts、grant.ts均为相同Git blob；tests树也完全相同。src仅index.ts新增导出isTempRootInsideWorkspace，path-boundary.ts把既有临时目录包含关系判断抽成该函数；没有改变Schannel、令牌、进程启动或凭据处理。token.ts仍为DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED加logon SID / Everyone / 写能力SID。
 
 结论：截至该次核对，最新发布与master中没有针对此故障的修复，不能指望升级到rc.2恢复系统curl/IWR。此为源码与历史差异核对，没有安装新版运行；仍不泛化所有Windows主机。API查询dev分支失败，未对不存在或不可取的dev分支作结论。
 

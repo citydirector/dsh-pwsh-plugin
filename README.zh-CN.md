@@ -19,6 +19,8 @@
 
 需要 **PowerShell 7**，以及支持设置服务和工具守卫的兼容 **DSH 0.2.x**。Windows 的 Bash 功能还需要 WSL。
 
+已在桌面版 **DSH 0.2.2-rc.3** 上核验。本 bundle 不注册任何 HTTP、WebSocket 或静态路由，宿主的准入与对端认证契约不适用。客户端只使用 `settings.section` 与 `plugins.row.config` 两个槽位，并在 `dsh.client.inject` 中声明 `@deepseek-ai/dsh-client-ui-settings` 与 `@deepseek-ai/dsh-client-ui-primitives`。
+
 在 DSH 的**插件 → 添加插件**中输入 `dsh-pwsh-plugin` 并启用。工具和设置页由 bundle 自动接入。
 
 桌面版 CLI 安装：
@@ -143,7 +145,7 @@ pnpm test
 pnpm run test:all
 ```
 
-完整回归目前为 **15 组、303 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。
+完整回归目前为 **15 组、306 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。
 
 发版前先提交改动，再执行：
 

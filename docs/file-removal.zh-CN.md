@@ -80,7 +80,7 @@ Agent 确认清单与宿主审批是两件事。`workspace-write` 下回收站�
 
 Windows 新目录创建时复制父 DACL 中现有的 capability SID 与拒绝项，补当前用户的继承授权；只作用于新对象，不修改已有目录。真实 Low 子进程已验证能写入与清理，正常用户进程也能访问。Low 标签本身不能解释一切；已有目录可能同时涉及 OWNER RIGHTS、DELETE 权限、锁或回收站策略。工具会报告错误及可读取的 DACL，不自动 `takeown`、`Set-Acl` 或放宽 Everyone。
 
-Windows workspace 应使用默认 Windows 临时后端。WSL 原生 workspace 可指定 `backend: "wsl"`，通过现有 `custom-bash` / `llrun` 执行固定工作进程；需要 WSL 中可用的 Node 兼容运行时与 `gio`。本机已验证 Node 命令指向 Bun 时的兼容性。Linux 原生后端复用相同协议，但未在独立 Linux/macOS 宿主上验收。
+Windows workspace 应使用默认 Windows 临时后端。WSL 原生 workspace 可指定 `backend: "wsl"`，通过现有 `custom-bash` / `llrun` 执行固定工作进程；需要 WSL 中可用的 Node 兼容运行时与 `gio`。测试机已验证 Node 命令指向 Bun 时的兼容性。Linux 原生后端复用相同协议，但未在独立 Linux/macOS 宿主上验收。
 
 ## 能保证的范围
 

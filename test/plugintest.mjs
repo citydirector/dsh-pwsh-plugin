@@ -37,8 +37,8 @@ const run = (script, extra) => registration.execute({ script, ...(extra ?? {}) }
 check("registered", registration !== null && registration.name === "pwsh_run");
 
 // 1. 零转义 + 无 shell 中转
-let r = await run("$n='Skadi'\nWrite-Output \"hi $n\"\n@'\nlit $n\n'@");
-check("verbatim", r.text === "hi Skadi\nlit $n", JSON.stringify(r.text));
+let r = await run("$n='world'\nWrite-Output \"hi $n\"\n@'\nlit $n\n'@");
+check("verbatim", r.text === "hi world\nlit $n", JSON.stringify(r.text));
 
 // 2. 状态跨调用保留（同一 sessionId）
 await run("$global:acc = 41");

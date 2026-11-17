@@ -328,7 +328,7 @@ const lockedLlrun = '/etc/hostname'
 // Q. SSH agent：非交互 shell 不读 ~/.bashrc，用户终端里能用的 SSH_AUTH_SOCK
 // 在 bash 工具里天然是空的。脚本前置的探测要能补上它，且不能盖掉用户自己的设置。
 // socket 路径必须是 WSL 视角（/tmp/...），因为断言跑在 WSL 的 bash 里，
-// Windows 的 D:\Temp 与它是两套坐标。
+// Windows 侧的 TEMP 与它分属两套坐标。
 const AGENT_SOCK = '/tmp/_skadi_agent_probe.sock'
 
 // Q1 生成器本身：判据是 -S（真 socket），且不覆盖已设的值
