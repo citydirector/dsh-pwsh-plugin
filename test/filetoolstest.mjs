@@ -130,6 +130,8 @@ try {
  const temp2=await call('file_temp',{action:'create'});writeFileSync(join(temp2.path,'.file-temp-owner'),'tampered')
  await assert.rejects(()=>call('file_temp',{action:'clean',tempId:temp2.tempId}),/identity/);check('tampered-temp-is-not-cleaned',()=>assert(existsSync(temp2.path)))
  await assert.rejects(()=>call('file_temp',{action:'clean',tempId:'arbitrary'}),/Unknown/);check('unregistered-temp-refused',()=>{})
+ await assert.rejects(()=>call('file_temp',{action:'clean'}),/tempId that action=create returned/);check('clean-demands-the-created-temp-id',()=>{})
+ await assert.rejects(()=>call('file_temp',{action:'clean',path:root}),/tempId that action=create returned/);check('clean-rejects-a-path-instead-of-temp-id',()=>{})
  mode='read-only';await assert.rejects(()=>call('file_temp',{action:'create'}),/read-only/);check('read-only-refuses-scratch-writes',()=>{});mode='danger-full-access'
  const dir=join(root,'directory');mkdirSync(dir);writeFileSync(join(dir,'child.txt'),'child')
  p=await call('file_remove',{action:'plan',paths:[dir,join(dir,'child.txt')]});check('nested-targets-deduplicated',()=>assert(p.targets.length===1&&p.entries.length===2))

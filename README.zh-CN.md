@@ -98,7 +98,7 @@ $env:DSH_HOME = '<DSH 数据目录>'
 - 内部符号链接和 Windows junction 只处理链接本体，不遍历目标。根目标及祖先中的链接、挂载点、保护根和 `.git` 路径均拒绝。
 - 取消不会撤销已经完成的回收。重试前先核对返回结果与剩余目标。
 
-测试或构建产物可通过 `file_temp` 的 `action: "create"` 创建新目录，取得 `tempId`；结束后用 `action: "clean"` **永久清理该登记目录及其内容**。已有目录不能注册。大目录预算、进度、取消和链接检查同样适用。
+测试或构建产物可通过 `file_temp` 的 `action: "create"` 创建新目录，取得 `tempId`；结束后用 `action: "clean"`（只接受该 `tempId`，不接受路径）**永久清理该登记目录及其内容**。已有目录不能注册。大目录预算、进度、取消和链接检查同样适用。
 
 审批示例、完整限制与失败处理见[删除工具指南](docs/file-removal.zh-CN.md)。
 
@@ -145,7 +145,7 @@ pnpm test
 pnpm run test:all
 ```
 
-完整回归目前为 **15 组、306 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。
+完整回归目前为 **15 组、308 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。
 
 发版前先提交改动，再执行：
 

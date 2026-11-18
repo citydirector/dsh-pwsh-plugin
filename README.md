@@ -98,7 +98,7 @@ Long operations return an `operationId`. Use `action: "status"` or `action: "can
 - Internal symlinks and Windows junctions are handled as links, without traversing their destinations. Target/ancestor links, mounted filesystems, protected roots and `.git` paths are refused.
 - Cancellation does not undo completed removals. Check the reported results and remaining targets before retrying.
 
-For test or build output, `file_temp` with `action: "create"` returns a new directory and `tempId`. Later, `action: "clean"` with that ID **permanently deletes only that registered directory**. Existing directories cannot be registered. Large-tree budgets, progress, cancellation and link checks apply here too.
+For test or build output, `file_temp` with `action: "create"` returns a new directory and `tempId`. Later, `action: "clean"` with that ID (a filesystem path is not accepted) **permanently deletes only that registered directory**. Existing directories cannot be registered. Large-tree budgets, progress, cancellation and link checks apply here too.
 
 See the [file-removal guide](docs/file-removal.zh-CN.md) for approval examples, limits and failure handling.
 
@@ -145,7 +145,7 @@ pnpm test
 pnpm run test:all
 ```
 
-The full regression suite currently has **15 scripts / 306 assertions**. It needs Windows, Node.js 24, PowerShell 7, WSL and a loadable DSH runtime. Use `DSH_MODULES` or `DSH_MODULES_ASAR` when automatic runtime discovery is unavailable; release validation must finish without skips. Run `bash wsl/acceptance.sh` from a plain WSL shell, outside the plugin's fence.
+The full regression suite currently has **15 scripts / 308 assertions**. It needs Windows, Node.js 24, PowerShell 7, WSL and a loadable DSH runtime. Use `DSH_MODULES` or `DSH_MODULES_ASAR` when automatic runtime discovery is unavailable; release validation must finish without skips. Run `bash wsl/acceptance.sh` from a plain WSL shell, outside the plugin's fence.
 
 For a release, commit changes, then run:
 

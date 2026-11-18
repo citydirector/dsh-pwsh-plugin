@@ -215,8 +215,10 @@ export function installFileTools(ctx, config, resolvePolicy) {
    temporary.set(id,{...result,backend,cwd,key:c.key,backendIdentity:c.backendIdentity})
    return response({tempId:id,path:result.path,cleanup:'Call file_temp action=clean with this tempId. Only this new directory is authorized for permanent temporary cleanup.'})
   }
+  if(args.action!=='clean')throw Error('Unknown file_temp action.')
+  if(typeof args.tempId!=='string'||args.tempId.length===0)throw Error('file_temp action=clean needs the tempId that action=create returned; a path is not accepted.')
   const t=temporary.get(args.tempId)
-  if(args.action!=='clean'||!t||!owned(t,c))throw Error('Unknown temporary directory or changed session/sandbox boundary.')
+  if(!t||!owned(t,c))throw Error('Unknown temporary directory or changed session/sandbox boundary.')
   if(cleaning.has(args.tempId))throw Error('This temporary directory is already being cleaned; inspect the active operation.')
   cleaning.add(args.tempId)
   try{return await start(c,exec,'file_temp','clean',args.waitMs??10000,async(job,activeExec)=>{
