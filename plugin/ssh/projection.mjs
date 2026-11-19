@@ -1,0 +1,121 @@
+// SSH 标签页的会话投影：完全由会话事件折叠出来（宿主投影没有直接推送接口）。
+// 来源：ssh_* 的 tool/call 与 tool/result，以及本模块注入的 [ssh] 通知（user/message, source.kind = ssh）。
+// 倒计时不进状态，客户端按 expiresAt / idleDeadline 自己算，免得每秒产生事件。
+
+export const PROJECTION_KEY = 'sshSessions'
+const TOOLS = new Set(['ssh_open', 'ssh_exec', 'ssh_read', 'ssh_kill', 'ssh_list'])
+const MAX_ROWS = 64
+
+// 宿主只要求有 parse()；不引入 zod。
+const plainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+export const stateSchema = { parse(value) { if (!plainObject(value) || !plainObject(value.calls) || !plainObject(value.rows)) throw new Error('invalid ssh projection state'); return value } }
+export const viewSchema = { parse(value) { if (!plainObject(value) || !Array.isArray(value.rows)) throw new Error('invalid ssh projection view'); return value } }
+
+export const initState = () => ({ calls: {}, rows: {} })
+
+function resultCallId(message) {
+  if (message?.source?.kind === 'tool' && typeof message.source.callId === 'string') return message.source.callId
+  return message?.content?.find?.((block) => block.type === 'tool-result' && typeof block.toolCallId === 'string')?.toolCallId
+}
+
+function resultText(message) {
+  const blocks = message?.content ?? []
+  const parts = []
+  for (const block of blocks) {
+    if (block.type === 'text') parts.push(block.text)
+    else if (block.type === 'tool-result') for (const inner of block.content ?? block.output ?? []) if (inner?.type === 'text') parts.push(inner.text)
+  }
+  return parts.join('\n')
+}
+
+function parseJson(text) {
+  try { const value = JSON.parse(text); return plainObject(value) ? value : undefined } catch { return undefined }
+}
+
+function setRow(state, id, patch, at) {
+  const prev = state.rows[id] ?? { sessionId: id }
+  const rows = { ...state.rows, [id]: { ...prev, ...patch, updatedAt: at ?? prev.updatedAt } }
+  const ids = Object.keys(rows)
+  if (ids.length > MAX_ROWS) {
+    const dead = ids.filter((key) => rows[key].state === 'dead').slice(0, ids.length - MAX_ROWS)
+    for (const key of dead) delete rows[key]
+  }
+  return { ...state, rows }
+}
+
+/** 纯函数：一条事件折进状态。不关心的事件原样返回同一引用。 */
+export function applyEvent(state, event) {
+  const at = typeof event.time === 'number' ? event.time : typeof event.at === 'number' ? event.at : undefined
+  if (event.type === 'tool/call') {
+    const { name, callId, arguments: args } = event.data ?? {}
+    if (!TOOLS.has(name) || typeof callId !== 'string') return state
+    const parsed = typeof args === 'string' ? parseJson(args) : plainObject(args) ? args : undefined
+    let next = { ...state, calls: { ...state.calls, [callId]: { name, sessionId: parsed?.sessionId, background: parsed?.background === true } } }
+    if (name === 'ssh_exec' && typeof parsed?.sessionId === 'string' && next.rows[parsed.sessionId] !== undefined && next.rows[parsed.sessionId].state !== 'dead') {
+      next = setRow(next, parsed.sessionId, { state: 'running', mode: parsed.background === true ? 'bg' : 'fg', lastActivity: at }, at)
+    }
+    return next
+  }
+  if (event.type === 'tool/result') {
+    const message = event.data?.message
+    const callId = resultCallId(message)
+    const call = callId === undefined ? undefined : state.calls[callId]
+    if (call === undefined) return state
+    const calls = { ...state.calls }
+    delete calls[callId]
+    let next = { ...state, calls }
+    const value = parseJson(resultText(message))
+    const failed = message?.isError === true || value === undefined
+    if (call.name === 'ssh_open' && !failed && typeof value.sessionId === 'string') {
+      next = setRow(next, value.sessionId, { host: value.host, state: 'idle', cwd: value.cwd, shell: value.shell, os: value.os, expiresAt: value.expiresAt, idleMinutes: value.idleMinutes, openedAt: at, lastActivity: at, deadReason: undefined, mode: undefined }, at)
+    } else if (call.name === 'ssh_exec' && typeof call.sessionId === 'string' && next.rows[call.sessionId] !== undefined) {
+      const row = next.rows[call.sessionId]
+      if (row.state !== 'dead') {
+        if (!failed && typeof value.jobId === 'string' && value.exitCode === undefined) next = setRow(next, call.sessionId, { state: 'running', mode: 'bg', jobId: value.jobId, lastActivity: at }, at)
+        else next = setRow(next, call.sessionId, { state: 'idle', mode: undefined, cwd: value?.cwd ?? row.cwd, lastActivity: at }, at)
+      }
+      if (failed && /session could not be recovered|has ended/.test(resultText(message))) next = setRow(next, call.sessionId, { state: 'dead', deadReason: 'killed' }, at)
+    } else if (call.name === 'ssh_kill' && typeof call.sessionId === 'string' && !failed) {
+      next = setRow(next, call.sessionId, { state: 'dead', deadReason: value.reason ?? 'killed', mode: undefined }, at)
+    } else if (call.name === 'ssh_list' && !failed && Array.isArray(value.sessions)) {
+      for (const s of value.sessions) {
+        if (typeof s?.sessionId !== 'string') continue
+        next = setRow(next, s.sessionId, { host: s.host, state: s.state, mode: s.mode, cwd: s.cwd, deadReason: s.deadReason, expiresAt: s.expiresAt, lastActivity: s.lastActivity }, at)
+      }
+    }
+    return next
+  }
+  if (event.type === 'user/message' && event.data?.source?.kind === 'ssh') {
+    const text = (event.data.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n')
+    let next = state
+    for (const line of text.split('\n')) {
+      const m = /^\[ssh\] (\S+) · (s\d+) (后台任务 (j\d+) 已结束|会话已结束：([^，。]+))/.exec(line)
+      if (m === null || next.rows[m[2]] === undefined) continue
+      if (m[4] !== undefined) next = setRow(next, m[2], { state: 'idle', mode: undefined, jobId: undefined, lastActivity: at }, at)
+      else next = setRow(next, m[2], { state: 'dead', mode: undefined, deadReasonText: m[5] }, at)
+    }
+    return next
+  }
+  return state
+}
+
+export function view(state) {
+  const rows = Object.values(state.rows).sort((a, b) => Number(a.sessionId.slice(1)) - Number(b.sessionId.slice(1)))
+  return { rows }
+}
+
+export function projectionDefinition() {
+  return {
+    key: PROJECTION_KEY,
+    stateSchema,
+    stateVersion: 1,
+    init: () => initState(),
+    apply: (state, event) => applyEvent(state, event),
+    wire: { viewSchema, view },
+  }
+}
+
+export function registerProjection(ctx) {
+  // register() 本身随 ctx 的生命周期撤销，热替换不会留下重复注册。
+  ctx.sessionProjections.register(projectionDefinition())
+}

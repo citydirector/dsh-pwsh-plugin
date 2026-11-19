@@ -13,13 +13,14 @@ PowerShell sessions, optional tool guards and planned file removal for DeepSeek 
 - **Sandbox integration:** each DSH session has its own state. Permission, workspace and sandbox-backend changes are checked before execution.
 - **Live settings:** profile-wide switches for PowerShell routing and deletion confirmation, with Chinese and English UI. Saving either switch preserves running sessions.
 - **Planned removal:** review targets before recycling. Large directories support summaries, complete inventory pages, progress and cancellation; registered temporary directories support scoped cleanup.
+- **SSH sessions (opt-in):** the model can open several persistent shells on hosts from an allow-list, run commands in the foreground or background, and get a short in-session notice when a background job ends. See [SSH sessions](#ssh-sessions).
 - **WSL Bash fence:** on Windows, the bundled Bash tool uses `llrun` to enforce the session's write boundary. The binary ships with the package.
 
 ## Install
 
 Requires **PowerShell 7** and a compatible **DSH 0.2.x** host with settings and tool-guard support. The Windows Bash feature also needs WSL.
 
-Verified against **DSH 0.2.2-rc.3** (desktop). The bundle registers no HTTP, WebSocket or static route, so the host's admission and peer-authentication contract does not apply. The client half uses only the `settings.section` and `plugins.row.config` slots and declares `@deepseek-ai/dsh-client-ui-settings` and `@deepseek-ai/dsh-client-ui-primitives` in `dsh.client.inject`.
+Verified against **DSH 0.2.2-rc.3** (desktop). The bundle registers no HTTP, WebSocket or static route, so the host's admission and peer-authentication contract does not apply. The client half uses the `settings.section` and `plugins.row.config` slots, plus a `conversation.view` tab for SSH sessions that reads a session projection and acts through the host's `remote.commands` channel (no route of its own), and declares `@deepseek-ai/dsh-client-ui-settings` and `@deepseek-ai/dsh-client-ui-primitives` in `dsh.client.inject`.
 
 In DSH, open **Plugins → Add plugin**, enter `dsh-pwsh-plugin`, and enable it. The bundle registers its tools and settings page automatically.
 
@@ -101,6 +102,19 @@ Long operations return an `operationId`. Use `action: "status"` or `action: "can
 For test or build output, `file_temp` with `action: "create"` returns a new directory and `tempId`. Later, `action: "clean"` with that ID (a filesystem path is not accepted) **permanently deletes only that registered directory**. Existing directories cannot be registered. Large-tree budgets, progress, cancellation and link checks apply here too.
 
 See the [file-removal guide](docs/file-removal.zh-CN.md) for approval examples, limits and failure handling.
+
+## SSH sessions
+
+An optional module (`dsh-pwsh-plugin/ssh`, entry id `ssh`, shipped **disabled** in `cordis.patch.yml`) gives the model persistent SSH shells: `ssh_open`, `ssh_exec`, `ssh_read`, `ssh_kill`, `ssh_list`.
+
+- System OpenSSH, one connection per session, fixed safe options (`BatchMode=yes`, `RemoteCommand=none`, `RequestTTY=no`, `ForwardAgent=no`, …) and a private known_hosts file in front of yours. Each host runs on a fixed side: `via: windows` or `via: wsl` (with an optional `agentSocket`).
+- Only hosts in the list can be reached. An approval list (IP, CIDR, hostname or `*.example.com`) makes `ssh_open` and every `ssh_exec` on matching hosts ask for manual approval; `approvalListInvert` flips it into an allow-list.
+- Variables and `cd` persist. One command at a time per session; background jobs return a `jobId` and post a one-line notice when they finish.
+- Idle timeout (30 min), hard cap (24 h), per-host (4) and global (8) limits. Sessions belong to the root DSH session.
+- A **SSH** tab above the conversation lists sessions with their state, directory, countdown and an End button.
+- Remote hosts are **not** covered by the local sandbox, llrun or the deletion guard. POSIX remotes only; no TTY.
+
+Full reference (Chinese): [docs/ssh.zh-CN.md](docs/ssh.zh-CN.md).
 
 ## Configuration
 
