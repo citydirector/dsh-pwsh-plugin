@@ -37,7 +37,9 @@
     approvalListInvert: false
 ```
 
-不想碰 YAML 也可以：在「设置 → SSH 会话」里填，或在插件管理里点 `ssh` 行的「配置」，两处是同一份表单（见「设置页」）。注意 `ssh` 行默认 `disabled: true`，此时宿主不服务 `ssh` 命名空间，表单会显示「配置暂不可用」——先启用行，再填表。
+不想碰 YAML 也可以：在「设置 → SSH 会话」里填，或在插件管理里点 `ssh` 行的「配置」，两处是同一份表单（见「设置页」）。
+
+表单能不能出现，取决于宿主有没有服务 `ssh` 命名空间。宿主只保留 `Config` 里带 `volatile()` 的字段——`dsh-settings` 的 `volatileForm` 对没有任何 volatile 字段的 schema 返回 `undefined`，`describe` 于是整条丢掉这个条目，页面既不渲染也不报错。本模块除 `stateDir` 外都是 volatile，所以行还是 `disabled: true` 时这一行没有配置页，启用之后才出现。
 
 ## 工具
 
@@ -170,7 +172,7 @@ dead 原因：`network`、`remote-exit`、`killed`、`idle`、`hard-cap`、`host
 | 设置页分组 | `settings.section` | id `ssh`，order 44 |
 | 插件行页 | `plugins.row.config` | key `dsh-pwsh-plugin#ssh` |
 
-两个入口只在 `ctx.configForms.whileServed(['ssh'])` 服务该命名空间时登记。表单暴露：
+两个入口只在 `ctx.configForms.whileServed(['ssh'])` 服务该命名空间时登记；没被服务时两个都不会登记，页面不出现，也不会显示「暂不可用」。表单暴露：
 
 | 控件 | 键 | 形式 |
 | --- | --- | --- |
@@ -191,8 +193,8 @@ dead 原因：`network`、`remote-exit`、`killed`、`idle`、`hard-cap`、`host
 
 投影对宿主的契约（`@deepseek-ai/dsh-session-projection`）：
 
-- `ctx.sessionProjections.register(definition)` 返回 `Promise<ProjectionHandle>`，宿主要求在消费投影前 `await`。本模块在 `registerProjection()` 里把 Promise 交回去，同时兜住拒绝——`plugin/index.mjs` 的 `ctx.inject` 回调不 `await` 它，未处理的拒绝会拖垮宿主进程。
-- `wire.view` 必须对同一个 state 返回**同一个对象**：宿主用 `Object.is` 比较前后两次 view 来抑制重复发布。`view()` 按 state 引用做 WeakMap 缓存。
+- `ctx.sessionProjections.register(definition)` 返回 `Promise<ProjectionHandle>`，宿主要求在消费投影前 `await`。本模块在 `registerProjection()` 里把 Promise 交回去，同时兜住拒绝——`plugin/index.mjs` 的 `ctx.inject` 回调不 `await` 它，未处理的拒绝会拖垮宿主进程。注册失败只留一条 `warn`，标签页会一直空着。
+- 宿主用 `Object.is` 比较「上一次已发布的 view」与「新 state 的 view」来抑制重复发布，所以 state 变了必然会发；`view()` 按 state 引用做 WeakMap 缓存只是省掉重复构造，不是契约要求。
 - `stateSchema` / `viewSchema` 只在运行时调 `.parse()`，所以用两行假 schema 就够了，不引入 zod。
 - 标签页注册形状：`conversation.view` 是 `kind: 'list'`、`scope: 'session'` 的槽，注册项 `{ name, id, order, label, inject }`，`label` 可以给函数（语言切换时重登记）。
 
@@ -203,7 +205,7 @@ dead 原因：`network`、`remote-exit`、`killed`、`idle`、`hard-cap`、`host
 - 远端**不受**本地沙箱、llrun 与删除守卫约束。请在审批名单里圈出需要人工确认的主机。
 - 参数注入在解析清单时就拦掉：地址、用户名、socket 路径都不能以 `-` 开头或含空白/引号/控制字符；地址后面固定有 `--`。
 - 命令正文只经 stdin 送到远端，不经本地 shell 拼接。
-- 审计日志（`audit`，默认开）只写本地 `<stateDir>/audit/YYYY-MM-DD.jsonl`，权限 0600，保留 7 天。
+- 审计日志（`audit`，默认开）只写本地 `<stateDir>/audit/YYYY-MM-DD.jsonl`，权限 0600，保留 7 天。**记录里含完整命令原文**（远端输出不记账），敏感命令请自行避开或关掉审计。
 
 ## 设置项
 
@@ -247,7 +249,9 @@ node test/sshtest.mjs
 
 两层替身：本机 `sh` 当远端（transport 层）+ 假时钟；插件接线用假 ctx 和一个直接 `exec sh` 的假 ssh 可执行文件。
 
-真 sshd 用例（5 项）会起一个临时 sshd：只绑 `127.0.0.1`、端口由内核挑（不用 22）、主机钥匙与用户钥匙都放在临时目录里、认证走临时 `ssh-agent`，结束一律 kill 并删目录。覆盖：连接、命令输出、变量与 cwd 跨命令保留、退出码、stdout/stderr 分离、主机钥匙钉进 known_hosts。缺 `sshd` / `ssh` / `ssh-keygen` / `ssh-agent` / `ssh-add` 时只 SKIP，并打印缺哪个。
+真 sshd 用例（5 项）会起一个临时 sshd：只绑 `127.0.0.1`、端口由内核挑（不用 22）、主机钥匙与用户钥匙都放在临时目录里、认证走临时 `ssh-agent`，结束一律 kill 并删目录。覆盖：连接、命令输出、变量与 cwd 跨命令保留、退出码、stdout/stderr 分离、主机钥匙钉进 known_hosts。连接走插件自己的 `transportFor`，不是在测试里另拼一份 argv。
+
+缺 `sshd` / `ssh` / `ssh-keygen` / `ssh-agent` / `ssh-add` 时只 SKIP（单独计入 `skip=`，不算通过），并打印缺哪个；环境齐备却启动不起来（端口没监听、agent 失败）一律记为失败，不会伪装成跳过。
 
 Windows 上没有 POSIX `sh`，整份测试在 WSL 里跑：
 
@@ -255,4 +259,13 @@ Windows 上没有 POSIX `sh`，整份测试在 WSL 里跑：
 wsl.exe -e bash -lc 'cd <repo> && node test/sshtest.mjs'
 ```
 
-当前 46 项全绿（`SUMMARY pass=46 fail=0`）。
+当前 46 项全绿：`SUMMARY pass=46 fail=0 skip=0`。CI 里设 `DSH_REQUIRE_REAL_SSHD=1` 可以让任何跳过直接变成失败。
+
+Windows 侧的设置页测试要补两个环境变量，否则 `test/support.mjs` 的前置校验会直接抛 `incomplete Windows environment`：
+
+```
+SystemDrive=C: WINDIR=C:\Windows DSH_SETTINGS_FORM_ONLY=1 \
+  DSH_MODULES=<DSH>/app/node_modules/@deepseek-ai node test/settingstest.mjs
+```
+
+它其中几条用宿主真实的 `SettingsForms` 跑 `describe`：`ssh` 命名空间必须出现在结果里，且表单字段正好是可热改的那一组（`stateDir` 不在其中），写入会落到运行中的配置引用上。这几条就是为了让「没加 `volatile()` 就悄悄丢页」这种缺陷没法再蒙混过去。

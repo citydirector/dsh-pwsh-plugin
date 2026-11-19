@@ -159,7 +159,7 @@ pnpm test
 pnpm run test:all
 ```
 
-The full regression suite currently has **15 scripts / 308 assertions**. It needs Windows, Node.js 24, PowerShell 7, WSL and a loadable DSH runtime. Use `DSH_MODULES` or `DSH_MODULES_ASAR` when automatic runtime discovery is unavailable; release validation must finish without skips. Run `bash wsl/acceptance.sh` from a plain WSL shell, outside the plugin's fence.
+The full regression suite currently has **16 scripts / 388 assertions**. It needs Windows, Node.js 24, PowerShell 7, WSL and a loadable DSH runtime. Use `DSH_MODULES` or `DSH_MODULES_ASAR` when automatic runtime discovery is unavailable; release validation must finish without skips. Run `bash wsl/acceptance.sh` from a plain WSL shell, outside the plugin's fence. Launch the suite with a complete environment: without `PATH`, `SystemRoot` and `WINDIR` PowerShell cannot start native executables at all, and `child-utf8-output` fails with empty output — that is the launch environment, not a plugin regression.
 
 For a release, commit changes, then run:
 

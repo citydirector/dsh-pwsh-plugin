@@ -16,24 +16,26 @@ import { registerProjection, PROJECTION_KEY } from './projection.mjs'
 export const name = 'ssh'
 export const inject = ['tools']
 
+// 全部可热改：宿主只保留带 volatile 的字段，没有 volatile 的条目连表单都不会生成。
+// stateDir 例外——它决定会话登记与审计日志落在哪，改了应当重挂插件，不该就地改。
 export const Config = Schema.object({
-  enabled: Schema.boolean().default(true),
-  hosts: Schema.union([Schema.array(Schema.any()), Schema.string()]).default([]),
-  approvalList: Schema.string().default(''),
-  approvalListInvert: Schema.boolean().default(false),
-  idleMinutes: Schema.natural().default(MANAGER_DEFAULTS.idleMinutes),
-  hardCapHours: Schema.number().min(1).max(168).default(MANAGER_DEFAULTS.hardCapHours),
-  globalMax: Schema.number().min(1).max(64).step(1).default(MANAGER_DEFAULTS.globalMax),
-  logMaxMB: Schema.number().min(1).max(4096).step(1).default(MANAGER_DEFAULTS.logMaxMB),
-  noticeTailLines: Schema.natural().max(200).default(MANAGER_DEFAULTS.noticeTailLines),
-  wakeOnNotice: Schema.boolean().default(true),
-  audit: Schema.boolean().default(true),
-  env: Schema.dict(Schema.string()).default({}),
-  sshPath: Schema.string().default('ssh'),
-  wslPath: Schema.string().default('wsl.exe'),
-  knownHosts: Schema.string().default('~/.ssh/dsh_known_hosts'),
-  userKnownHosts: Schema.string().default('~/.ssh/known_hosts'),
-  defaultTimeoutMs: Schema.number().min(1000).max(3600000).step(1).default(120000),
+  enabled: Schema.boolean().default(true).volatile(),
+  hosts: Schema.union([Schema.array(Schema.any()), Schema.string()]).default([]).volatile(),
+  approvalList: Schema.string().default('').volatile(),
+  approvalListInvert: Schema.boolean().default(false).volatile(),
+  idleMinutes: Schema.natural().default(MANAGER_DEFAULTS.idleMinutes).volatile(),
+  hardCapHours: Schema.number().min(1).max(168).default(MANAGER_DEFAULTS.hardCapHours).volatile(),
+  globalMax: Schema.number().min(1).max(64).step(1).default(MANAGER_DEFAULTS.globalMax).volatile(),
+  logMaxMB: Schema.number().min(1).max(4096).step(1).default(MANAGER_DEFAULTS.logMaxMB).volatile(),
+  noticeTailLines: Schema.natural().max(200).default(MANAGER_DEFAULTS.noticeTailLines).volatile(),
+  wakeOnNotice: Schema.boolean().default(true).volatile(),
+  audit: Schema.boolean().default(true).volatile(),
+  env: Schema.dict(Schema.string()).default({}).volatile(),
+  sshPath: Schema.string().default('ssh').volatile(),
+  wslPath: Schema.string().default('wsl.exe').volatile(),
+  knownHosts: Schema.string().default('~/.ssh/dsh_known_hosts').volatile(),
+  userKnownHosts: Schema.string().default('~/.ssh/known_hosts').volatile(),
+  defaultTimeoutMs: Schema.number().min(1000).max(3600000).step(1).default(120000).volatile(),
   stateDir: Schema.string(),
 })
 
@@ -71,8 +73,12 @@ export function rootKey(agent) {
   return session?.header?.rootSessionId ?? session?.id ?? 'default'
 }
 
-function transportFor(config) {
-  const run = (host) => buildSshArgv(host, { privateKnownHosts: config.knownHosts, userKnownHosts: config.userKnownHosts }, { sshPath: config.sshPath, wslPath: config.wslPath })
+// volatile 字段在解析后的 config 上是带 get() 的引用，不是值；每次使用时解包才拿到最新的。
+const live = (field) => (field !== null && typeof field === 'object' && typeof field.get === 'function' ? field.get() : field)
+
+// 导出给真机用例复用：测试要走生产那条 spawn 路径，别再自己拼一份。
+export function transportFor(config) {
+  const run = (host) => buildSshArgv(host, { privateKnownHosts: live(config.knownHosts), userKnownHosts: live(config.userKnownHosts) }, { sshPath: live(config.sshPath), wslPath: live(config.wslPath) })
   return (host) => ({
     spawnMain() {
       const { command, args } = run(host)
@@ -136,29 +142,41 @@ export function apply(ctx, config) {
   }
 
   const manager = new SshManager({ transportFor: transportFor(config), notify: deliver, audit, spoolDir, onChange: () => persistRegistry() })
-  const hostList = parseHostList(config.hosts)
-  const approval = parseApprovalList(config.approvalList)
-  manager.configure({
-    hosts: hostList.hosts,
-    rules: approval.rules,
-    invert: config.approvalListInvert,
-    settings: {
-      enabled: config.enabled,
-      idleMinutes: config.idleMinutes,
-      hardCapHours: config.hardCapHours,
-      globalMax: config.globalMax,
-      logMaxMB: config.logMaxMB,
-      noticeTailLines: config.noticeTailLines,
-      wake: config.wakeOnNotice,
-      audit: config.audit,
-      env: config.env,
-      defaultTimeoutMs: config.defaultTimeoutMs,
-    },
-  })
-  manager.configErrors = [...hostList.errors, ...approval.errors]
+
+  // 这些字段是 volatile：宿主改完只就地更新引用、不重挂插件（cordis-plugin-loader 的
+  // _commitVolatile 会 emit loader/volatile-update），所以要在事件里重读一次，
+  // 否则开关、主机表与限额只会在下次重挂时生效。
+  const applyConfig = () => {
+    const hostList = parseHostList(live(config.hosts))
+    const approval = parseApprovalList(live(config.approvalList))
+    manager.configure({
+      hosts: hostList.hosts,
+      rules: approval.rules,
+      invert: live(config.approvalListInvert),
+      settings: {
+        enabled: live(config.enabled),
+        idleMinutes: live(config.idleMinutes),
+        hardCapHours: live(config.hardCapHours),
+        globalMax: live(config.globalMax),
+        logMaxMB: live(config.logMaxMB),
+        noticeTailLines: live(config.noticeTailLines),
+        wake: live(config.wakeOnNotice),
+        audit: live(config.audit),
+        env: live(config.env),
+        defaultTimeoutMs: live(config.defaultTimeoutMs),
+      },
+    })
+    manager.configErrors = [...hostList.errors, ...approval.errors]
+  }
+  applyConfig()
+  ctx.on('loader/volatile-update', () => applyConfig())
   manager.leftovers = leftovers
   manager.start()
   ctx.effect(() => () => manager.dispose(), 'ssh.manager')
+  // 页面由 client/index.js 自己登记；不让 settings 服务再自动生成一张重复的表单。
+  ctx.inject?.(['settings'], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber), 'ssh.settings-page')
+  })
 
   const readOnly = (agent) => {
     const policy = ctx.get('sandboxPolicy')?.resolve(agent?.session === undefined ? {} : { session: agent.session })

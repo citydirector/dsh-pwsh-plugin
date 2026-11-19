@@ -17,13 +17,16 @@ import * as plugin from '../plugin/ssh/index.mjs'
 if (process.platform === 'win32') {
   // Windows 上没有 POSIX sh 可当远端；这些用例要在 Linux/macOS/WSL 里跑。
   console.log('SKIP: sshtest needs a POSIX sh (run it inside WSL)')
-  console.log('SUMMARY pass=0 fail=0')
+  console.log('SUMMARY pass=0 fail=0 skip=all')
   process.exit(0)
 }
 
 let pass = 0
 let fail = 0
+let skip = 0
 const failures = []
+// 环境缺失（没有 sshd 等）单独计数：它既不是通过，也不该让整份测试变红。
+function skipTest(name, reason) { skip++; console.log('SKIP ' + name + ': ' + reason) }
 async function test(name, fn) {
   try {
     await fn()
@@ -720,7 +723,8 @@ async function startRealSshd() {
     if (!await waitPort(port, 5000)) {
       const tail = log.join('').split('\n').map((line) => line.trim()).filter(Boolean).slice(-3).join(' / ')
       await cleanup()
-      return { skip: 'sshd did not listen on 127.0.0.1:' + port + (tail === '' ? '' : ': ' + tail) }
+      // sshd 起来了却没监听属于真错（端口冲突、配置被拒），不是环境缺失。
+      return { fail: 'sshd did not listen on 127.0.0.1:' + port + (tail === '' ? '' : ': ' + tail) }
     }
 
     const agent = spawnSync(bins['ssh-agent'], ['-a', agentSocket], { encoding: 'utf8' })
@@ -732,16 +736,9 @@ async function startRealSshd() {
     // 插件拼的 argv 不带 -i，公钥认证只能靠 agent：临时 socket 交给 ssh 子进程继承
     process.env.SSH_AUTH_SOCK = agentSocket
     const host = parseHost({ name: 'real-sshd', address: '127.0.0.1', user, port })
-    const argv = buildSshArgv(host, { privateKnownHosts: knownHosts })
-    const transport = {
-      spawnMain: () => spawn(argv.command, argv.args, { stdio: 'pipe', windowsHide: true }),
-      runSide: (script) => new Promise((done) => {
-        const child = spawn(argv.command, argv.args, { stdio: ['pipe', 'ignore', 'ignore'] })
-        const timer = setTimeout(() => child.kill('SIGKILL'), 15000)
-        child.on('exit', (code) => { clearTimeout(timer); done({ code }) })
-        child.stdin.end(script)
-      }),
-    }
+    // 走插件的 transportFor，而不是在测试里另拼一份 argv：这样 via / sshPath 覆盖
+    // 与 runSide 的错误分支都真的被覆盖到。userKnownHosts 留空以保持 argv 与断言一致。
+    const transport = plugin.transportFor({ sshPath: 'ssh', wslPath: 'wsl.exe', knownHosts, userKnownHosts: undefined })(host)
     let stopped = false
     const stop = async () => {
       if (stopped) return
@@ -754,7 +751,7 @@ async function startRealSshd() {
     return { host, transport, knownHosts, stop }
   } catch (error) {
     await cleanup()
-    return { skip: 'could not start a real sshd: ' + error.message }
+    return { fail: 'could not start a real sshd: ' + error.message }
   }
 }
 
@@ -768,7 +765,10 @@ const REAL_SSHD_TESTS = [
 ]
 const realSshd = await startRealSshd()
 if (realSshd.skip !== undefined) {
-  for (const name of REAL_SSHD_TESTS) await test(name, () => { console.log('  (skip: ' + realSshd.skip + ')') })
+  for (const name of REAL_SSHD_TESTS) skipTest(name, realSshd.skip)
+} else if (realSshd.fail !== undefined) {
+  // 环境齐备却启动不了：用例逐条失败，别让它伪装成跳过。
+  for (const name of REAL_SSHD_TESTS) await test(name, () => { throw new Error(realSshd.fail) })
 } else {
   const session = new SshSession({ id: 'real1', host: realSshd.host, transport: realSshd.transport, spoolDir: spool, defaultTimeoutMs: 20000 })
   let opened
@@ -811,6 +811,8 @@ if (realSshd.skip !== undefined) {
 }
 
 rmSync(work, { recursive: true, force: true })
-console.log(`SUMMARY pass=${pass} fail=${fail}`)
+console.log(`SUMMARY pass=${pass} fail=${fail} skip=${skip}`)
 if (fail > 0) { console.log('FAILED: ' + failures.join(', ')); process.exitCode = 1 }
+// CI 里设上它，缺 sshd 的机器就不会被当成通过。
+if (skip > 0 && process.env.DSH_REQUIRE_REAL_SSHD === '1') { console.log('REQUIRED: ' + skip + ' case(s) were skipped'); process.exitCode = 1 }
 process.exit()

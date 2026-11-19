@@ -150,7 +150,9 @@ window.__ModuleLoader__.load({
     // 才出现（plugin-manager 的 rowConfigKey / configure.has），所以这里自己登记一份，
     // 另外挂在「设置」页上一个分组，方便不进插件管理也能改。
     const SSH_NS = 'ssh'
-    const SSH_ROW_KEY = 'dsh-pwsh-plugin' + '#' + 'ssh'
+    // 宿主按 `<包名>#<行 id>` 给插件行找配置页。真包名从宿主给的 pkg 里取（见 applySshSettings），
+    // 这里只是包名拿不到时的回退。
+    const SSH_PACKAGE = 'dsh-pwsh-plugin'
     const SSH_FIELDS = ['enabled', 'idleMinutes', 'hardCapHours', 'globalMax', 'hosts', 'approvalList']
     const SSH_SETTINGS = {
       zh: {
@@ -257,7 +259,8 @@ window.__ModuleLoader__.load({
           // 命名空间由宿主按「行 id」服务：行没启用时这里不登记，页面上也就没有可写的配置。
           dispose = ctx.configForms.whileServed([SSH_NS], () => {
             const section = ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'ssh', order: 44, label: sshSettingsCopy().title, inject }, SshSettingsPage))
-            const row = ctx.slots.inject('plugins.row.config', () => ctx.slots.register({ name: 'plugins.row.config', key: SSH_ROW_KEY, inject }, SshSettingsPage))
+            const rowKey = (ctx.pkg?.name ?? SSH_PACKAGE) + '#' + SSH_NS
+            const row = ctx.slots.inject('plugins.row.config', () => ctx.slots.register({ name: 'plugins.row.config', key: rowKey, inject }, SshSettingsPage))
             return () => { row(); section() }
           })
         }

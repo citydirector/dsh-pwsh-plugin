@@ -129,7 +129,8 @@ export function registerProjection(ctx, { onError } = {}) {
   const pending = Promise.resolve(ctx.sessionProjections.register(projectionDefinition()))
   return pending.catch((error) => {
     if (typeof onError === 'function') return onError(error)
-    try { ctx.logger?.error?.('ssh projection registration failed: ' + String(error?.message ?? error)) } catch {}
+    // 注册失败不会抛给调用方（见上），所以这里必须留下能查的痕迹：Tab 会一直空着。
+    try { ctx.logger?.warn?.('ssh projection registration failed; the sessions tab will stay empty: ' + String(error?.message ?? error)) } catch {}
     return undefined
   })
 }
