@@ -74,19 +74,29 @@ const scope = {
   },
 }
 let client, slots = [], observerCallback, watchStopped = false
-const { SettingsFormModel } = modelModule
+const { SettingsFormModel, settingsNumberField, settingsTextField } = modelModule
 vm.runInNewContext(readFileSync(new URL('../client/index.js', import.meta.url), 'utf8'), {
-  window: { __ModuleLoader__: { load({ factory }) { client = factory(name => name === 'react' ? React : { SettingsFormModel, SettingsForm() {}, Switch() {}, Button() {} }) } } },
+  window: { __ModuleLoader__: { load({ factory }) { client = factory(name => name === 'react' ? React : { SettingsFormModel, SettingsForm() {}, Switch() {}, Button() {}, settingsNumberField, settingsTextField }) } } },
   document: { documentElement: { lang: 'zh-CN' } }, navigator: { language: 'zh-CN' },
   MutationObserver: class { constructor(fn) { observerCallback = fn } observe() {} disconnect() { watchStopped = true } },
 })
 const uiEffects = []
+// SSH 设置分组也挂在同一个 client 上，但它有自己的命名空间；这里只给它一个只读桩。
+const sshScope = {
+  getSnapshot() { return { status: 'ready', value: { enabled: false, hosts: [], approvalList: '' }, base: {}, user: {}, writable: true, revision: 1 } },
+  subscribe() { return () => {} },
+  async mutate() { return false },
+}
 client.apply({
-  configForms: { get(ns) { assert.equal(ns, 'pwsh-run'); return scope }, whileServed(names, register) { assert.deepEqual(Array.from(names), ['pwsh-run']); return register(new Set(names)) } },
+  configForms: {
+    get(ns) { return ns === 'pwsh-run' ? scope : ns === 'ssh' ? sshScope : assert.fail('unexpected namespace ' + ns) },
+    whileServed(names, register) { return register(new Set(names)) },
+  },
   slots: { inject(_slot, fn) { return fn() }, register(options, Component) { const slot = { options, Component }; slots.push(slot); return () => { slots = slots.filter(row => row !== slot) } } },
   effect(fn) { const d = fn(); uiEffects.push(d); return d },
 })
-const section = () => slots.find(row => row.options.name === 'settings.section')
+const section = (id = 'pwsh-run') => slots.find(row => row.options.name === 'settings.section' && row.options.id === id)
+const pwshSlots = () => slots.filter(row => row.options.name === 'settings.section' ? row.options.id === 'pwsh-run' : row.options.key === 'dsh-pwsh-plugin' + '#' + 'pwsh-run')
 const props = section().options.inject()
 const state = () => props.hooks.pwshSettings.getSnapshot()
 const native = { name: 'pwsh', agent: { session: { id: 'settings-live' } }, arguments: { command: 'fixture' } }
@@ -97,8 +107,10 @@ try {
   check('schema-default-is-live-false', () => assert.equal(config.enforcePwshRun.get(), false))
   check('form-projects-both-live-switches', () => assert(['enforcePwshRun','enforceFileRemoval'].every(field=>JSON.stringify(descriptor().schema).includes(field)) && !JSON.stringify(descriptor().schema).includes('timeoutMs')))
   check('automatic-page-disabled', () => assert.equal(descriptor().autoGenerate, false))
-  check('sidebar-and-plugin-row-registered', () => assert.equal(slots.length, 2))
+  check('sidebar-and-plugin-row-registered', () => assert.equal(pwshSlots().length, 2))
   check('sidebar-localized-title', () => assert.equal(section().options.label, 'pwsh 设置'))
+  check('ssh-group-registered', () => assert.equal(section('ssh').options.label, 'SSH 会话'))
+  check('ssh-row-page-keyed-by-package-and-row', () => assert(slots.some(row => row.options.name === 'plugins.row.config' && row.options.key === 'dsh-pwsh-plugin' + '#' + 'ssh')))
   check('native-initially-allowed', () => assert.equal(guards[0](native), undefined))
   const formOnly = process.env.DSH_SETTINGS_FORM_ONLY === '1'
   if (formOnly) console.log('SKIP: real pwsh process check requires an unrestricted test process')

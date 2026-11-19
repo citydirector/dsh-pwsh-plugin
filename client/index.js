@@ -2,7 +2,7 @@ window.__ModuleLoader__.load({
   id: 'dsh-pwsh-plugin',
   factory: (require) => {
     const React = require('react')
-    const { SettingsForm, SettingsFormModel, Switch, Button } = require('@deepseek-ai/dsh-client-ui-primitives')
+    const { SettingsForm, SettingsFormModel, Switch, Button, settingsNumberField, settingsTextField } = require('@deepseek-ai/dsh-client-ui-primitives')
     const h = React.createElement
     const NS = 'pwsh-run'
     const FIELD = 'enforcePwshRun'
@@ -144,9 +144,134 @@ window.__ModuleLoader__.load({
       const inject = (rawSessionId) => ({ runCommand: (line) => runSshCommand(ctx.remote?.commands, rawSessionId, line) })
       ctx.slots.inject('conversation.view', () => ctx.slots.register({ name: 'conversation.view', id: 'dsh-pwsh-plugin-ssh', order: 45, label: () => sshCopy().tab, inject }, SshSessionsTab))
     }
+
+    // ---- SSH 设置 ----
+    // 宿主不会按 Config 自动生成表单：plugins.row.config 只在有条目用 `<包名>#<行 id>` 点名这一行时
+    // 才出现（plugin-manager 的 rowConfigKey / configure.has），所以这里自己登记一份，
+    // 另外挂在「设置」页上一个分组，方便不进插件管理也能改。
+    const SSH_NS = 'ssh'
+    const SSH_ROW_KEY = 'dsh-pwsh-plugin' + '#' + 'ssh'
+    const SSH_FIELDS = ['enabled', 'idleMinutes', 'hardCapHours', 'globalMax', 'hosts', 'approvalList']
+    const SSH_SETTINGS = {
+      zh: {
+        title: 'SSH 会话', summary: '管理 SSH 主机清单、审批名单与会话限额。',
+        intro: '只有主机清单里的主机能被模型打开；审批名单里的主机每次操作都要人工确认。',
+        group: '会话限额', hostsGroup: '主机清单', approvalGroup: '审批名单',
+        enabled: '启用 SSH', on: '已启用', off: '已关闭', pending: '有尚未保存的修改',
+        enabledHint: '关闭后拒绝新建会话；已经开着的会话进入 draining，跑完当前命令后关闭。',
+        idleMinutes: '空闲超时（分钟，0 关闭）', hardCapHours: '硬上限（小时，1–168）', globalMax: '全局会话上限（1–64）',
+        limits: '空闲只由 ssh_exec 计时；把限额改小要 5 分钟宽限才生效。',
+        hosts: '主机清单（JSON 数组）',
+        hostsHint: '每项 { name, address, user, port?, via?: "windows"|"wsl", wslDistro?, agentSocket?, shell?, encoding?, maxSessions?, loadProfile? }。模型只能用 name 点名主机，清单外一律拒绝。',
+        approval: '审批名单（每行一条）',
+        approvalHint: 'IP、CIDR、主机名或 *.example.com，# 之后是注释。命中后 ssh_open 与每条 ssh_exec 都要人工批准；留空则不拦。',
+        invalid: '格式不对，保存已被拦下。', resetAll: '全部恢复默认',
+        scope: '对当前 profile 的全部预设与会话生效。插件管理里的 ssh 行默认 disabled: true，先启用它，这一页才有可写的配置。',
+        form: { unavailable: '配置暂不可用，请确认 ssh 条目已在当前主机启用。', readOnly: '当前部署的配置只读，无法保存修改。', saveFailed: '保存失败，请刷新配置后重试。', save: '保存', saving: '保存中…' },
+      },
+      en: {
+        title: 'SSH sessions', summary: 'Manage SSH hosts, approval list and session limits.',
+        intro: 'Only hosts in the list can be opened; every operation on an approval-listed host asks for confirmation.',
+        group: 'Session limits', hostsGroup: 'Hosts', approvalGroup: 'Approval list',
+        enabled: 'Enable SSH', on: 'Enabled', off: 'Disabled', pending: 'Unsaved changes',
+        enabledHint: 'Turning this off refuses new sessions; open ones drain and close after the running command.',
+        idleMinutes: 'Idle timeout (minutes, 0 disables)', hardCapHours: 'Hard cap (hours, 1–168)', globalMax: 'Global session limit (1–64)',
+        limits: 'Only ssh_exec counts as activity; shrinking a limit takes effect after a 5 minute grace period.',
+        hosts: 'Hosts (JSON array)',
+        hostsHint: 'Each entry { name, address, user, port?, via?: "windows"|"wsl", wslDistro?, agentSocket?, shell?, encoding?, maxSessions?, loadProfile? }. The model may only name a host by name; anything else is refused.',
+        approval: 'Approval list (one per line)',
+        approvalHint: 'IP, CIDR, host name or *.example.com; # starts a comment. Matching hosts require manual approval for ssh_open and every ssh_exec. Empty means nothing is gated.',
+        invalid: 'Not valid, so the save is blocked.', resetAll: 'Restore all defaults',
+        scope: 'Applies to every preset and session in this profile. The ssh row in plugin management starts disabled, enable it first or this page has nothing writable.',
+        form: { unavailable: 'Configuration unavailable. Check that the ssh entry is enabled on this Host.', readOnly: 'Configuration is read-only in this deployment.', saveFailed: 'Not saved. Refresh the configuration and try again.', save: 'Save', saving: 'Saving…' },
+      },
+    }
+    const sshSettingsCopy = () => (document.documentElement.lang || navigator.language || 'en').toLowerCase().startsWith('zh') ? SSH_SETTINGS.zh : SSH_SETTINGS.en
+    const inputStyle = { padding: '5px 8px', fontSize: 13, boxSizing: 'border-box', color: 'inherit', background: 'transparent', border: '1px solid var(--border, rgba(127,127,127,.4))', borderRadius: 6, fontFamily: 'inherit' }
+    function SshSettingsPage(props) {
+      const t = sshSettingsCopy()
+      if (props.view === 'summary') return t.summary
+      const state = props.useSshSettings((value) => value)
+      const disabled = !state.writable || state.saving
+      const field = (name) => state.fields[name] ?? { text: '', overridden: false, invalid: false }
+      const number = (name, label) => h('div', { style: style.row },
+        h('div', { style: style.field }, h('span', { style: style.label }, label)),
+        h('input', { type: 'text', inputMode: 'numeric', value: field(name).text, disabled, spellCheck: false, onChange: (event) => props.edit(name, event.target.value), style: { ...inputStyle, width: 120 } }))
+      const area = (name, label, hint, rows) => h('div', { style: { display: 'grid', gap: 6 } },
+        h('span', { style: style.label }, label),
+        h('textarea', { rows, value: field(name).text, disabled, spellCheck: false, onChange: (event) => props.edit(name, event.target.value), style: { ...inputStyle, width: '100%', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', resize: 'vertical' } }),
+        h('p', { style: style.note }, hint),
+        field(name).invalid ? h('p', { style: { ...style.note, color: 'var(--danger, #c33)' } }, t.invalid) : null)
+      return h('div', { style: style.page, 'data-ssh-settings': '' },
+        h('header', null, h('h2', { style: style.title }, t.title), h('p', { style: style.intro }, t.intro)),
+        h(SettingsForm, { labels: t.form, state, onSave: props.save, onDiscard: props.discard },
+          h('section', { style: style.section },
+            h('h3', { style: style.group }, t.group),
+            h('div', { style: style.row },
+              h('div', { style: style.field }, h('span', { style: style.label }, t.enabled), h('p', { style: style.note }, t.enabledHint)),
+              h(Switch, { label: t.enabled, checked: field('enabled').text === 'true', disabled, onChange: (value) => props.edit('enabled', value ? 'true' : 'false') })),
+            h('div', { style: style.status, role: 'status' },
+              h('span', null, state.enabled ? t.on : t.off),
+              state.dirty ? h('span', null, t.pending) : null,
+              state.dirty ? h(Button, { style: style.reset, variant: 'ghost', size: 'sm', disabled, onClick: () => SSH_FIELDS.forEach((name) => props.resetField(name)) }, t.resetAll) : null),
+            number('idleMinutes', t.idleMinutes),
+            number('hardCapHours', t.hardCapHours),
+            number('globalMax', t.globalMax),
+            h('p', { style: style.note }, t.limits),
+            h('h3', { style: style.group }, t.hostsGroup),
+            area('hosts', t.hosts, t.hostsHint, 8),
+            h('h3', { style: style.group }, t.approvalGroup),
+            area('approvalList', t.approval, t.approvalHint, 4),
+            h('p', { style: style.note }, t.scope))))
+    }
+    // hosts 在 Config 里是数组（也接受 JSON 文本）：表单里按 JSON 编辑，语法错就拦住保存。
+    function parseHostsText(text) {
+      if (text.trim() === '') return { kind: 'clear' }
+      let value
+      try { value = JSON.parse(text) } catch { return undefined }
+      if (!Array.isArray(value)) return undefined
+      return { kind: 'set', value }
+    }
+    function applySshSettings(ctx) {
+      const scope = ctx.configForms.get(SSH_NS)
+      const specs = [
+        { field: 'enabled', format: (value) => value === true ? 'true' : 'false', parse: (text) => text === 'true' || text === 'false' ? { kind: 'set', value: text === 'true' } : undefined },
+        settingsNumberField('idleMinutes'),
+        settingsNumberField('hardCapHours'),
+        settingsNumberField('globalMax'),
+        { field: 'hosts', format: (value) => Array.isArray(value) ? JSON.stringify(value, null, 2) : typeof value === 'string' ? value : '[]', parse: parseHostsText },
+        settingsTextField('approvalList'),
+      ]
+      const form = new SettingsFormModel(scope, specs)
+      const store = form.bind(() => ({
+        ...form.shell(),
+        enabled: scope.getSnapshot().value?.enabled === true,
+        fields: Object.fromEntries(specs.map((spec) => [spec.field, form.field(spec.field)])),
+      }))
+      const inject = () => ({ hooks: { sshSettings: store }, ...form.actions() })
+      ctx.effect(() => () => form.dispose(), 'ssh-settings.form')
+      ctx.effect(() => {
+        let dispose = () => {}
+        const register = () => {
+          dispose()
+          // 命名空间由宿主按「行 id」服务：行没启用时这里不登记，页面上也就没有可写的配置。
+          dispose = ctx.configForms.whileServed([SSH_NS], () => {
+            const section = ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'ssh', order: 44, label: sshSettingsCopy().title, inject }, SshSettingsPage))
+            const row = ctx.slots.inject('plugins.row.config', () => ctx.slots.register({ name: 'plugins.row.config', key: SSH_ROW_KEY, inject }, SshSettingsPage))
+            return () => { row(); section() }
+          })
+        }
+        register()
+        // 导航文字由注册项持有，语言改变时重新登记。
+        const observer = new MutationObserver(register)
+        observer.observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] })
+        return () => { observer.disconnect(); dispose() }
+      }, 'ssh-settings.page')
+    }
     function apply(ctx) {
       // SSH 标签页需要 remote.commands；单独挂成子插件，缺服务时不影响 pwsh 设置页。
       ctx.plugin?.({ name: 'ssh-sessions-tab', inject: ['slots', 'remote', 'remote.commands'], apply: applySshTab })
+      applySshSettings(ctx)
       const scope = ctx.configForms.get(NS)
       const form = new SettingsFormModel(scope, [FIELD, REMOVE].map(field => ({
         field,

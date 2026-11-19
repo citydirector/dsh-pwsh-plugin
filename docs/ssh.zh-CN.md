@@ -37,6 +37,8 @@
     approvalListInvert: false
 ```
 
+不想碰 YAML 也可以：在「设置 → SSH 会话」里填，或在插件管理里点 `ssh` 行的「配置」，两处是同一份表单（见「设置页」）。注意 `ssh` 行默认 `disabled: true`，此时宿主不服务 `ssh` 命名空间，表单会显示「配置暂不可用」——先启用行，再填表。
+
 ## 工具
 
 | 工具 | 作用 | 返回 |
@@ -63,7 +65,7 @@
 | `shell` | 首选 `bash`/`zsh`/`sh`，找不到就按 bash → zsh → sh |
 | `encoding` | 远端输出编码，例如 `gb18030`，默认 UTF-8 |
 | `maxSessions` | 这台主机的并发会话上限，默认 4 |
-| `hostKeyFingerprint` | 预留字段（第一期只校验格式） |
+| `hostKeyFingerprint` | 预留字段：只校验格式（`SHA256:…`），**不做 known_hosts 比对、不提供信任保证**；主机信任仍由 ssh 的 `StrictHostKeyChecking=accept-new` 与私有 known_hosts 负责 |
 | `loadProfile` | `true` 时用登录 shell 读 profile，默认 `false` |
 
 清单外的主机一律拒绝，错误里列出可用主机。未知字段、非法值的条目会被丢弃，其余主机照常可用，错误在 `ssh_list` 的 `configErrors` 里列出。
@@ -159,11 +161,40 @@ dead 原因：`network`、`remote-exit`、`killed`、`idle`、`hard-cap`、`host
 - DSH 会话关闭：其下 SSH 会话全部结束。
 - 登记文件 `<stateDir>/sessions.json` 记下主机、会话、远端 pid；DSH 重启后显示为「上次遗留」（`/ssh leftovers`），可一键清除记录（`/ssh clear-leftovers`）。远端进程不会被自动杀。
 
+## 设置页
+
+宿主**不会**按 `Config` 自动生成表单：`@deepseek-ai/dsh-client-ui-plugin-manager` 用 `rowConfigKey(pkg, rowId)` = `<包名>#<行 id>` 去 `plugins.row.config` 里找条目，找不到就不给这一行渲染「配置」按钮。所以表单由 `client/index.js` 自己登记两个入口：
+
+| 入口 | 槽 | 标识 |
+| --- | --- | --- |
+| 设置页分组 | `settings.section` | id `ssh`，order 44 |
+| 插件行页 | `plugins.row.config` | key `dsh-pwsh-plugin#ssh` |
+
+两个入口只在 `ctx.configForms.whileServed(['ssh'])` 服务该命名空间时登记。表单暴露：
+
+| 控件 | 键 | 形式 |
+| --- | --- | --- |
+| 启用 SSH | `enabled` | 开关 |
+| 空闲超时 | `idleMinutes` | 数字（分钟，0 关闭） |
+| 硬上限 | `hardCapHours` | 数字 1–168 |
+| 全局会话上限 | `globalMax` | 数字 1–64 |
+| 主机清单 | `hosts` | JSON 数组文本，语法错或非数组会拦住保存 |
+| 审批名单 | `approvalList` | 多行文本 |
+
+其余键（`env`、`sshPath`、`knownHosts`、`stateDir`、`logMaxMB` 等）仍在 `cordis.patch.yml` / profile 配置里改。
+
 ## 界面
 
 - 对话上方的「SSH」标签页（`conversation.view`）：每行显示主机、ID、状态（前台/后台 + jobId）、目录、最后活动、剩余时间（硬上限最后 10 分钟显示 ⏱ 倒计时）、断开原因和「结束」按钮，另有「全部结束」。
 - 数据来自服务端的 `sshSessions` 会话投影。宿主投影只能从会话事件折叠，没有直接推送接口，所以状态由 `ssh_*` 的 tool/call、tool/result 和本模块注入的 `[ssh]` 提示折叠而来；倒计时由前端按截止时间本地计算，不轮询。
 - 按钮走 `/ssh` 命令（宿主 `remote.commands` 通道）。用户手动结束会话时，模型会收到一条不唤醒的提示。
+
+投影对宿主的契约（`@deepseek-ai/dsh-session-projection`）：
+
+- `ctx.sessionProjections.register(definition)` 返回 `Promise<ProjectionHandle>`，宿主要求在消费投影前 `await`。本模块在 `registerProjection()` 里把 Promise 交回去，同时兜住拒绝——`plugin/index.mjs` 的 `ctx.inject` 回调不 `await` 它，未处理的拒绝会拖垮宿主进程。
+- `wire.view` 必须对同一个 state 返回**同一个对象**：宿主用 `Object.is` 比较前后两次 view 来抑制重复发布。`view()` 按 state 引用做 WeakMap 缓存。
+- `stateSchema` / `viewSchema` 只在运行时调 `.parse()`，所以用两行假 schema 就够了，不引入 zod。
+- 标签页注册形状：`conversation.view` 是 `kind: 'list'`、`scope: 'session'` 的槽，注册项 `{ name, id, order, label, inject }`，`label` 可以给函数（语言切换时重登记）。
 
 `/ssh` 命令：`list`、`kill <id>`、`kill-all`（本对话）、`kill-everywhere confirm`（所有对话）、`leftovers`、`clear-leftovers`。
 
@@ -199,12 +230,13 @@ dead 原因：`network`、`remote-exit`、`killed`、`idle`、`hard-cap`、`host
 
 - `terminal` 会话：PTY + `@xterm/headless`，`ssh_screen` / `ssh_send`，支持 `top` 这类 TUI 随时「看一眼」。
 - `ssh_put` / `ssh_get`，`ssh_exec({stdin})`。
-- 设置页里的 SSH 分组与跨对话总表（见下方「已知限制」）。
+- 设置页里的跨对话总表（见下方「已知限制」）。
 - `hostKeyFingerprint` 的实际校验。
 
 ## 已知限制
 
-- 设置页的跨对话总表还没有做：插件设置页目前只有配置表单，没有实时数据通道。会话投影已声明为 summary 值（会出现在会话列表的摘要里），宿主若在设置页提供会话摘要读取，就能直接接上。在那之前请用对话标签页或 `/ssh kill-everywhere confirm`。
+- 设置页的跨对话总表还没有做：设置页现在只有配置表单，没有实时数据通道。会话投影已声明为 summary 值（会出现在会话列表的摘要里），宿主若在设置页提供会话摘要读取，就能直接接上。在那之前请用对话标签页或 `/ssh kill-everywhere confirm`。
+- `hostKeyFingerprint` 只校验格式，没有跟 known_hosts 做比对（见「主机清单」）。要强信任请自行核对 `~/.ssh/dsh_known_hosts`。
 - DSH 重启后，旧对话的标签页会继续显示重启前的会话行，直到下一次 `ssh_list` 或新的 `[ssh]` 提示刷新它们；实际的会话已经不在了。
 
 ## 测试
@@ -213,4 +245,14 @@ dead 原因：`network`、`remote-exit`、`killed`、`idle`、`hard-cap`、`host
 node test/sshtest.mjs
 ```
 
-两层替身：本机 `sh` 当远端（transport 层）+ 假时钟；插件接线用假 ctx 和一个直接 `exec sh` 的假 ssh 可执行文件。本机有 sshd 时才跑真实用例，否则跳过。Windows 上没有 POSIX `sh`，请在 WSL 里跑。
+两层替身：本机 `sh` 当远端（transport 层）+ 假时钟；插件接线用假 ctx 和一个直接 `exec sh` 的假 ssh 可执行文件。
+
+真 sshd 用例（5 项）会起一个临时 sshd：只绑 `127.0.0.1`、端口由内核挑（不用 22）、主机钥匙与用户钥匙都放在临时目录里、认证走临时 `ssh-agent`，结束一律 kill 并删目录。覆盖：连接、命令输出、变量与 cwd 跨命令保留、退出码、stdout/stderr 分离、主机钥匙钉进 known_hosts。缺 `sshd` / `ssh` / `ssh-keygen` / `ssh-agent` / `ssh-add` 时只 SKIP，并打印缺哪个。
+
+Windows 上没有 POSIX `sh`，整份测试在 WSL 里跑：
+
+```
+wsl.exe -e bash -lc 'cd <repo> && node test/sshtest.mjs'
+```
+
+当前 46 项全绿（`SUMMARY pass=46 fail=0`）。

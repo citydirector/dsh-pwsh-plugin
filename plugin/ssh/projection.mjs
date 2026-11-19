@@ -99,9 +99,16 @@ export function applyEvent(state, event) {
   return state
 }
 
+// 宿主用 Object.is 比较前后两次 view 的返回值，相同就不发布；所以同一个 state 必须给出同一个对象。
+// 缓存按 state 引用失效：applyEvent 只在不命中时复用引用，状态一变就是新对象，键自然换掉。
+const viewCache = new WeakMap()
 export function view(state) {
+  const cached = viewCache.get(state)
+  if (cached !== undefined) return cached
   const rows = Object.values(state.rows).sort((a, b) => Number(a.sessionId.slice(1)) - Number(b.sessionId.slice(1)))
-  return { rows }
+  const value = { rows }
+  viewCache.set(state, value)
+  return value
 }
 
 export function projectionDefinition() {
@@ -115,7 +122,14 @@ export function projectionDefinition() {
   }
 }
 
-export function registerProjection(ctx) {
+export function registerProjection(ctx, { onError } = {}) {
   // register() 本身随 ctx 的生命周期撤销，热替换不会留下重复注册。
-  ctx.sessionProjections.register(projectionDefinition())
+  // 宿主契约要求在消费投影前等注册完成，这里把 Promise 交回去；但 plugin/index.mjs 的
+  // ctx.inject 回调忽略返回值，未处理的拒绝会拖垮整个宿主进程，所以默认在这里收尾。
+  const pending = Promise.resolve(ctx.sessionProjections.register(projectionDefinition()))
+  return pending.catch((error) => {
+    if (typeof onError === 'function') return onError(error)
+    try { ctx.logger?.error?.('ssh projection registration failed: ' + String(error?.message ?? error)) } catch {}
+    return undefined
+  })
 }

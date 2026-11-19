@@ -1,16 +1,17 @@
 // SSH 模块测试：node test/sshtest.mjs。输出 PASS/FAIL <名>，结尾 SUMMARY。
-// 两层替身：本机 sh 当远端（transport 层）+ 假时钟；真 sshd 用例在本机有 sshd/ssh-keygen 时才跑。
+// 两层替身：本机 sh 当远端（transport 层）+ 假时钟；真 sshd 用例在本机有 sshd/ssh 客户端时才跑。
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import net from 'node:net'
+import { join, resolve } from 'node:path'
 import { parseHost, parseHostList, parseApprovalList, approvalFor } from '../plugin/ssh/hosts.mjs'
 import { buildSshArgv } from '../plugin/ssh/argv.mjs'
 import { SentinelSplitter, commandScript } from '../plugin/ssh/framing.mjs'
 import { decodeOutput, foldCarriageReturns, OutputBuffer, renderSnapshot } from '../plugin/ssh/output.mjs'
 import { SshSession } from '../plugin/ssh/session.mjs'
 import { SshManager } from '../plugin/ssh/manager.mjs'
-import { applyEvent, initState, view } from '../plugin/ssh/projection.mjs'
+import { applyEvent, initState, view, registerProjection } from '../plugin/ssh/projection.mjs'
 import * as plugin from '../plugin/ssh/index.mjs'
 
 if (process.platform === 'win32') {
@@ -499,6 +500,83 @@ await test('projection folds tool calls, results and notices', () => {
   assert(same === state, 'unrelated events keep the same reference')
 })
 
+await test('projection view reuses the reference the host compares', () => {
+  let state = initState()
+  const first = view(state)
+  assert(view(state) === first, 'the same state must give the same view object')
+  state = applyEvent(state, { type: 'tool/call', data: { callId: 'c1', name: 'ssh_open', arguments: { host: 'local' } } })
+  const second = view(state)
+  assert(second !== first, 'a new state must give a new view')
+  assert(view(state) === second, 'the cache follows the new state')
+})
+
+await test('projection registration matches the host contract', async () => {
+  let definition
+  const handle = { stateOf: () => undefined, readerFor: () => undefined, dispose: () => {} }
+  const ctx = { sessionProjections: { register: (value) => { definition = value; return Promise.resolve(handle) } } }
+  const pending = registerProjection(ctx)
+  assert(typeof pending?.then === 'function', 'registerProjection hands back a promise a caller may await')
+  assert(await pending === handle, 'the registration handle is passed through')
+  eq([definition.key, definition.stateVersion], ['sshSessions', 1])
+  // 宿主运行时只调 .parse：状态与视图都要过得了这两个 schema
+  const state = definition.stateSchema.parse(definition.init())
+  const next = definition.apply(state, { type: 'tool/call', data: { callId: 'c1', name: 'ssh_open', arguments: { host: 'local' } } })
+  definition.wire.viewSchema.parse(definition.wire.view(next))
+  // plugin/index.mjs 不 await 这个 Promise：拒绝必须被收在这里，不能变成未处理的拒绝
+  eq(await registerProjection({ sessionProjections: { register: () => Promise.reject(new Error('boom')) } }), undefined)
+})
+
+// ---- 浏览器半侧：SSH 设置分组 -------------------------------------------------
+await test('client registers the ssh settings section and row config page', async () => {
+  // 宿主不会按 Config 自动出表单，设置页由 client/index.js 自己登记；这里用最小桩检查形状。
+  const registered = []
+  const disposers = []
+  const saved = { window: globalThis.window, document: globalThis.document, navigator: globalThis.navigator, MutationObserver: globalThis.MutationObserver }
+  class FakeForm {
+    constructor(scope, specs) { this.scope = scope; this.specs = specs }
+    bind(project) { this.project = project; return { getSnapshot: () => project(), subscribe: () => () => {} } }
+    shell() { return { available: true, writable: true, dirty: true, invalid: false, saving: false, failed: false } }
+    field(name) { return { text: name === 'enabled' ? 'true' : '12', overridden: false, invalid: false } }
+    actions() { return { edit: () => {}, resetField: () => {}, save: () => {}, discard: () => {} } }
+    dispose() {}
+  }
+  const react = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }), useState: (value) => [value, () => {}], useEffect: () => {} }
+  const primitives = { SettingsForm: 'SettingsForm', SettingsFormModel: FakeForm, Switch: 'Switch', Button: 'Button', settingsNumberField: (field) => ({ field }), settingsTextField: (field) => ({ field }) }
+  const scope = { getSnapshot: () => ({ status: 'ready', value: { enabled: true, hosts: [], approvalList: '' }, base: {}, user: {}, writable: true, revision: 3 }), subscribe: () => () => {}, mutate: async () => true }
+  const ctx = {
+    configForms: { get: () => scope, whileServed: (namespaces, register) => register() },
+    slots: { register: (entry, component) => { registered.push({ entry, component }); return () => {} }, inject: (name, register) => register() },
+    effect: (fn) => { const dispose = fn(); disposers.push(dispose); return dispose },
+    plugin: () => {},
+  }
+  let loaded
+  try {
+    globalThis.window = { __ModuleLoader__: { load: (value) => { loaded = value } } }
+    globalThis.document = { documentElement: { lang: 'zh-CN' } }
+    globalThis.navigator = { language: 'zh-CN' }
+    globalThis.MutationObserver = class { observe() {} disconnect() {} }
+    new Function(readFileSync(new URL('../client/index.js', import.meta.url), 'utf8'))()
+    assert(loaded?.factory !== undefined, 'the client module should call the module loader')
+    const plugin = loaded.factory((id) => id === 'react' ? react : primitives)
+    plugin.apply(ctx)
+    // 组件在 render 时读 document.documentElement.lang，所以断言要在撤桩之前跑完
+    const section = registered.find((item) => item.entry.name === 'settings.section')
+    const row = registered.find((item) => item.entry.name === 'plugins.row.config')
+    assert(section !== undefined && row !== undefined, 'both slots are registered')
+    eq([section.entry.id, typeof section.entry.label], ['ssh', 'string'])
+    eq(row.entry.key, 'dsh-pwsh-plugin' + '#' + 'ssh')
+    const injected = section.entry.inject()
+    const state = injected.hooks.sshSettings.getSnapshot()
+    eq([state.writable, Object.keys(state.fields).sort()], [true, ['approvalList', 'enabled', 'globalMax', 'hardCapHours', 'hosts', 'idleMinutes']])
+    const page = section.component({ view: 'page', useSshSettings: (selector) => selector(state), ...injected })
+    assert(page !== null && page.type === 'div', 'the page renders a container')
+    assert(section.component({ view: 'summary' }).length > 0, 'the summary is a non-empty line')
+  } finally {
+    for (const [name, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value }
+    for (const dispose of disposers) if (typeof dispose === 'function') dispose()
+  }
+})
+
 // ---- 插件接线（假 ctx + 假 ssh 可执行文件）---------------------------------
 
 await test('plugin wiring: tools, approval gate, read-only, rootKey', async () => {
@@ -539,11 +617,198 @@ await test('plugin wiring: tools, approval gate, read-only, rootKey', async () =
   manager.dispose()
 })
 
-await test('real sshd (skipped when sshd is unavailable)', async () => {
-  const sshd = ['/usr/sbin/sshd', '/usr/local/sbin/sshd'].find((p) => existsSync(p))
-  if (sshd === undefined || spawnSync('ssh', ['-V']).error) { console.log('  (skip: no sshd/ssh on this machine)'); return }
-  console.log('  (real sshd test not implemented in this environment)')
-})
+// ---- 真 sshd ------------------------------------------------------------------
+// 起一个临时 sshd：只绑 127.0.0.1，端口由内核挑（绝不用 22，也绝不绑 0.0.0.0），
+// 主机钥匙/用户钥匙/authorized_keys 全在临时目录里；结束一律 kill 并删目录。
+// 缺 sshd 或 ssh 客户端时只 SKIP，并打印缺的是哪个。
+function commandPath(name) {
+  const found = spawnSync('sh', ['-c', 'command -v ' + name], { encoding: 'utf8' })
+  return found.status === 0 ? found.stdout.trim() : undefined
+}
+
+async function freeHighPort() {
+  const server = net.createServer()
+  await new Promise((done, failed) => { server.once('error', failed); server.listen(0, '127.0.0.1', done) })
+  const { port } = server.address()
+  await new Promise((done) => server.close(done))
+  return port
+}
+
+async function waitPort(port, ms) {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    const open = await new Promise((done) => {
+      const socket = net.connect(port, '127.0.0.1')
+      socket.once('connect', () => { socket.destroy(); done(true) })
+      socket.once('error', () => done(false))
+    })
+    if (open) return true
+    await sleep(100)
+  }
+  return false
+}
+
+async function startRealSshd() {
+  const sshdPath = commandPath('sshd') ?? ['/usr/sbin/sshd', '/usr/local/sbin/sshd'].find((candidate) => existsSync(candidate))
+  const bins = {
+    sshd: sshdPath,
+    ssh: commandPath('ssh'),
+    'ssh-keygen': commandPath('ssh-keygen'),
+    'ssh-agent': commandPath('ssh-agent'),
+    'ssh-add': commandPath('ssh-add'),
+  }
+  const missing = Object.keys(bins).filter((name) => bins[name] === undefined)
+  if (missing.length > 0) return { skip: 'no ' + missing.join('/') + ' on this machine' }
+  const user = process.env.USER ?? process.env.LOGNAME
+  if (user === undefined) return { skip: 'no $USER/$LOGNAME to log in as' }
+
+  const dir = mkdtempSync(join(tmpdir(), 'sshtest-sshd-'))
+  const port = await freeHighPort()
+  const hostKey = join(dir, 'host_key')
+  const userKey = join(dir, 'user_key')
+  const authorizedKeys = join(dir, 'authorized_keys')
+  const knownHosts = join(dir, 'known_hosts')
+  const configPath = join(dir, 'sshd_config')
+  const agentSocket = join(dir, 'agent.sock')
+  const log = []
+  let agentStarted = false
+  let sshd
+  let previousAgent = process.env.SSH_AUTH_SOCK
+
+  const cleanup = async () => {
+    if (agentStarted) spawnSync(bins['ssh-agent'], ['-k'], { env: { ...process.env, SSH_AUTH_SOCK: agentSocket } })
+    if (sshd !== undefined && sshd.exitCode === null && sshd.signalCode === null) {
+      sshd.kill('SIGTERM')
+      await new Promise((done) => { const timer = setTimeout(done, 3000); sshd.once('exit', () => { clearTimeout(timer); done() }) })
+      if (sshd.exitCode === null && sshd.signalCode === null) sshd.kill('SIGKILL')
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+
+  try {
+    for (const key of [hostKey, userKey]) {
+      const made = spawnSync(bins['ssh-keygen'], ['-q', '-t', 'ed25519', '-N', '', '-f', key], { encoding: 'utf8' })
+      if (made.status !== 0) throw new Error('ssh-keygen failed: ' + String(made.stderr).trim())
+    }
+    // 临时公钥直接写进 authorized_keys；StrictModes 关掉，否则临时目录的属主/权限会被 sshd 拒绝
+    writeFileSync(authorizedKeys, readFileSync(userKey + '.pub'))
+    for (const file of [authorizedKeys, hostKey, userKey]) chmodSync(file, 0o600)
+    writeFileSync(knownHosts, '')
+    writeFileSync(configPath, [
+      'Port ' + port,                        // 内核挑的空闲高位端口，不是 22
+      'ListenAddress 127.0.0.1',             // 只监听回环
+      'HostKey ' + hostKey,
+      'AuthorizedKeysFile ' + authorizedKeys, // 必须是绝对路径
+      'StrictModes no',
+      'PidFile ' + join(dir, 'sshd.pid'),
+      'UsePAM no',
+      'PasswordAuthentication no',
+      'KbdInteractiveAuthentication no',
+      'PermitRootLogin no',
+      'AllowUsers ' + user,                  // 显式放行当前用户：系统配置里的 AllowUsers 不含他时会 publickey 被拒
+      'MaxStartups 5',
+      'LogLevel VERBOSE',
+    ].join('\n') + '\n')
+    chmodSync(configPath, 0o600)
+
+    // sshd 不接受相对路径（会直接退出 255：sshd requires execution with an absolute path）
+    const sshdBinary = sshdPath.startsWith('/') ? sshdPath : resolve(sshdPath)
+    sshd = spawn(sshdBinary, ['-D', '-e', '-f', configPath], { stdio: ['ignore', 'pipe', 'pipe'] })
+    sshd.stdout.on('data', (chunk) => log.push(String(chunk)))
+    sshd.stderr.on('data', (chunk) => log.push(String(chunk)))
+
+    if (!await waitPort(port, 5000)) {
+      const tail = log.join('').split('\n').map((line) => line.trim()).filter(Boolean).slice(-3).join(' / ')
+      await cleanup()
+      return { skip: 'sshd did not listen on 127.0.0.1:' + port + (tail === '' ? '' : ': ' + tail) }
+    }
+
+    const agent = spawnSync(bins['ssh-agent'], ['-a', agentSocket], { encoding: 'utf8' })
+    if (agent.status !== 0) throw new Error('ssh-agent failed: ' + String(agent.stderr).trim())
+    agentStarted = true
+    const added = spawnSync(bins['ssh-add'], [userKey], { encoding: 'utf8', env: { ...process.env, SSH_AUTH_SOCK: agentSocket } })
+    if (added.status !== 0) throw new Error('ssh-add failed: ' + String(added.stderr).trim())
+
+    // 插件拼的 argv 不带 -i，公钥认证只能靠 agent：临时 socket 交给 ssh 子进程继承
+    process.env.SSH_AUTH_SOCK = agentSocket
+    const host = parseHost({ name: 'real-sshd', address: '127.0.0.1', user, port })
+    const argv = buildSshArgv(host, { privateKnownHosts: knownHosts })
+    const transport = {
+      spawnMain: () => spawn(argv.command, argv.args, { stdio: 'pipe', windowsHide: true }),
+      runSide: (script) => new Promise((done) => {
+        const child = spawn(argv.command, argv.args, { stdio: ['pipe', 'ignore', 'ignore'] })
+        const timer = setTimeout(() => child.kill('SIGKILL'), 15000)
+        child.on('exit', (code) => { clearTimeout(timer); done({ code }) })
+        child.stdin.end(script)
+      }),
+    }
+    let stopped = false
+    const stop = async () => {
+      if (stopped) return
+      stopped = true
+      if (previousAgent === undefined) delete process.env.SSH_AUTH_SOCK
+      else process.env.SSH_AUTH_SOCK = previousAgent
+      await cleanup()
+    }
+    console.log('  (real sshd listening on 127.0.0.1:' + port + ' as ' + user + ')')
+    return { host, transport, knownHosts, stop }
+  } catch (error) {
+    await cleanup()
+    return { skip: 'could not start a real sshd: ' + error.message }
+  }
+}
+
+// 五个用例共用同一个临时 sshd；缺环境时逐个 SKIP，但每个都打印具体原因。
+const REAL_SSHD_TESTS = [
+  'real sshd: opens a session',
+  'real sshd: command output',
+  'real sshd: variables and cwd survive across commands',
+  'real sshd: exit code and stderr are separated',
+  'real sshd: host key pinned and close ends the session',
+]
+const realSshd = await startRealSshd()
+if (realSshd.skip !== undefined) {
+  for (const name of REAL_SSHD_TESTS) await test(name, () => { console.log('  (skip: ' + realSshd.skip + ')') })
+} else {
+  const session = new SshSession({ id: 'real1', host: realSshd.host, transport: realSshd.transport, spoolDir: spool, defaultTimeoutMs: 20000 })
+  let opened
+  try {
+    await test(REAL_SSHD_TESTS[0], async () => {
+      opened = await session.open()
+      eq([opened.state, opened.sessionId], ['idle', 'real1'])
+      assert(typeof opened.shell === 'string' && opened.shell.length > 0, 'shell: ' + opened.shell)
+      assert(opened.os === 'Linux' || opened.os === 'Darwin', 'os: ' + opened.os)
+      assert(opened.cwd.startsWith('/'), 'cwd: ' + opened.cwd)
+    })
+    await test(REAL_SSHD_TESTS[1], async () => {
+      if (opened === undefined) throw new Error('the session never opened')
+      const result = await session.exec('echo hello-from-real-sshd')
+      eq([result.exitCode, result.stdout, result.stderr], [0, 'hello-from-real-sshd\n', ''])
+    })
+    await test(REAL_SSHD_TESTS[2], async () => {
+      if (opened === undefined) throw new Error('the session never opened')
+      await session.exec('GREETING=ssh-real; cd /tmp')
+      eq((await session.exec('echo "$GREETING ${PWD##*/}"')).stdout, 'ssh-real tmp\n')
+    })
+    await test(REAL_SSHD_TESTS[3], async () => {
+      if (opened === undefined) throw new Error('the session never opened')
+      const result = await session.exec('echo to-stdout; echo to-stderr >&2; (exit 7)')
+      eq([result.exitCode, result.stdout, result.stderr], [7, 'to-stdout\n', 'to-stderr\n'])
+    })
+    await test(REAL_SSHD_TESTS[4], async () => {
+      if (opened === undefined) throw new Error('the session never opened')
+      // 首连 accept-new 应把真主机钥匙钉进临时 known_hosts —— 这就是「连的是真 sshd」的证据。
+      // Debian 默认 HashKnownHosts yes，主机名是哈希过的（|1| 开头），不能指望明文 127.0.0.1。
+      const pinned = readFileSync(realSshd.knownHosts, 'utf8').trim()
+      assert(pinned !== '' && /^(127\.0\.0\.1|\|1\|)/.test(pinned), 'known_hosts should hold the host key, got: ' + JSON.stringify(pinned.slice(0, 24)))
+      await session.close()
+      eq([session.state, session.deadReason], ['dead', 'killed'])
+    })
+  } finally {
+    await session.close().catch(() => {})
+    await realSshd.stop()
+  }
+}
 
 rmSync(work, { recursive: true, force: true })
 console.log(`SUMMARY pass=${pass} fail=${fail}`)
