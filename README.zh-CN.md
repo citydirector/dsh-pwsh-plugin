@@ -67,6 +67,7 @@ $env:DSH_HOME = '<DSH 数据目录>'
 | --- | --- | --- |
 | 强制使用 pwsh_run | `enforcePwshRun` | 拒绝普通原生 `pwsh` 调用，引导模型改用 `pwsh_run`。只读会话、明确后台任务和有效的更高权限请求仍可使用原生工具；提权仍需宿主审批。 |
 | 删除前先确认范围 | `enforceFileRemoval` | 拦截 `pwsh`、`pwsh_run` 和 `bash` 中常见的直接删除命令，引导模型先审阅删除计划。 |
+| 复用回收批准 | `recycleApproval` | `session`（默认）在同一会话、目录与沙箱策略下复用一次宿主批准；`always` 每次删除都重新询问。范围清单每次都仍要审阅。 |
 
 护栏检查工具入口与常见脚本语法，无法分析所有子程序或覆盖任意文件删除。
 
@@ -159,7 +160,7 @@ pnpm test
 pnpm run test:all
 ```
 
-完整回归目前为 **16 组、388 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。启动测试时请给完整环境变量：缺 `PATH`、`SystemRoot`、`WINDIR` 时 PowerShell 根本起不了任何原生可执行文件，`child-utf8-output` 会以空输出失败——那是启动环境的问题，不是插件回归。
+完整回归目前为 **16 组、362 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。启动测试时请给完整环境变量：缺 `PATH`、`SystemRoot`、`WINDIR` 时 PowerShell 根本起不了任何原生可执行文件，`child-utf8-output` 会以空输出失败——那是启动环境的问题，不是插件回归。
 
 发版前先提交改动，再执行：
 

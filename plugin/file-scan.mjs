@@ -87,7 +87,7 @@ export class FileOperations {
     const job = { id, owner, action, controller, status: 'running', started: Date.now(), progress: { phase: 'starting', entries: 0, removed: [] } }
     this.jobs.set(id, job)
     job.done = Promise.resolve().then(() => task(job)).then(result => { job.result = result; job.status = 'completed' }, error => {
-      job.error = error
+      job.error = error instanceof Error ? error : Error(String(error))
       job.status = controller.signal.aborted ? 'cancelled' : 'failed'
     }).finally(() => { job.finished = Date.now(); job.expires = job.finished + 300000 })
     return job
