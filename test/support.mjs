@@ -4,6 +4,21 @@
 import { existsSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
+// Windows 子进程在缺少 SystemDrive/WINDIR 时会把 `%SystemDrive%` 当字面量建目录，
+// 后续失败看起来像插件 bug。测试入口在这里直接报错，说清楚缺的是什么。
+export function assertWindowsEnvironment(env = process.env, platform = process.platform) {
+  if (platform !== 'win32') return
+  const missing = ['SystemDrive', 'WINDIR'].filter((name) => {
+    const key = Object.keys(env).find((item) => item.toLowerCase() === name.toLowerCase())
+    return key === undefined || typeof env[key] !== 'string' || env[key].length === 0
+  })
+  if (missing.length > 0) {
+    throw new Error('incomplete Windows environment: ' + missing.join(', ') + ' not set. '
+      + 'Run the tests from a normal shell (not a sanitized env), or set them, e.g. SystemDrive=C: WINDIR=C:\\Windows.')
+  }
+}
+assertWindowsEnvironment()
+
 const PORTABLE_DEFAULT = 'app/node_modules/@deepseek-ai'
 const DESKTOP_DEFAULT = 'resources/app.asar/dsh/node_modules/@deepseek-ai'
 
