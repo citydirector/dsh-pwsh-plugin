@@ -17,8 +17,10 @@ import * as plugin from '../plugin/ssh/index.mjs'
 if (process.platform === 'win32') {
   // Windows 上没有 POSIX sh 可当远端；这些用例要在 Linux/macOS/WSL 里跑。
   console.log('SKIP: sshtest needs a POSIX sh (run it inside WSL)')
-  console.log('SUMMARY pass=0 fail=0 skip=all')
-  process.exit(0)
+  console.log('SUMMARY pass=0 fail=0 skip=1')
+  // 设了门闩就不许整份被平台跳过：CI 在 Windows 上跑 pnpm test 时这条会拦住假绿。
+  if (process.env.DSH_REQUIRE_REAL_SSHD === '1') { console.log('REQUIRED: the whole suite was skipped on win32'); process.exitCode = 1 }
+  process.exit()
 }
 
 let pass = 0

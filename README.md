@@ -67,6 +67,7 @@ Open **pwsh settings** in the settings sidebar, or the plugin row's configuratio
 | --- | --- | --- |
 | Require pwsh_run | `enforcePwshRun` | Refuse ordinary built-in `pwsh` calls and direct the model to `pwsh_run`. Read-only sessions, explicit background jobs and valid requests for a higher permission mode remain available; elevation still needs host approval. |
 | Review targets before deletion | `enforceFileRemoval` | Block common direct deletion commands in `pwsh`, `pwsh_run` and `bash`, and direct the model to review a removal plan. |
+| Reuse one recycling approval | `recycleApproval` | `session` (default) reuses one Host approval per session, directory and sandbox policy; `always` asks on every deletion. The plan inventory is still reviewed each time. |
 
 The guards check tool entries and common script syntax; they do not inspect every child program or prevent every filesystem deletion.
 
@@ -159,7 +160,7 @@ pnpm test
 pnpm run test:all
 ```
 
-The full regression suite currently has **16 scripts / 388 assertions**. It needs Windows, Node.js 24, PowerShell 7, WSL and a loadable DSH runtime. Use `DSH_MODULES` or `DSH_MODULES_ASAR` when automatic runtime discovery is unavailable; release validation must finish without skips. Run `bash wsl/acceptance.sh` from a plain WSL shell, outside the plugin's fence. Launch the suite with a complete environment: without `PATH`, `SystemRoot` and `WINDIR` PowerShell cannot start native executables at all, and `child-utf8-output` fails with empty output — that is the launch environment, not a plugin regression.
+The full regression suite currently has **16 scripts / 363 assertions**. It needs Windows, Node.js 24, PowerShell 7, WSL and a loadable DSH runtime. Use `DSH_MODULES` or `DSH_MODULES_ASAR` when automatic runtime discovery is unavailable; release validation must finish without skips. Run `bash wsl/acceptance.sh` from a plain WSL shell, outside the plugin's fence. Launch the suite with a real environment: with an empty environment block PowerShell cannot start any native executable, not even by absolute path, and `child-utf8-output` fails with empty output. Dropping only `PATH`, `SystemRoot` and `WINDIR` does not reproduce it — the whole block has to be empty. That is the launch environment, not a plugin regression.
 
 For a release, commit changes, then run:
 

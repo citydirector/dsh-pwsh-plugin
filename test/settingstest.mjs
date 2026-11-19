@@ -139,6 +139,14 @@ try {
     assert(fields.includes('enabled') && fields.includes('hosts') && fields.includes('idleMinutes'))
     assert(!fields.includes('stateDir'))
   })
+  check('ssh-every-field-but-state-dir-is-volatile', () => {
+    // 只抽查几个字段会漏掉「新加的字段忘了 .volatile()」，直接遍历 schema 才钉得住。
+    const fields = Object.entries(SshConfig.dict)
+    const plain = fields.filter(([name, schema]) => name !== 'stateDir' && schema.meta?.volatile !== true).map(([name]) => name)
+    assert.deepEqual(plain, [], 'fields missing .volatile(): ' + plain.join(', '))
+    assert.equal(fields.find(([name]) => name === 'stateDir')[1].meta?.volatile, undefined)
+    assert.equal(Object.keys(sshRow().value ?? {}).length, fields.length - 1)
+  })
   await settings.mutate('ssh', [{ op: 'set', path: ['idleMinutes'], value: 45 }], sshRow().revision)
   check('ssh-edit-lands-in-live-config', () => assert.equal(sshConfig.idleMinutes.get(), 45))
   await assert.rejects(() => settings.mutate('ssh', [{ op: 'set', path: ['stateDir'], value: 'probe' }]), /not volatile/)
