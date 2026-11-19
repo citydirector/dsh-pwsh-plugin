@@ -58,7 +58,9 @@ Agent 确认清单与宿主审批是两件事。`workspace-write` 下回收站�
 {"action":"execute","planId":"<ID>","sandbox_permissions":"danger-full-access","justification":"仅将本计划中已核对的输出文件送入回收站"}
 ```
 
-宿主审批服务必须返回本次允许；拒绝、取消或审批通道不可用都不会执行，也不应换一个 shell 重试。批准后再次检查会话权限边界和到期时间。`read-only` 下这两个文件工具均拒绝写操作，Windows 身份检查也无法在 ConstrainedLanguage 中启动，因此 `file_remove` 规划同样明确拒绝。
+宿主审批服务必须返回本次允许；拒绝、取消或审批通道不可用都不会执行，也不应换一个 shell 重试。批准后再次检查会话权限边界和到期时间。
+
+`recycleApproval` 决定批准的复用粒度，默认 `session`：同一会话、同一工作目录、同一沙箱策略下，一次批准覆盖后续删除，范围清单仍然每次都要看。三者任一变化即失配，下一次删除重新申请；插件卸载或热替换会清空记录。改成 `always` 则每次删除都重新询问宿主。`read-only` 下这两个文件工具均拒绝写操作，Windows 身份检查也无法在 ConstrainedLanguage 中启动，因此 `file_remove` 规划同样明确拒绝。
 
 批量回收不是事务。先前成功的目标不会因为后面的文件被锁而还原；错误正文会带 `removed` 与诊断，不能把失败当作全部未执行。若进程在回收途中被取消或超时，应先重新检查现场，再为剩余目标创建新计划。
 

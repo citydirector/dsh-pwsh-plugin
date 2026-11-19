@@ -16,4 +16,7 @@ export const Config = Schema.object({
   fileOperationTimeoutMs: Schema.number().min(1).max(1800000).step(1).default(FILE_SCAN_DEFAULTS.fileOperationTimeoutMs),
   enforcePwshRun: Schema.boolean().default(false).volatile(),
   enforceFileRemoval: Schema.boolean().default(false).volatile(),
+  // 回收站写入不可回滚，宿主批准的粒度由这里决定：session 在同一会话、同一目录、同一策略下复用
+  // 一次批准；always 每次删除都重新问。范围确认（plan/execute 两段）不受影响。
+  recycleApproval: Schema.union([Schema.const('session'), Schema.const('always')]).default('session').volatile(),
 })

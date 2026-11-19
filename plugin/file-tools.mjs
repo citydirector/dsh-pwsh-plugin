@@ -11,6 +11,10 @@ const WINDOWS_SOURCE = readFileSync(new URL('./file-worker.ps1', import.meta.url
 const WINDOWS_BOOT = "$s=[IO.MemoryStream]::new([Convert]::FromBase64String('"+gzipSync(WINDOWS_SOURCE).toString('base64')+"'));$g=[IO.Compression.GzipStream]::new($s,[IO.Compression.CompressionMode]::Decompress);$r=[IO.StreamReader]::new($g);try{& ([ScriptBlock]::Create($r.ReadToEnd()))}finally{$r.Dispose();$s.Dispose()}"
 const POSIX_SOURCE = readFileSync(new URL('./file-worker.cjs', import.meta.url), 'utf8')
 const quote = value => "'" + value.replaceAll("'", "'\\''") + "'"
+// volatile 字段解析成带 get() 的引用对象；普通配置项原样返回。
+const live = value => value !== null && typeof value === 'object' && typeof value.get === 'function' ? value.get() : value
+// 取消原因可能是宿主给的字符串（例如程序结束时的 'run_code settled'），统一成 Error 再抛。
+const abortError = reason => reason instanceof Error ? reason : Error(typeof reason === 'string' && reason.trim() ? reason : 'File operation cancelled.')
 const stable = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(k => [k,item[k]])) : item)
 const output = { schema: { type:'object', properties:{text:{type:'string'}}, required:['text'], additionalProperties:false }, render: (_args,v) => [{type:'text',text:v.text}] }
 const response = value => ({text:JSON.stringify(value,null,2)})
@@ -36,10 +40,12 @@ export function assertRemovable(targets, boundary, home, windows) {
 /** 每个操作单独取策略并启动受限工作进程；没有宿主直接删除文件的旁路。 */
 export function installFileTools(ctx, config, resolvePolicy) {
  const plans=new Map(), temporary=new Map(), reservations=new Map(), cleaning=new Set(), operations=new FileOperations()
+ // 一次批准只在同一会话、同一目录、同一策略下复用；key 里含这三样，边界一变自然失配。
+ const recycleApprovals=new Map()
  const limits=fileScanLimits(config)
  let stopped=false
  const shutdown=new AbortController()
- ctx.effect(()=>()=>{stopped=true;shutdown.abort();operations.dispose();plans.clear();temporary.clear();reservations.clear()},'pwsh-run.file-plans')
+ ctx.effect(()=>()=>{stopped=true;shutdown.abort();operations.dispose();plans.clear();temporary.clear();reservations.clear();recycleApprovals.clear()},'pwsh-run.file-plans')
  const context=async exec=>{
   if(stopped||exec?.signal?.aborted) throw Error('File operation cancelled.')
   const session=exec?.agent?.session
@@ -95,7 +101,8 @@ export function installFileTools(ctx, config, resolvePolicy) {
     outcome=await handle.done
    }
    if(parsingError)throw parsingError
-   if(signal.aborted)throw signal.reason??Error('File operation cancelled.')
+   // 工作进程已经正常退出时，取消只是宿主在收尾：结果已成事实，不能再报失败。
+  if(signal.aborted&&!(outcome&&outcome.exitCode===0))throw abortError(signal.reason)
    let result
    try{result=parsed.finish()}catch(error){error.message+=' '+(handle?.collected.stderr.readFrom(0).text??'').slice(-4096);throw error}
    if(!result.ok) {
@@ -104,11 +111,12 @@ export function installFileTools(ctx, config, resolvePolicy) {
    }
    if(outcome.exitCode!==0)throw Error('File worker failed after emitting a result: '+(handle?.collected.stderr.readFrom(0).text??''))
    return result.result
-  }catch(error){if(!error.removed)error.removed=lastProgress.removed??[];throw error}
+  }catch(error){if(error!==null&&typeof error==='object'&&!error.removed)error.removed=lastProgress.removed??[];throw error}
   finally{clearTimeout(timer);if(handle&&signal.aborted){handle.terminate();await handle.waitForExit()}}
  }
  const approve=async(args,c,exec,targets)=>{
   if(c.policy.mode==='danger-full-access') return c.policy
+  if(live(config?.recycleApproval)!=='always'&&recycleApprovals.has(c.key)&&recycleApprovals.get(c.key)===c.backendIdentity) return {...c.policy,mode:'danger-full-access'}
   if(args.sandbox_permissions!=='danger-full-access'||typeof args.justification!=='string'||!args.justification.trim()) throw Error('Recycling writes outside the workspace. Request sandbox_permissions="danger-full-access" with justification for this exact plan; it will require Host approval.')
   const approval=ctx.get('approval')
   if(!approval||!exec.agent) throw Error('No Host approval service is available; no deletion was performed.')
@@ -116,6 +124,8 @@ export function installFileTools(ctx, config, resolvePolicy) {
   if(decision!=='allowed-once') throw Error('Host approval '+decision+'; deletion remains denied. Do not work around this decision.')
   const current=await context(exec)
   if(current.key!==c.key||current.backendIdentity!==c.backendIdentity) throw Error('Sandbox boundary changed during approval; create a new plan.')
+  // always 模式每次都要问，不留记录；session 模式才复用它。
+  if(live(config?.recycleApproval)!=='always') recycleApprovals.set(c.key,c.backendIdentity)
   return {...c.policy,mode:'danger-full-access'}
  }
  const prunePlans=()=>{for(const [id,p] of plans)if(p.expires<=Date.now()){plans.delete(id);reservations.delete(id)}}

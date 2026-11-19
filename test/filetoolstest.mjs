@@ -17,7 +17,9 @@ let mode='danger-full-access', approvalResult='allowed-once', approvalHook, appr
 const effects=[],tools=new Map(), guards=[]
 const policy=()=>({mode,workspaceRoot:root})
 const ctx={subprocess,tools:{register(def){tools.set(def.name,def);const d=boot.tools.register(def);return()=>{d();tools.delete(def.name)}},guard(fn){guards.push(fn);const d=boot.tools.guard(fn);return()=>{d();guards.splice(guards.indexOf(fn),1)}}},effect(fn){const d=fn();effects.push(d);return d},get(name){if(name==='sandbox')return replacementSandbox??boot.get('sandbox');if(name==='workingDirectory')return{async ensure(){return currentCwd}};if(name==='approval')return{async request(q){assert(q.reason.includes('fixed targets'));approvals++;approvalHook?.();return approvalResult}}}}
-installFileTools(ctx,{pwshPath:process.env.PWSH_BIN??'pwsh'},policy)
+// recycleApproval 默认 session；这批既有用例逐条验证审批时机，统一用 always 保持原语义。
+const fileConfig={pwshPath:process.env.PWSH_BIN??'pwsh',recycleApproval:'always'}
+installFileTools(ctx,fileConfig,policy)
 const exec={agent:{ctx:boot,session:{id:'files-test',header:{cwd:root},append(){}}},callId:'test-removal'}
 const native=new nativeModule.NativeToolExecutor(boot)
 let seq=0
@@ -94,6 +96,24 @@ try {
  await assert.rejects(()=>call('file_remove',{action:'execute',planId:p.planId}),/Host approval/);check('recycle-never-silently-elevates',()=>assert(existsSync(target)&&approvals===0))
  p=await plan(target);approvalResult='rejected';await assert.rejects(()=>remove(p.planId),/rejected/);check('host-denial-retains-target',()=>assert(existsSync(target)&&approvals===1))
  approvalResult='allowed-once';p=await plan(target);await remove(p.planId);check('approved-fixed-plan-recycled',()=>assert(!existsSync(target)&&approvals===2))
+ // 会话内一次批准：同一 session / cwd / policy 下复用，换了边界就要重新问宿主。
+ const onceA=join(root,'once-a.txt'),onceB=join(root,'once-b.txt')
+ writeFileSync(onceA,'a');writeFileSync(onceB,'b')
+ fileConfig.recycleApproval='session';approvals=0
+ p=await plan(onceA);await remove(p.planId)
+ check('session-approval-asks-once',()=>assert(!existsSync(onceA)&&approvals===1))
+ p=await plan(onceB);await remove(p.planId)
+ check('session-approval-reuses-within-boundary',()=>assert(!existsSync(onceB)&&approvals===1))
+ const onceC=join(root,'once-c.txt');writeFileSync(onceC,'c')
+ fileConfig.recycleApproval='always';p=await plan(onceC);await remove(p.planId)
+ check('always-mode-asks-every-time',()=>assert(!existsSync(onceC)&&approvals===2))
+ const {Config}=await import('../plugin/config.mjs')
+ check('recycle-approval-defaults-to-session',()=>assert.equal(Config({}).recycleApproval.get(),'session'))
+ // 宿主在程序结束时给的取消原因是字符串；FileOperations 必须把它存成 Error。
+ const {FileOperations}=await import('../plugin/file-scan.mjs')
+ const ops=new FileOperations(),stringJob=ops.start('op-string-'+Date.now(),{key:'k',backendIdentity:'b'},'file_remove:execute',async()=>{throw 'run_code settled'})
+ await new Promise(r=>setTimeout(r,10))
+ check('string-abort-reason-is-normalized',()=>assert(stringJob.error instanceof Error&&stringJob.status==='failed'&&stringJob.error.message==='run_code settled'))
  const clockTarget=join(root,'clock.txt');writeFileSync(clockTarget,'clock')
  p=await plan(clockTarget);const realNow=Date.now
  approvalHook=()=>{Date.now=()=>realNow()+130000}
