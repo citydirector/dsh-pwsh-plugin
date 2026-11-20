@@ -67,7 +67,6 @@ Open **pwsh settings** in the settings sidebar, or the plugin row's configuratio
 | --- | --- | --- |
 | Require pwsh_run | `enforcePwshRun` | Refuse ordinary built-in `pwsh` calls and direct the model to `pwsh_run`. Read-only sessions, explicit background jobs and valid requests for a higher permission mode remain available; elevation still needs host approval. |
 | Review targets before deletion | `enforceFileRemoval` | Block common direct deletion commands in `pwsh`, `pwsh_run` and `bash`, and direct the model to review a removal plan. |
-| Reuse one recycling approval | `recycleApproval` | `session` (default) reuses one Host approval per session, directory and sandbox policy; `always` asks on every deletion. The plan inventory is still reviewed each time. |
 
 The guards check tool entries and common script syntax; they do not inspect every child program or prevent every filesystem deletion.
 
