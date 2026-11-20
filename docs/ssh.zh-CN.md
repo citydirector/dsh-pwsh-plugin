@@ -259,7 +259,7 @@ Windows 上没有 POSIX `sh`，整份测试在 WSL 里跑：
 wsl.exe -e bash -lc 'cd <repo> && node test/sshtest.mjs'
 ```
 
-当前 46 项全绿：`SUMMARY pass=46 fail=0 skip=0`。CI 里设 `DSH_REQUIRE_REAL_SSHD=1` 可以让任何跳过直接变成失败。
+全绿时最后一行是 `SUMMARY pass=<n> fail=0 skip=0`；条数会随改动变化，看三串数字而不是记总数。CI 里设 `DSH_REQUIRE_REAL_SSHD=1` 可以让任何跳过直接变成失败。
 
 Windows 侧的设置页测试要补两个环境变量，否则 `test/support.mjs` 的前置校验会直接抛 `incomplete Windows environment`：
 
