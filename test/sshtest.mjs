@@ -633,6 +633,10 @@ function commandPath(name) {
   return found.status === 0 ? found.stdout.trim() : undefined
 }
 
+// 内核挑一个空闲高位端口后立刻释放——sshd 必须自己 bind 同一个端口，
+// 我们不能把 socket 一直握着（那样 sshd 反而绑不上，SO_REUSEPORT 也不可移植）。
+// 释放到 sshd 绑定之间仍有被别的进程抢走的窗口，所以 startRealSshd 用 withFreshPorts
+// 在启动失败时换端口重试；这里只负责每次给一个新的候选端口。
 async function freeHighPort() {
   const server = net.createServer()
   await new Promise((done, failed) => { server.once('error', failed); server.listen(0, '127.0.0.1', done) })
@@ -640,6 +644,34 @@ async function freeHighPort() {
   await new Promise((done) => server.close(done))
   return port
 }
+
+// 端口竞争是外部进程造成的，重试比断言“一定不会发生”可靠。每次失败都重新取端口，
+// 最多 attempts 次；最后一次的错误原样带出来，方便区分端口冲突和 sshd 配置错误。
+async function withFreshPorts(attempt, { attempts = 3, pickPort = freeHighPort } = {}) {
+  const tried = []
+  let last
+  for (let i = 0; i < attempts; i++) {
+    const port = await pickPort()
+    tried.push(port)
+    try { return await attempt(port) } catch (error) { last = error }
+  }
+  const reason = last instanceof Error ? last.message : String(last)
+  throw new Error('gave up after ' + tried.length + ' port attempts (' + tried.join(', ') + '): ' + reason)
+}
+
+await test('sshd startup retries with a fresh port', async () => {
+  const ports = []
+  const result = await withFreshPorts(async (port) => {
+    if (ports.length < 3) throw new Error('port ' + port + ' was taken')
+    return port
+  }, { pickPort: async () => { const port = 41000 + ports.length; ports.push(port); return port } })
+  eq(result, 41002)
+  eq(ports, [41000, 41001, 41002])
+  let attempts = 0
+  const error = await rejects(withFreshPorts(async () => { attempts++; throw new Error('busy') }, { pickPort: async () => 43000 + attempts }), /gave up after 3 port attempts/)
+  eq(attempts, 3)
+  assert(error.message.includes('43000, 43001, 43002'), error.message)
+})
 
 async function waitPort(port, ms) {
   const deadline = Date.now() + ms
@@ -670,7 +702,6 @@ async function startRealSshd() {
   if (user === undefined) return { skip: 'no $USER/$LOGNAME to log in as' }
 
   const dir = mkdtempSync(join(tmpdir(), 'sshtest-sshd-'))
-  const port = await freeHighPort()
   const hostKey = join(dir, 'host_key')
   const userKey = join(dir, 'user_key')
   const authorizedKeys = join(dir, 'authorized_keys')
@@ -701,35 +732,47 @@ async function startRealSshd() {
     writeFileSync(authorizedKeys, readFileSync(userKey + '.pub'))
     for (const file of [authorizedKeys, hostKey, userKey]) chmodSync(file, 0o600)
     writeFileSync(knownHosts, '')
-    writeFileSync(configPath, [
-      'Port ' + port,                        // 内核挑的空闲高位端口，不是 22
-      'ListenAddress 127.0.0.1',             // 只监听回环
-      'HostKey ' + hostKey,
-      'AuthorizedKeysFile ' + authorizedKeys, // 必须是绝对路径
-      'StrictModes no',
-      'PidFile ' + join(dir, 'sshd.pid'),
-      'UsePAM no',
-      'PasswordAuthentication no',
-      'KbdInteractiveAuthentication no',
-      'PermitRootLogin no',
-      'AllowUsers ' + user,                  // 显式放行当前用户：系统配置里的 AllowUsers 不含他时会 publickey 被拒
-      'MaxStartups 5',
-      'LogLevel VERBOSE',
-    ].join('\n') + '\n')
-    chmodSync(configPath, 0o600)
-
+    const writeConfig = (port) => {
+      writeFileSync(configPath, [
+        'Port ' + port,                        // 内核挑的空闲高位端口，不是 22
+        'ListenAddress 127.0.0.1',             // 只监听回环
+        'HostKey ' + hostKey,
+        'AuthorizedKeysFile ' + authorizedKeys, // 必须是绝对路径
+        'StrictModes no',
+        'PidFile ' + join(dir, 'sshd.pid'),
+        'UsePAM no',
+        'PasswordAuthentication no',
+        'KbdInteractiveAuthentication no',
+        'PermitRootLogin no',
+        'AllowUsers ' + user,                  // 显式放行当前用户：系统配置里的 AllowUsers 不含他时会 publickey 被拒
+        'MaxStartups 5',
+        'LogLevel VERBOSE',
+      ].join('\n') + '\n')
+      chmodSync(configPath, 0o600)
+    }
     // sshd 不接受相对路径（会直接退出 255：sshd requires execution with an absolute path）
     const sshdBinary = sshdPath.startsWith('/') ? sshdPath : resolve(sshdPath)
-    sshd = spawn(sshdBinary, ['-D', '-e', '-f', configPath], { stdio: ['ignore', 'pipe', 'pipe'] })
-    sshd.stdout.on('data', (chunk) => log.push(String(chunk)))
-    sshd.stderr.on('data', (chunk) => log.push(String(chunk)))
-
-    if (!await waitPort(port, 5000)) {
-      const tail = log.join('').split('\n').map((line) => line.trim()).filter(Boolean).slice(-3).join(' / ')
-      await cleanup()
-      // sshd 起来了却没监听属于真错（端口冲突、配置被拒），不是环境缺失。
-      return { fail: 'sshd did not listen on 127.0.0.1:' + port + (tail === '' ? '' : ': ' + tail) }
+    const stopChild = async (child) => {
+      if (child.exitCode !== null || child.signalCode !== null) return
+      child.kill('SIGTERM')
+      await new Promise((done) => { const timer = setTimeout(done, 2000); child.once('exit', () => { clearTimeout(timer); done() }) })
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     }
+    const started = await withFreshPorts(async (port) => {
+      writeConfig(port)
+      log.length = 0
+      const child = spawn(sshdBinary, ['-D', '-e', '-f', configPath], { stdio: ['ignore', 'pipe', 'pipe'] })
+      child.stdout.on('data', (chunk) => log.push(String(chunk)))
+      child.stderr.on('data', (chunk) => log.push(String(chunk)))
+      if (!await waitPort(port, 5000)) {
+        const tail = log.join('').split('\n').map((line) => line.trim()).filter(Boolean).slice(-3).join(' / ')
+        await stopChild(child)
+        throw new Error('sshd did not listen on 127.0.0.1:' + port + (tail === '' ? '' : ': ' + tail))
+      }
+      return { child, port }
+    })
+    sshd = started.child
+    const port = started.port
 
     const agent = spawnSync(bins['ssh-agent'], ['-a', agentSocket], { encoding: 'utf8' })
     if (agent.status !== 0) throw new Error('ssh-agent failed: ' + String(agent.stderr).trim())
