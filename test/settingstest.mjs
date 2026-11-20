@@ -51,7 +51,7 @@ root.provide('configEditor', {
 })
 const settings = new settingsModule.SettingsForms(root)
 const subprocess = new local.LocalSubprocessRuntime(root)
-const effects = [], guards = [], definitions = new Map()
+const effects = [], guards = [], definitions = new Map(), commands = []
 apply({
   fiber: { ctx: root }, subprocess,
   tools: {
@@ -60,8 +60,15 @@ apply({
   },
   get: name => name === 'workingDirectory' ? { async ensure() { return process.cwd() } } : root.get(name),
   effect(fn) { const d = fn(); effects.push(d); return d },
-  inject(names, callback) { assert.deepEqual(names, ['settings']); callback({ settings, effect(fn) { const d = fn(); effects.push(d); return d } }) },
+  inject(names, callback) {
+    const effect = (fn) => { const d = fn(); effects.push(d); return d }
+    // file-tools 除了设置页还注册 /recycle-approval，两个命名空间都要能接住。
+    if (names[0] === 'commands') return callback({ effect, commands: { register(def) { commands.push(def); return () => commands.splice(commands.indexOf(def), 1) } } })
+    assert.deepEqual(names, ['settings'])
+    callback({ settings, effect })
+  },
 }, config)
+check('recycle-approval-command-is-registered', () => assert.deepEqual(commands.map(def => def.name), ['recycle-approval']))
 const descriptor = () => settings.describe().find(row => row.ns === 'pwsh-run')
 const listeners = new Set()
 let writable = true, served = true
