@@ -153,7 +153,7 @@ window.__ModuleLoader__.load({
     // 宿主按 `<包名>#<行 id>` 给插件行找配置页。真包名从宿主给的 pkg 里取（见 applySshSettings），
     // 这里只是包名拿不到时的回退。
     const SSH_PACKAGE = 'dsh-pwsh-plugin'
-    const SSH_FIELDS = ['enabled', 'idleMinutes', 'hardCapHours', 'globalMax', 'hosts', 'approvalList']
+    const SSH_FIELDS = ['enabled', 'approvalListInvert', 'idleMinutes', 'hardCapHours', 'globalMax', 'hosts', 'approvalList']
     const SSH_SETTINGS = {
       zh: {
         title: 'SSH 会话', summary: '管理 SSH 主机清单、审批名单与会话限额。',
@@ -163,11 +163,15 @@ window.__ModuleLoader__.load({
         enabledHint: '关闭后拒绝新建会话；已经开着的会话进入 draining，跑完当前命令后关闭。',
         idleMinutes: '空闲超时（分钟，0 关闭）', hardCapHours: '硬上限（小时，1–168）', globalMax: '全局会话上限（1–64）',
         limits: '空闲只由 ssh_exec 计时；把限额改小要 5 分钟宽限才生效。',
-        hosts: '主机清单（JSON 数组）',
-        hostsHint: '每项 { name, address, user, port?, via?: "windows"|"wsl", wslDistro?, agentSocket?, shell?, encoding?, maxSessions?, loadProfile? }。模型只能用 name 点名主机，清单外一律拒绝。',
+        hosts: '主机清单（JSON 数组或别名映射）',
+        hostsHint: '每项 { name, address: "user@host" 或 "host", user?, port?, via?: "windows"|"wsl", wslDistro?, agentSocket?, shell?, encoding?, maxSessions?, loadProfile? }；也可写 { "别名": "user@host" }。省略 user 时用本机登录名。模型只能用 name 点名主机，清单外一律拒绝。',
         approval: '审批名单（每行一条）',
         approvalHint: 'IP、CIDR、主机名或 *.example.com，# 之后是注释。命中后 ssh_open 与每条 ssh_exec 都要人工批准；留空则不拦。',
-        invalid: '格式不对，保存已被拦下。', resetAll: '全部恢复默认',
+        approvalInvert: '反转审批名单',
+        approvalInvertHint: '开启后名单内自动放行，名单外的主机在 ssh_open 与每条 ssh_exec 时都要人工批准；关闭时相反。',
+        invalid: '格式不对，保存已被拦下。',
+        hostsInvalid: '主机清单无效：至少一台主机；别名不能为空或含空白；地址必须是 host 或 user@host，host 不能为空或含空白；端口 1–65535。',
+        resetAll: '全部恢复默认',
         scope: '对当前 profile 的全部预设与会话生效。插件管理里的 ssh 行默认 disabled: true，先启用它，这一页才有可写的配置。',
         form: { unavailable: '配置暂不可用，请确认 ssh 条目已在当前主机启用。', readOnly: '当前部署的配置只读，无法保存修改。', saveFailed: '保存失败，请刷新配置后重试。', save: '保存', saving: '保存中…' },
       },
@@ -179,11 +183,15 @@ window.__ModuleLoader__.load({
         enabledHint: 'Turning this off refuses new sessions; open ones drain and close after the running command.',
         idleMinutes: 'Idle timeout (minutes, 0 disables)', hardCapHours: 'Hard cap (hours, 1–168)', globalMax: 'Global session limit (1–64)',
         limits: 'Only ssh_exec counts as activity; shrinking a limit takes effect after a 5 minute grace period.',
-        hosts: 'Hosts (JSON array)',
-        hostsHint: 'Each entry { name, address, user, port?, via?: "windows"|"wsl", wslDistro?, agentSocket?, shell?, encoding?, maxSessions?, loadProfile? }. The model may only name a host by name; anything else is refused.',
+        hosts: 'Hosts (JSON array or alias map)',
+        hostsHint: 'Each entry { name, address: "user@host" or "host", user?, port?, via?: "windows"|"wsl", wslDistro?, agentSocket?, shell?, encoding?, maxSessions?, loadProfile? }; an alias map like { "alias": "user@host" } also works. Without user, the local login name is used. The model may only name a host by name; anything else is refused.',
         approval: 'Approval list (one per line)',
         approvalHint: 'IP, CIDR, host name or *.example.com; # starts a comment. Matching hosts require manual approval for ssh_open and every ssh_exec. Empty means nothing is gated.',
-        invalid: 'Not valid, so the save is blocked.', resetAll: 'Restore all defaults',
+        approvalInvert: 'Invert the approval list',
+        approvalInvertHint: 'When on, listed hosts are allowed automatically and every other host asks for approval on ssh_open and each ssh_exec; when off, the list gates instead.',
+        invalid: 'Not valid, so the save is blocked.',
+        hostsInvalid: 'Invalid host list: at least one host; an alias may not be empty or contain whitespace; an address must be host or user@host with a non-empty host and no whitespace; port 1-65535.',
+        resetAll: 'Restore all defaults',
         scope: 'Applies to every preset and session in this profile. The ssh row in plugin management starts disabled, enable it first or this page has nothing writable.',
         form: { unavailable: 'Configuration unavailable. Check that the ssh entry is enabled on this Host.', readOnly: 'Configuration is read-only in this deployment.', saveFailed: 'Not saved. Refresh the configuration and try again.', save: 'Save', saving: 'Saving…' },
       },
@@ -199,11 +207,11 @@ window.__ModuleLoader__.load({
       const number = (name, label) => h('div', { style: style.row },
         h('div', { style: style.field }, h('span', { style: style.label }, label)),
         h('input', { type: 'text', inputMode: 'numeric', value: field(name).text, disabled, spellCheck: false, onChange: (event) => props.edit(name, event.target.value), style: { ...inputStyle, width: 120 } }))
-      const area = (name, label, hint, rows) => h('div', { style: { display: 'grid', gap: 6 } },
+      const area = (name, label, hint, rows, invalid = t.invalid) => h('div', { style: { display: 'grid', gap: 6 } },
         h('span', { style: style.label }, label),
         h('textarea', { rows, value: field(name).text, disabled, spellCheck: false, onChange: (event) => props.edit(name, event.target.value), style: { ...inputStyle, width: '100%', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', resize: 'vertical' } }),
         h('p', { style: style.note }, hint),
-        field(name).invalid ? h('p', { style: { ...style.note, color: 'var(--danger, #c33)' } }, t.invalid) : null)
+        field(name).invalid ? h('p', { style: { ...style.note, color: 'var(--danger, #c33)' } }, invalid) : null)
       return h('div', { style: style.page, 'data-ssh-settings': '' },
         h('header', null, h('h2', { style: style.title }, t.title), h('p', { style: style.intro }, t.intro)),
         h(SettingsForm, { labels: t.form, state, onSave: props.save, onDiscard: props.discard },
@@ -211,7 +219,7 @@ window.__ModuleLoader__.load({
             h('h3', { style: style.group }, t.group),
             h('div', { style: style.row },
               h('div', { style: style.field }, h('span', { style: style.label }, t.enabled), h('p', { style: style.note }, t.enabledHint)),
-              h(Switch, { label: t.enabled, checked: field('enabled').text === 'true', disabled, onChange: (value) => props.edit('enabled', value ? 'true' : 'false') })),
+              h(Switch, { label: t.enabled, checked: field('enabled').text === 'true', disabled, 'data-setting': 'enabled', onChange: (value) => props.edit('enabled', value ? 'true' : 'false') })),
             h('div', { style: style.status, role: 'status' },
               h('span', null, state.enabled ? t.on : t.off),
               state.dirty ? h('span', null, t.pending) : null,
@@ -221,27 +229,112 @@ window.__ModuleLoader__.load({
             number('globalMax', t.globalMax),
             h('p', { style: style.note }, t.limits),
             h('h3', { style: style.group }, t.hostsGroup),
-            area('hosts', t.hosts, t.hostsHint, 8),
+            area('hosts', t.hosts, t.hostsHint, 8, t.hostsInvalid),
             h('h3', { style: style.group }, t.approvalGroup),
+            h('div', { style: style.row },
+              h('div', { style: style.field }, h('span', { style: style.label }, t.approvalInvert), h('p', { style: style.note }, t.approvalInvertHint)),
+              h(Switch, { label: t.approvalInvert, checked: field('approvalListInvert').text === 'true', disabled, 'data-setting': 'approvalListInvert', onChange: (value) => props.edit('approvalListInvert', value ? 'true' : 'false') })),
             area('approvalList', t.approval, t.approvalHint, 4),
             h('p', { style: style.note }, t.scope))))
     }
-    // hosts 在 Config 里是数组（也接受 JSON 文本）：表单里按 JSON 编辑，语法错就拦住保存。
+    // hosts 在 Config 里是数组（也接受 JSON 文本）；表单还接受紧凑的别名映射：
+    //   [{ name, address, user, port?, ... }]
+    //   { "alias": "user@host" | "host" | { address, user?, port? } }
+    // 校验口径对齐 plugin/ssh/hosts.mjs 的 parseHost：别名不含空白，host 非空且不含空白，
+    // user 可省略（服务端用本机登录名），端口限 1..65535。服务端仍会逐项复核并丢弃非法条目。
+    const HOST_ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+    const HOST_USER_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/
+    const HOSTNAME_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$/
+    const HOST_BAD_RE = /[\s"'\x60\\\x00-\x1f\x7f@]/
+    const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+    function splitUserHost(text) {
+      const at = text.lastIndexOf('@')
+      if (at < 0) return { host: text }
+      if (text.indexOf('@') !== at) throw new Error('address must contain at most one "@"')
+      const user = text.slice(0, at)
+      const host = text.slice(at + 1)
+      if (user === '') throw new Error('user is empty')
+      if (host === '') throw new Error('host is empty')
+      return { user, host }
+    }
+    function checkHost(host) {
+      if (typeof host !== 'string' || host.trim() === '') throw new Error('host is empty')
+      if (host.startsWith('-')) throw new Error('host must not start with "-"')
+      if (HOST_BAD_RE.test(host)) throw new Error('host must not contain whitespace, quotes, "@" or control characters')
+      if (host.startsWith('[')) {
+        if (!/^\[[^\]]+\]$/.test(host)) throw new Error('bracketed host must be an IPv6 literal')
+        try { new URL('http://' + host) } catch { throw new Error('bracketed host must be an IPv6 literal') }
+        return
+      }
+      if (host.includes(':')) throw new Error('write IPv6 addresses in brackets, e.g. [::1]')
+      if (!HOSTNAME_RE.test(host)) throw new Error('host is not a valid hostname or IPv4 address')
+    }
+    function hostEntry(entry, index, alias) {
+      if (!isPlainObject(entry)) throw new Error('hosts[' + index + '] must be an object')
+      const name = alias ?? entry.name
+      if (typeof name !== 'string' || name.trim() === '') throw new Error('hosts[' + index + ']: alias is required')
+      if (/\s/.test(name)) throw new Error('hosts[' + index + '] "' + name + '": alias must not contain whitespace')
+      if (!HOST_ALIAS_RE.test(name)) throw new Error('hosts[' + index + '] "' + name + '": alias may only contain letters, digits, ".", "_" or "-"')
+      if (entry.address !== undefined && entry.host !== undefined) throw new Error('hosts[' + index + '] "' + name + '": use either address or host, not both')
+      const rawAddress = entry.address ?? entry.host
+      if (typeof rawAddress !== 'string') throw new Error('hosts[' + index + '] "' + name + '": host is required')
+      const split = splitUserHost(rawAddress)
+      let user = entry.user
+      if (split.user !== undefined) {
+        if (user !== undefined && user !== split.user) throw new Error('hosts[' + index + '] "' + name + '": user is set twice')
+        user = split.user
+      }
+      checkHost(split.host)
+      if (user !== undefined && (typeof user !== 'string' || !HOST_USER_RE.test(user))) throw new Error('hosts[' + index + '] "' + name + '": user is not a plain login name')
+      if (entry.port !== undefined && (!Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535)) throw new Error('hosts[' + index + '] "' + name + '": port must be an integer between 1 and 65535')
+      const rest = { ...entry }
+      delete rest.name
+      delete rest.host
+      delete rest.address
+      delete rest.user
+      const result = { name, address: split.host }
+      if (user !== undefined) result.user = user
+      return { ...result, ...rest }
+    }
     function parseHostsText(text) {
       if (text.trim() === '') return { kind: 'clear' }
       let value
       try { value = JSON.parse(text) } catch { return undefined }
-      if (!Array.isArray(value)) return undefined
-      return { kind: 'set', value }
+      try {
+        if (Array.isArray(value)) {
+          if (value.length === 0) return { kind: 'clear' }
+          const seen = new Set()
+          const entries = value.map((entry, index) => {
+            const host = hostEntry(entry, index)
+            if (seen.has(host.name)) throw new Error('duplicate host name "' + host.name + '"')
+            seen.add(host.name)
+            return host
+          })
+          return { kind: 'set', value: entries }
+        }
+        if (isPlainObject(value)) {
+          const names = Object.keys(value)
+          if (names.length === 0) return undefined
+          const entries = names.map((name, index) => {
+            const target = value[name]
+            if (typeof target === 'string') return hostEntry({ address: target }, index, name)
+            if (isPlainObject(target)) return hostEntry(target, index, name)
+            throw new Error('hosts[' + index + '] "' + name + '": value must be "user@host", "host" or an object')
+          })
+          return { kind: 'set', value: entries }
+        }
+      } catch { return undefined }
+      return undefined
     }
     function applySshSettings(ctx) {
       const scope = ctx.configForms.get(SSH_NS)
       const specs = [
         { field: 'enabled', format: (value) => value === true ? 'true' : 'false', parse: (text) => text === 'true' || text === 'false' ? { kind: 'set', value: text === 'true' } : undefined },
+        { field: 'approvalListInvert', format: (value) => value === true ? 'true' : 'false', parse: (text) => text === 'true' || text === 'false' ? { kind: 'set', value: text === 'true' } : undefined },
         settingsNumberField('idleMinutes'),
         settingsNumberField('hardCapHours'),
         settingsNumberField('globalMax'),
-        { field: 'hosts', format: (value) => Array.isArray(value) ? JSON.stringify(value, null, 2) : typeof value === 'string' ? value : '[]', parse: parseHostsText },
+        { field: 'hosts', format: (value) => Array.isArray(value) || isPlainObject(value) ? JSON.stringify(value, null, 2) : typeof value === 'string' ? value : '[]', parse: parseHostsText },
         settingsTextField('approvalList'),
       ]
       const form = new SettingsFormModel(scope, specs)
