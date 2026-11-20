@@ -39,7 +39,8 @@
     "README.md",
     "README.zh-CN.md",
     "FINDINGS.md",
-    "LICENSE"
+    "LICENSE",
+    ".mailmap"
   ],
   "main": "./plugin/index.mjs",
   "dsh": {
