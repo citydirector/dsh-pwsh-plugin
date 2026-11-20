@@ -6,6 +6,7 @@ import { createRequire, registerHooks } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import vm from 'node:vm'
 import { Config, apply } from '../plugin/index.mjs'
+import { Config as SshConfig } from '../plugin/ssh/index.mjs'
 import { importFromDsh, SKIP_HINT } from './support.mjs'
 
 const localRequire = createRequire(import.meta.url)
@@ -35,11 +36,23 @@ let override = { maxSessions: 5 }
 const config = Config({ ...base, ...override })
 const fiber = { uid: 101, state: 2, runtime: { Config }, effectiveConfig: config, ctx: root }
 const entry = { id: 101, options: { id: 'pwsh-run', config: { ...base, ...override } }, fiber }
+// SSH 是独立条目；设置页是否出现取决于宿主 describe 是否服务它的命名空间。
+const sshConfig = SshConfig({})
+const sshFiber = { uid: 102, state: 2, runtime: { Config: SshConfig }, effectiveConfig: sshConfig, ctx: root }
+const sshEntry = { id: 102, options: { id: 'ssh', config: {} }, fiber: sshFiber }
 root.provide('configEditor', {
   documentPath: resolve(dir, 'profile.json'),
   entries: () => [entry],
-  configuration: () => [{ entry, inherited: base, override }],
+  configuration: () => [{ entry, inherited: base, override }, { entry: sshEntry, inherited: {}, override: {} }],
+  entries: () => [entry, sshEntry],
   async edit(target, change) {
+    if (target === sshEntry) {
+      const next = await change(sshEntry.options.config, {})
+      const resolved = SshConfig(next)
+      sshEntry.options.config = next
+      for (const [field, value] of Object.entries(next)) cosmos.updateVolatile(sshConfig[field], resolved[field])
+      return
+    }
     assert.equal(target, entry)
     const next = await change(override, base)
     const resolved = Config({ ...base, ...next })
@@ -81,19 +94,38 @@ const scope = {
   },
 }
 let client, slots = [], observerCallback, watchStopped = false
-const { SettingsFormModel } = modelModule
+const { SettingsFormModel, settingsNumberField, settingsTextField } = modelModule
+const Switch = () => {}
 vm.runInNewContext(readFileSync(new URL('../client/index.js', import.meta.url), 'utf8'), {
-  window: { __ModuleLoader__: { load({ factory }) { client = factory(name => name === 'react' ? React : { SettingsFormModel, SettingsForm() {}, Switch() {}, Button() {} }) } } },
+  window: { __ModuleLoader__: { load({ factory }) { client = factory(name => name === 'react' ? React : { SettingsFormModel, SettingsForm() {}, Switch, Button() {}, settingsNumberField, settingsTextField }) } } },
   document: { documentElement: { lang: 'zh-CN' } }, navigator: { language: 'zh-CN' },
   MutationObserver: class { constructor(fn) { observerCallback = fn } observe() {} disconnect() { watchStopped = true } },
 })
 const uiEffects = []
+// SSH 设置分组也挂在同一个 client 上，但它有自己的命名空间；这里只给它一个只读桩。
+// 真快照：命名空间没被宿主服务时这里是 undefined，页面就不会登记——正是要钉住的行为。
+const sshRow = () => settings.describe().find(row => row.ns === 'ssh')
+const sshScope = {
+  getSnapshot() { const row = sshRow(); return { ...(row ?? {}), status: row === undefined ? 'unavailable' : 'ready', writable: true } },
+  subscribe() { return () => {} },
+  async mutate(ops, revision) {
+    try { await settings.mutate('ssh', ops, revision); return true } catch { return false }
+  },
+}
 client.apply({
-  configForms: { get(ns) { assert.equal(ns, 'pwsh-run'); return scope }, whileServed(names, register) { assert.deepEqual(Array.from(names), ['pwsh-run']); return register(new Set(names)) } },
+  configForms: {
+    get(ns) { return ns === 'pwsh-run' ? scope : ns === 'ssh' ? sshScope : assert.fail('unexpected namespace ' + ns) },
+    whileServed(names, register) {
+      const served = new Set(settings.describe().map(row => row.ns))
+      const live = names.filter((name) => served.has(name))
+      return live.length === 0 ? () => {} : register(new Set(live))
+    },
+  },
   slots: { inject(_slot, fn) { return fn() }, register(options, Component) { const slot = { options, Component }; slots.push(slot); return () => { slots = slots.filter(row => row !== slot) } } },
   effect(fn) { const d = fn(); uiEffects.push(d); return d },
 })
-const section = () => slots.find(row => row.options.name === 'settings.section')
+const section = (id = 'pwsh-run') => slots.find(row => row.options.name === 'settings.section' && row.options.id === id)
+const pwshSlots = () => slots.filter(row => row.options.name === 'settings.section' ? row.options.id === 'pwsh-run' : row.options.key === 'dsh-pwsh-plugin' + '#' + 'pwsh-run')
 const props = section().options.inject()
 const state = () => props.hooks.pwshSettings.getSnapshot()
 const native = { name: 'pwsh', agent: { session: { id: 'settings-live' } }, arguments: { command: 'fixture' } }
@@ -104,8 +136,31 @@ try {
   check('schema-default-is-live-false', () => assert.equal(config.enforcePwshRun.get(), false))
   check('form-projects-both-live-switches', () => assert(['enforcePwshRun','enforceFileRemoval'].every(field=>JSON.stringify(descriptor().schema).includes(field)) && !JSON.stringify(descriptor().schema).includes('timeoutMs')))
   check('automatic-page-disabled', () => assert.equal(descriptor().autoGenerate, false))
-  check('sidebar-and-plugin-row-registered', () => assert.equal(slots.length, 2))
+  check('sidebar-and-plugin-row-registered', () => assert.equal(pwshSlots().length, 2))
   check('sidebar-localized-title', () => assert.equal(section().options.label, 'pwsh 设置'))
+  check('ssh-group-registered', () => assert.equal(section('ssh').options.label, 'SSH 会话'))
+  check('ssh-row-page-keyed-by-package-and-row', () => assert(slots.some(row => row.options.name === 'plugins.row.config' && row.options.key === 'dsh-pwsh-plugin' + '#' + 'ssh')))
+  check('ssh-namespace-is-served', () => assert(sshRow() !== undefined))
+  check('ssh-form-exposes-live-fields-only', () => {
+    // value 是已解包、按表单字段投影后的普通值，正好用来判断哪些字段可编辑。
+    const fields = Object.keys(sshRow().value ?? {})
+    assert(fields.includes('enabled') && fields.includes('hosts') && fields.includes('idleMinutes'))
+    assert(!fields.includes('stateDir'))
+  })
+  check('ssh-every-field-but-remount-ones-is-volatile', () => {
+    // 只抽查几个字段会漏掉「新加的字段忘了 .volatile()」，直接遍历 schema 才钉得住。
+    // stateDir / sshPath / wslPath 故意不热改：改了要重挂插件。
+    const REMOUNT = ['stateDir', 'sshPath', 'wslPath']
+    const fields = Object.entries(SshConfig.dict)
+    const plain = fields.filter(([name, schema]) => !REMOUNT.includes(name) && schema.meta?.volatile !== true).map(([name]) => name)
+    assert.deepEqual(plain, [], 'fields missing .volatile(): ' + plain.join(', '))
+    for (const name of REMOUNT) assert.equal(fields.find(([field]) => field === name)[1].meta?.volatile, undefined, name + ' must not be volatile')
+    assert.equal(Object.keys(sshRow().value ?? {}).length, fields.length - REMOUNT.length)
+  })
+  await settings.mutate('ssh', [{ op: 'set', path: ['idleMinutes'], value: 45 }], sshRow().revision)
+  check('ssh-edit-lands-in-live-config', () => assert.equal(sshConfig.idleMinutes.get(), 45))
+  await assert.rejects(() => settings.mutate('ssh', [{ op: 'set', path: ['stateDir'], value: 'probe' }]), /not volatile/)
+  await assert.rejects(() => settings.mutate('ssh', [{ op: 'set', path: ['sshPath'], value: 'probe' }]), /not volatile/)
   check('native-initially-allowed', () => assert.equal(guards[0](native), undefined))
   const formOnly = process.env.DSH_SETTINGS_FORM_ONLY === '1'
   if (formOnly) console.log('SKIP: real pwsh process check requires an unrestricted test process')
@@ -142,6 +197,28 @@ try {
   check('stale-write-does-not-overwrite', () => assert(config.enforcePwshRun.get()))
   await assert.rejects(() => settings.mutate('pwsh-run', [{ op: 'set', path: ['timeoutMs'], value: 12 }]), /not volatile/)
   check('process-settings-not-editable-through-form', () => assert.equal(config.timeoutMs, 15000))
+  const sshProps = section('ssh').options.inject()
+  const sshState = () => sshProps.hooks.sshSettings.getSnapshot()
+  const waitSshSaved = async () => { for (let i = 0; i < 100 && sshState().saving; i++) await new Promise(r => setTimeout(r, 10)); assert(!sshState().saving) }
+  const findSwitch = (node) => {
+    if (node === null || node === undefined) return undefined
+    if (Array.isArray(node)) { for (const child of node) { const hit = findSwitch(child); if (hit !== undefined) return hit } return undefined }
+    if (typeof node !== 'object') return undefined
+    if (node.type === Switch && node.props?.['data-setting'] === 'approvalListInvert') return node
+    return findSwitch(node.props?.children ?? node.children)
+  }
+  check('ssh-form-exposes-approval-invert-switch', () => {
+    assert(Object.hasOwn(sshState().fields, 'approvalListInvert'))
+    const page = section('ssh').Component({ view: 'page', useSshSettings: selector => selector(sshState()), ...sshProps })
+    const node = findSwitch(page)
+    assert(node !== undefined, 'approvalListInvert Switch is rendered')
+    assert.equal(node.props.checked, false)
+    assert.match(node.props.label, /反转/)
+  })
+  sshProps.edit('approvalListInvert', 'true')
+  check('ssh-invert-edit-is-staged', () => assert(sshState().dirty && sshConfig.approvalListInvert.get() === false))
+  sshProps.save(); await waitSshSaved()
+  check('ssh-invert-save-lands-in-live-config', () => assert.equal(sshConfig.approvalListInvert.get(), true))
   writable = false; for (const fn of listeners) fn()
   props.edit('enforcePwshRun', 'false'); props.save(); await waitSaved()
   check('read-only-form-does-not-save', () => assert(config.enforcePwshRun.get()))

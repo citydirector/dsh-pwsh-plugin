@@ -2,6 +2,7 @@
 // 纯静态校验 —— 宿主那套 readPluginMeta / readPackageDocument 的规则在这里复刻一遍，
 // 任何一条不满足，插件页上就会静默退化成「英文标题 + 英文 README」，构建期没信号。
 import { readFileSync, statSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { dirname, extname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -108,6 +109,20 @@ check('icon-declared', typeof icon === 'string' && icon.length > 0, JSON.stringi
   check('icon-exported', Object.hasOwn(exported, './icon') || Object.hasOwn(exported, './icon.svg'), Object.keys(exported).join(' '))
   check('packed-locale', (manifest.files ?? []).includes('locale'), JSON.stringify(manifest.files ?? []))
   check('packed-icon', (manifest.files ?? []).some((entry) => entry === 'icon.svg' || entry === icon), JSON.stringify(manifest.files ?? []))
+}
+
+// 2b. 提交身份：.mailmap 把旧邮箱归一到规范形式，且发布包里带上它。
+{
+  const mailmap = readFileSync(join(ROOT, '.mailmap'), 'utf8')
+  check('mailmap-present', mailmap.includes('<citydirector@users.noreply.github.com> <45933075+citydirector@users.noreply.github.com>'), mailmap.trim())
+  check('mailmap-packed', (manifest.files ?? []).includes('.mailmap'), JSON.stringify(manifest.files ?? []))
+  const git = spawnSync('git', ['log', '--use-mailmap', '--format=%aN <%aE>'], { cwd: ROOT, encoding: 'utf8' })
+  if (git.status === 0) {
+    const identities = [...new Set(git.stdout.split('\n').map((line) => line.trim()).filter(Boolean))]
+    check('mailmap-identities-unique', identities.length === 1, identities.join(' | '))
+  } else {
+    check('mailmap-identities-unique', true, 'skipped: git is unavailable')
+  }
 }
 
 // 3. 两份 locale 都要有标题与简介，英文是必填的回退

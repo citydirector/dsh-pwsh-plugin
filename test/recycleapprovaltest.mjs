@@ -103,7 +103,7 @@ await check('settings-page-exposes-switch-and-clear', async () => {
     dispose() {}
   }
   const react = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }), useState: (value) => [value, () => {}] }
-  const primitives = { SettingsForm: 'SettingsForm', SettingsFormModel: FakeForm, Switch: 'Switch', Button: 'Button' }
+  const primitives = { SettingsForm: 'SettingsForm', SettingsFormModel: FakeForm, Switch: 'Switch', Button: 'Button', settingsNumberField: (field) => ({ field, format: String, parse: (text) => ({ kind: 'set', value: Number(text) }) }), settingsTextField: (field) => ({ field, format: String, parse: (text) => ({ kind: 'set', value: text }) }) }
   let loaded
   const window = { __ModuleLoader__: { load: (value) => { loaded = value } } }
   const document = { documentElement: { lang: 'zh-CN' } }

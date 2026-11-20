@@ -7,6 +7,9 @@ _skadi_temp/
 _probe*
 _repl.mjs
 
+# a Windows child spawned without SystemDrive expands the literal name into a directory
+%SystemDrive%/
+
 # temp / OS noise
 .DS_Store
 Thumbs.db

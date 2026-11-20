@@ -13,13 +13,14 @@
 - **沙箱接入**：不同 DSH 会话各自隔离，执行前检查权限、工作区及沙箱后端变化。
 - **即时设置**：当前 profile 统一管理 PowerShell 路由与删除确认，支持中英文界面。保存开关保留正在运行的会话。
 - **先审阅再回收**：删除前生成固定计划。大目录支持摘要、完整明细分页、进度和取消；登记临时目录支持限定范围的清理。
+- **SSH 会话（需手动启用）：** 模型可在白名单主机上开多个常驻 shell，前台或后台执行命令，后台任务结束时在会话里收到一行提示。见 [SSH 会话](#ssh-会话)。
 - **WSL Bash 围栏**：Windows 上随包接入的 Bash 工具使用 `llrun` 执行会话写入边界，二进制随包提供。
 
 ## 安装
 
 需要 **PowerShell 7**，以及支持设置服务和工具守卫的兼容 **DSH 0.2.x**。Windows 的 Bash 功能还需要 WSL。
 
-已在桌面版 **DSH 0.2.2-rc.3** 上核验。本 bundle 不注册任何 HTTP、WebSocket 或静态路由，宿主的准入与对端认证契约不适用。客户端只使用 `settings.section` 与 `plugins.row.config` 两个槽位，并在 `dsh.client.inject` 中声明 `@deepseek-ai/dsh-client-ui-settings` 与 `@deepseek-ai/dsh-client-ui-primitives`。
+已在桌面版 **DSH 0.2.2-rc.3** 上核验。本 bundle 不注册任何 HTTP、WebSocket 或静态路由，宿主的准入与对端认证契约不适用。客户端使用 `settings.section` 与 `plugins.row.config` 两个槽位，另有一个 SSH 会话的 `conversation.view` 标签页：它读会话投影、按钮走宿主的 `remote.commands` 通道，同样不注册自己的路由；并在 `dsh.client.inject` 中声明 `@deepseek-ai/dsh-client-ui-settings` 与 `@deepseek-ai/dsh-client-ui-primitives`。
 
 在 DSH 的**插件 → 添加插件**中输入 `dsh-pwsh-plugin` 并启用。工具和设置页由 bundle 自动接入。
 
@@ -103,6 +104,19 @@ $env:DSH_HOME = '<DSH 数据目录>'
 
 审批示例、完整限制与失败处理见[删除工具指南](docs/file-removal.zh-CN.md)。
 
+## SSH 会话
+
+可选模块（`dsh-pwsh-plugin/ssh`，条目 id `ssh`，在 `cordis.patch.yml` 里默认**关闭**），给模型提供常驻 SSH shell：`ssh_open`、`ssh_exec`、`ssh_read`、`ssh_kill`、`ssh_list`。
+
+- 系统 OpenSSH，每会话一条连接，固定安全参数（`BatchMode=yes`、`RemoteCommand=none`、`RequestTTY=no`、`ForwardAgent=no` 等），插件私有 known_hosts 排在用户的之前。每台主机固定走一侧：`via: windows` 或 `via: wsl`（可配 `agentSocket`）。
+- 只能连清单里的主机。审批名单（IP、CIDR、主机名或 `*.example.com`）命中的主机，`ssh_open` 和每条 `ssh_exec` 都要手动批准；`approvalListInvert` 把它反转成放行名单。
+- 变量与 `cd` 跨命令保留。一个会话同一时刻一条命令；后台任务返回 `jobId`，结束时插入一行提示。
+- 空闲 30 分钟、硬上限 24 小时、每主机 4 个、全局 8 个。会话归根 DSH 会话所有。
+- 对话上方的 **SSH** 标签页列出会话的状态、目录、倒计时和「结束」按钮。
+- 远端**不受**本地沙箱、llrun 与删除守卫约束。只支持 POSIX 远端，没有 TTY。
+
+完整说明见 [docs/ssh.zh-CN.md](docs/ssh.zh-CN.md)。
+
 ## 配置
 
 进程参数与扫描预算在现有的 `pwsh-run` bundle 条目中配置；两个即时护栏开关见[设置](#设置)。
@@ -146,7 +160,7 @@ pnpm test
 pnpm run test:all
 ```
 
-完整回归目前为 **16 组、323 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。
+完整回归目前为 **17 组、381 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。启动测试时请给真实环境：环境块完全为空时 PowerShell 一个原生可执行文件都起不来（绝对路径也不行），`child-utf8-output` 会以空输出失败；只删 `PATH`、`SystemRoot`、`WINDIR` 复现不了，必须整块为空。反过来，手工拼的环境至少要带齐 `PATH`、`SystemRoot`、`SystemDrive`、`WINDIR`、`COMSPEC`、`TEMP`、`PATHEXT`、`USERPROFILE`；少 `PATHEXT` 时 `& cmd` 同样起不来，症状一模一样。那是启动环境的问题，不是插件回归。
 
 发版前先提交改动，再执行：
 
