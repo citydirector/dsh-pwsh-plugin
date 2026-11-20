@@ -170,7 +170,7 @@ window.__ModuleLoader__.load({
         approvalInvert: '反转审批名单',
         approvalInvertHint: '开启后名单内自动放行，名单外的主机在 ssh_open 与每条 ssh_exec 时都要人工批准；关闭时相反。',
         invalid: '格式不对，保存已被拦下。',
-        hostsInvalid: '主机清单无效：至少一台主机；别名不能为空或含空白；地址必须是 host 或 user@host，host 不能为空或含空白；端口 1–65535。',
+        hostsInvalid: '主机清单无效：别名映射不能为空（清空请写 []）；别名不能为空或含空白；地址必须是 host 或 user@host，host 不能为空或含空白；端口 1–65535；via 只能是 windows 或 wsl；不认识的字段会被拒绝。',
         resetAll: '全部恢复默认',
         scope: '对当前 profile 的全部预设与会话生效。插件管理里的 ssh 行默认 disabled: true，先启用它，这一页才有可写的配置。',
         form: { unavailable: '配置暂不可用，请确认 ssh 条目已在当前主机启用。', readOnly: '当前部署的配置只读，无法保存修改。', saveFailed: '保存失败，请刷新配置后重试。', save: '保存', saving: '保存中…' },
@@ -190,7 +190,7 @@ window.__ModuleLoader__.load({
         approvalInvert: 'Invert the approval list',
         approvalInvertHint: 'When on, listed hosts are allowed automatically and every other host asks for approval on ssh_open and each ssh_exec; when off, the list gates instead.',
         invalid: 'Not valid, so the save is blocked.',
-        hostsInvalid: 'Invalid host list: at least one host; an alias may not be empty or contain whitespace; an address must be host or user@host with a non-empty host and no whitespace; port 1-65535.',
+        hostsInvalid: 'Invalid host list: an alias map may not be empty (write [] to clear); an alias may not be empty or contain whitespace; an address must be host or user@host with a non-empty host and no whitespace; port 1-65535; via is windows or wsl; unknown fields are refused.',
         resetAll: 'Restore all defaults',
         scope: 'Applies to every preset and session in this profile. The ssh row in plugin management starts disabled, enable it first or this page has nothing writable.',
         form: { unavailable: 'Configuration unavailable. Check that the ssh entry is enabled on this Host.', readOnly: 'Configuration is read-only in this deployment.', saveFailed: 'Not saved. Refresh the configuration and try again.', save: 'Save', saving: 'Saving…' },
@@ -246,6 +246,9 @@ window.__ModuleLoader__.load({
     const HOST_USER_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/
     const HOSTNAME_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$/
     const HOST_BAD_RE = /[\s"'\x60\\\x00-\x1f\x7f@]/
+    // 与 plugin/ssh/hosts.mjs 的 KNOWN_KEYS 保持一致：服务端会把带未知字段的条目整条丢掉，
+    // 表单里先拦住，免得「保存成功但主机不见了」。
+    const HOST_KNOWN_KEYS = new Set(['name', 'address', 'host', 'port', 'user', 'via', 'wslDistro', 'agentSocket', 'shell', 'encoding', 'maxSessions', 'hostKeyFingerprint', 'loadProfile'])
     const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
     function splitUserHost(text) {
       const at = text.lastIndexOf('@')
@@ -275,6 +278,9 @@ window.__ModuleLoader__.load({
       if (typeof name !== 'string' || name.trim() === '') throw new Error('hosts[' + index + ']: alias is required')
       if (/\s/.test(name)) throw new Error('hosts[' + index + '] "' + name + '": alias must not contain whitespace')
       if (!HOST_ALIAS_RE.test(name)) throw new Error('hosts[' + index + '] "' + name + '": alias may only contain letters, digits, ".", "_" or "-"')
+      for (const key of Object.keys(entry)) if (!HOST_KNOWN_KEYS.has(key)) throw new Error('hosts[' + index + '] "' + name + '": unknown field "' + key + '"')
+      if (entry.via !== undefined && entry.via !== 'windows' && entry.via !== 'wsl') throw new Error('hosts[' + index + '] "' + name + '": via must be "windows" or "wsl"')
+      if (entry.loadProfile !== undefined && typeof entry.loadProfile !== 'boolean') throw new Error('hosts[' + index + '] "' + name + '": loadProfile must be true or false')
       if (entry.address !== undefined && entry.host !== undefined) throw new Error('hosts[' + index + '] "' + name + '": use either address or host, not both')
       const rawAddress = entry.address ?? entry.host
       if (typeof rawAddress !== 'string') throw new Error('hosts[' + index + '] "' + name + '": host is required')

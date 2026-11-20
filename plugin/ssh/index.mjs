@@ -16,8 +16,9 @@ import { registerProjection, PROJECTION_KEY } from './projection.mjs'
 export const name = 'ssh'
 export const inject = ['tools']
 
-// 全部可热改：宿主只保留带 volatile 的字段，没有 volatile 的条目连表单都不会生成。
-// stateDir 例外——它决定会话登记与审计日志落在哪，改了应当重挂插件，不该就地改。
+// 基本都可热改：宿主只保留带 volatile 的字段，没有 volatile 的条目连表单都不会生成。
+// 例外（改了要重挂插件，不就地改）：stateDir 决定会话登记与审计日志落在哪；sshPath / wslPath
+// 决定要启动的可执行文件，换它应当是一次显式的重载，而不是某次配置写入顺手生效。
 export const Config = Schema.object({
   enabled: Schema.boolean().default(true).volatile(),
   hosts: Schema.union([Schema.array(Schema.any()), Schema.dict(Schema.any()), Schema.string()]).default([]).volatile(),
@@ -31,8 +32,8 @@ export const Config = Schema.object({
   wakeOnNotice: Schema.boolean().default(true).volatile(),
   audit: Schema.boolean().default(true).volatile(),
   env: Schema.dict(Schema.string()).default({}).volatile(),
-  sshPath: Schema.string().default('ssh').volatile(),
-  wslPath: Schema.string().default('wsl.exe').volatile(),
+  sshPath: Schema.string().default('ssh'),
+  wslPath: Schema.string().default('wsl.exe'),
   knownHosts: Schema.string().default('~/.ssh/dsh_known_hosts').volatile(),
   userKnownHosts: Schema.string().default('~/.ssh/known_hosts').volatile(),
   defaultTimeoutMs: Schema.number().min(1000).max(3600000).step(1).default(120000).volatile(),
@@ -283,7 +284,7 @@ export function apply(ctx, config) {
     async execute(_args, exec) {
       return {
         sessions: manager.list(rootKey(exec.agent)),
-        hosts: [...manager.hosts.values()].map((h) => ({ name: h.name, via: h.via })),
+        hosts: [...manager.hosts.values()].map((h) => ({ name: h.name, via: h.via, user: h.user, ...(h.userDefaulted ? { userFrom: 'local-login' } : {}) })),
         enabled: manager.settings.enabled,
         ...(manager.configErrors.length > 0 ? { configErrors: manager.configErrors } : {}),
       }

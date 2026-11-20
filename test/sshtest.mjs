@@ -113,6 +113,7 @@ await test('host list accepts user@host, bare host and alias maps', () => {
   eq(hosts.get('object').address, '10.0.0.5')
   eq(hosts.get('object').port, 2222)
   assert(/^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/.test(hosts.get('plain').user), hosts.get('plain').user)
+  eq([hosts.get('plain').userDefaulted, hosts.get('withUser').userDefaulted, hosts.get('object').userDefaulted], [true, false, false])
   eq(parseHostList({}).errors, ['host list must not be empty'])
   eq(parseHostList({ ok: 42 }).errors, ['host "ok": value must be "user@host", "host" or an object'])
   eq(parseHostList([{ name: 'x', address: 'u@example.com', user: 'v' }]).errors, ['host "x": user is set both in the address and as a field'])
@@ -609,13 +610,14 @@ await test('client registers the ssh settings section and row config page', asyn
     assert(String(invert.props.label).includes('反转'), invert.props.label)
     const hostsSpec = FakeForm.lastSpecs.find((spec) => spec.field === 'hosts')
     assert(hostsSpec !== undefined, 'the hosts spec exists')
-    for (const invalid of ['{}', 'x', '[1]', '{"bad alias":"example.com"}', '{"ok":""}', '{"ok":"a b"}', '[{"name":"ok","address":"example.com","port":70000}]']) {
+    for (const invalid of ['{}', 'x', '[1]', '{"bad alias":"example.com"}', '{"ok":""}', '{"ok":"a b"}', '[{"name":"ok","address":"example.com","port":70000}]', '[{"name":"ok","address":"example.com","adress":"typo"}]', '{"ok":{"host":"example.com","via":"linux"}}', '{"ok":{"host":"example.com","loadProfile":"yes"}}']) {
       eq(hostsSpec.parse(invalid), undefined, invalid)
     }
     const parsed = hostsSpec.parse('{"ok":"user@example.com"}')
     eq(parsed.kind, 'set')
     eq(parsed.value.length, 1)
     eq([parsed.value[0].name, parsed.value[0].address, parsed.value[0].user], ['ok', 'example.com', 'user'])
+    eq(hostsSpec.parse('[]').kind, 'clear', 'an empty array clears the list')
     const bare = hostsSpec.parse('{"ok":"example.com"}')
     eq(bare.kind, 'set')
     eq(bare.value[0].user, undefined)
@@ -660,6 +662,7 @@ await test('plugin wiring: tools, approval gate, read-only, rootKey', async () =
   await rejects(tools.get('ssh_exec').execute({ sessionId: 's1', command: 'echo x' }, { agent }), /read-only/)
   const listed = await tools.get('ssh_list').execute({}, { agent })
   eq(listed.sessions.length, 1)
+  eq(listed.hosts.find((h) => h.name === 'local'), { name: 'local', via: 'windows', user: 'tester' })
   mode = 'workspace-write'
   assert(existsSync(join(work, 'state', 'sessions.json')))
   await tools.get('ssh_kill').execute({ sessionId: 's1' }, { agent })
