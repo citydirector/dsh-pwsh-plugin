@@ -49,7 +49,7 @@
 
 不想碰 YAML 也可以：在「设置 → SSH 会话」里填，或在插件管理里点 `ssh` 行的「配置」，两处是同一份表单（见「设置页」）。
 
-表单能不能出现，取决于宿主有没有服务 `ssh` 命名空间。宿主只保留 `Config` 里带 `volatile()` 的字段——`dsh-settings` 的 `volatileForm` 对没有任何 volatile 字段的 schema 返回 `undefined`，`describe` 于是整条丢掉这个条目，页面既不渲染也不报错。本模块除 `stateDir` 外都是 volatile，所以行还是 `disabled: true` 时这一行没有配置页，启用之后才出现。
+表单能不能出现，取决于宿主有没有服务 `ssh` 命名空间。宿主只保留 `Config` 里带 `volatile()` 的字段——`dsh-settings` 的 `volatileForm` 对没有任何 volatile 字段的 schema 返回 `undefined`，`describe` 于是整条丢掉这个条目，页面既不渲染也不报错。本模块除 `stateDir`、`sshPath`、`wslPath` 外都是 volatile（这三项改了要重挂插件），所以行还是 `disabled: true` 时这一行没有配置页，启用之后才出现。
 
 ## 工具
 
@@ -59,7 +59,7 @@
 | `ssh_exec({sessionId, command, timeoutMs?, background?})` | 执行命令 | 前台 `{exitCode, stdout, stderr, cwd, truncated}`；后台 `{jobId, logPath}` |
 | `ssh_read({sessionId, jobId?, offset?, limit?})` | 读后台任务日志 | `{data, nextOffset, eof, finished, exitCode}` |
 | `ssh_kill({sessionId})` | 结束会话 | `{sessionId, state, reason}` |
-| `ssh_list({})` | 本对话的会话与可用主机 | `{sessions, hosts, enabled}` |
+| `ssh_list({})` | 本对话的会话与可用主机 | `{sessions, hosts, enabled}`；`hosts` 每项带 `user`，省略 user 时另有 `userFrom: "local-login"` |
 
 会话 ID 在一个 DSH 会话内单调递增、不复用（`s1`、`s2`…）。子 Agent 打开的会话归根会话所有，子 Agent 也能用。错误会区分「已结束」（`gone`）和「从未存在」（`unknown`）。
 
@@ -194,7 +194,7 @@ dead 原因：`network`、`remote-exit`、`killed`、`idle`、`hard-cap`、`host
 | 反转审批名单 | `approvalListInvert` | 开关 |
 | 审批名单 | `approvalList` | 多行文本 |
 
-其余键（`env`、`sshPath`、`knownHosts`、`stateDir`、`logMaxMB` 等）仍在 `cordis.patch.yml` / profile 配置里改。
+其余键（`env`、`sshPath`、`knownHosts`、`stateDir`、`logMaxMB` 等）仍在 `cordis.patch.yml` / profile 配置里改；其中 `stateDir`、`sshPath`、`wslPath` 改完会重挂插件，已开的 SSH 会话会结束。
 
 ## 界面
 

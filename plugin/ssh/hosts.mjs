@@ -98,7 +98,8 @@ export function parseHost(entry, index = 0) {
       if (user !== undefined && user !== split.user) throw new Error('user is set both in the address and as a field')
       user = split.user
     }
-    if (user === undefined) user = localUser()
+    const userDefaulted = user === undefined
+    if (userDefaulted) user = localUser()
     if (typeof user !== 'string' || !USER_RE.test(user)) throw new Error('user must be a plain login name')
     const via = entry.via ?? HOST_DEFAULTS.via
     if (via !== 'windows' && via !== 'wsl') throw new Error('via must be "windows" or "wsl"')
@@ -134,6 +135,8 @@ export function parseHost(entry, index = 0) {
       addressKind: address.kind,
       port: integer(entry.port, 'port', 1, 65535, HOST_DEFAULTS.port),
       user,
+      // 省略 user 时取本机登录名；ssh_list 会标出来，免得远端登录名不同却不知道用的是谁。
+      userDefaulted,
       via,
       wslDistro,
       agentSocket,

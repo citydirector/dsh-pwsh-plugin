@@ -140,17 +140,20 @@ try {
     assert(fields.includes('enabled') && fields.includes('hosts') && fields.includes('idleMinutes'))
     assert(!fields.includes('stateDir'))
   })
-  check('ssh-every-field-but-state-dir-is-volatile', () => {
+  check('ssh-every-field-but-remount-ones-is-volatile', () => {
     // 只抽查几个字段会漏掉「新加的字段忘了 .volatile()」，直接遍历 schema 才钉得住。
+    // stateDir / sshPath / wslPath 故意不热改：改了要重挂插件。
+    const REMOUNT = ['stateDir', 'sshPath', 'wslPath']
     const fields = Object.entries(SshConfig.dict)
-    const plain = fields.filter(([name, schema]) => name !== 'stateDir' && schema.meta?.volatile !== true).map(([name]) => name)
+    const plain = fields.filter(([name, schema]) => !REMOUNT.includes(name) && schema.meta?.volatile !== true).map(([name]) => name)
     assert.deepEqual(plain, [], 'fields missing .volatile(): ' + plain.join(', '))
-    assert.equal(fields.find(([name]) => name === 'stateDir')[1].meta?.volatile, undefined)
-    assert.equal(Object.keys(sshRow().value ?? {}).length, fields.length - 1)
+    for (const name of REMOUNT) assert.equal(fields.find(([field]) => field === name)[1].meta?.volatile, undefined, name + ' must not be volatile')
+    assert.equal(Object.keys(sshRow().value ?? {}).length, fields.length - REMOUNT.length)
   })
   await settings.mutate('ssh', [{ op: 'set', path: ['idleMinutes'], value: 45 }], sshRow().revision)
   check('ssh-edit-lands-in-live-config', () => assert.equal(sshConfig.idleMinutes.get(), 45))
   await assert.rejects(() => settings.mutate('ssh', [{ op: 'set', path: ['stateDir'], value: 'probe' }]), /not volatile/)
+  await assert.rejects(() => settings.mutate('ssh', [{ op: 'set', path: ['sshPath'], value: 'probe' }]), /not volatile/)
   check('native-initially-allowed', () => assert.equal(guards[0](native), undefined))
   const formOnly = process.env.DSH_SETTINGS_FORM_ONLY === '1'
   if (formOnly) console.log('SKIP: real pwsh process check requires an unrestricted test process')
