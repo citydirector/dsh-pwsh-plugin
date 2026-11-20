@@ -146,7 +146,7 @@ pnpm test
 pnpm run test:all
 ```
 
-完整回归目前为 **15 组、308 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。
+完整回归目前为 **16 组、323 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。
 
 发版前先提交改动，再执行：
 
