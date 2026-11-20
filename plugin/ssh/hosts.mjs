@@ -1,6 +1,7 @@
 // 主机清单与审批名单：只在这里把用户配置变成可信结构，后面的代码不再校验。
 // 参数注入在解析时拦截——地址、用户名、socket 路径一律不允许以 `-` 开头或含空白/引号/控制字符。
 import { isIP } from 'node:net'
+import { userInfo } from 'node:os'
 
 export const HOST_DEFAULTS = Object.freeze({
   port: 22,
@@ -17,6 +18,34 @@ const ENCODING_RE = /^[A-Za-z0-9_-]{1,32}$/
 const FINGERPRINT_RE = /^SHA256:[A-Za-z0-9+/]{43}=?$/
 const DISTRO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const UNSAFE_PATH_RE = /[\s"'`\\\x00-\x1f\x7f]/
+
+function localUser() {
+  const candidates = []
+  try { candidates.push(userInfo().username) } catch {}
+  candidates.push(process.env.USER, process.env.LOGNAME, process.env.USERNAME)
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && USER_RE.test(candidate)) return candidate
+  }
+  throw new Error('user is required when the address has no "user@host", and the local login name is not a valid user')
+}
+
+/** `user@host` 或 `host`。地址里最多一个 `@`，用户名与主机都不许为空。 */
+function splitUserHost(raw) {
+  const at = raw.lastIndexOf('@')
+  if (at < 0) return { host: raw }
+  if (raw.indexOf('@') !== at) throw new Error('address must contain at most one "@"')
+  const user = raw.slice(0, at)
+  const host = raw.slice(at + 1)
+  if (user === '') throw new Error('user before "@" is empty')
+  if (host === '') throw new Error('host after "@" is empty')
+  return { user, host }
+}
+
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
 
 /** 地址：IPv4、`[IPv6]` 或主机名。返回给 ssh 用的形式（IPv6 去掉方括号）。 */
 export function parseAddress(raw) {
@@ -48,7 +77,7 @@ function optionalPath(value, name) {
   return value
 }
 
-const KNOWN_KEYS = new Set(['name', 'address', 'port', 'user', 'via', 'wslDistro', 'agentSocket', 'shell', 'encoding', 'maxSessions', 'hostKeyFingerprint', 'loadProfile'])
+const KNOWN_KEYS = new Set(['name', 'address', 'host', 'port', 'user', 'via', 'wslDistro', 'agentSocket', 'shell', 'encoding', 'maxSessions', 'hostKeyFingerprint', 'loadProfile'])
 
 /** 一台主机的条目。错误信息带上主机名，方便用户在设置页定位。 */
 export function parseHost(entry, index = 0) {
@@ -59,8 +88,18 @@ export function parseHost(entry, index = 0) {
       if (!KNOWN_KEYS.has(key)) throw new Error(`unknown field "${key}"`)
     }
     if (typeof entry.name !== 'string' || !NAME_RE.test(entry.name)) throw new Error('name must be 1-64 characters of letters, digits, ".", "_" or "-"')
-    const address = parseAddress(entry.address)
-    if (typeof entry.user !== 'string' || !USER_RE.test(entry.user)) throw new Error('user must be a plain login name')
+    if (entry.address !== undefined && entry.host !== undefined) throw new Error('use either address or host, not both')
+    const rawAddress = entry.address ?? entry.host
+    if (typeof rawAddress !== 'string' || rawAddress.length === 0) throw new Error('address is required')
+    const split = splitUserHost(rawAddress)
+    const address = parseAddress(split.host)
+    let user = entry.user
+    if (split.user !== undefined) {
+      if (user !== undefined && user !== split.user) throw new Error('user is set both in the address and as a field')
+      user = split.user
+    }
+    if (user === undefined) user = localUser()
+    if (typeof user !== 'string' || !USER_RE.test(user)) throw new Error('user must be a plain login name')
     const via = entry.via ?? HOST_DEFAULTS.via
     if (via !== 'windows' && via !== 'wsl') throw new Error('via must be "windows" or "wsl"')
     let wslDistro
@@ -90,11 +129,11 @@ export function parseHost(entry, index = 0) {
     if (entry.loadProfile !== undefined && typeof entry.loadProfile !== 'boolean') throw new Error('loadProfile must be true or false')
     return Object.freeze({
       name: entry.name,
-      address: entry.address,
+      address: split.host,
       sshHost: address.host,
       addressKind: address.kind,
       port: integer(entry.port, 'port', 1, 65535, HOST_DEFAULTS.port),
-      user: entry.user,
+      user,
       via,
       wslDistro,
       agentSocket,
@@ -124,7 +163,25 @@ export function parseHostList(value) {
     }
   }
   if (list === undefined || list === null) return { hosts, errors }
-  if (!Array.isArray(list)) return { hosts, errors: ['host list must be an array'] }
+  // 设置页还支持紧凑的别名映射：{ "alias": "user@host" | "host" | { address, user?, ... } }。
+  // 键即别名，对象值里的 name 会被忽略，避免同一台主机出现两个名字。
+  if (isPlainObject(list)) {
+    const names = Object.keys(list)
+    if (names.length === 0) return { hosts, errors: ['host list must not be empty'] }
+    const entries = []
+    for (const name of names) {
+      const target = list[name]
+      if (typeof target === 'string') {
+        entries.push({ name, address: target })
+      } else if (isPlainObject(target)) {
+        entries.push({ ...target, name })
+      } else {
+        errors.push(`host "${name}": value must be "user@host", "host" or an object`)
+      }
+    }
+    list = entries
+  }
+  if (!Array.isArray(list)) return { hosts, errors: ['host list must be an array or an alias map'] }
   list.forEach((entry, index) => {
     try {
       const host = parseHost(entry, index)

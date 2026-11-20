@@ -100,8 +100,26 @@ await test('host list rejects unknown fields and bad values', () => {
   assert(errors.every((e) => /^host "bad\d"/.test(e)), errors.join('\n'))
 })
 
+await test('host list accepts user@host, bare host and alias maps', () => {
+  const { hosts, errors } = parseHostList({
+    plain: 'example.com',
+    withUser: 'deploy@example.com',
+    object: { host: '10.0.0.5', user: 'u', port: 2222 },
+  })
+  eq(errors, [])
+  eq([...hosts.keys()], ['plain', 'withUser', 'object'])
+  eq(hosts.get('withUser').user, 'deploy')
+  eq(hosts.get('withUser').address, 'example.com')
+  eq(hosts.get('object').address, '10.0.0.5')
+  eq(hosts.get('object').port, 2222)
+  assert(/^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/.test(hosts.get('plain').user), hosts.get('plain').user)
+  eq(parseHostList({}).errors, ['host list must not be empty'])
+  eq(parseHostList({ ok: 42 }).errors, ['host "ok": value must be "user@host", "host" or an object'])
+  eq(parseHostList([{ name: 'x', address: 'u@example.com', user: 'v' }]).errors, ['host "x": user is set both in the address and as a field'])
+})
+
 await test('argument injection is rejected at parse time', () => {
-  for (const address of ['-p22', 'host;rm', 'a"b', "a'b", 'x\ny', 'user@host']) {
+  for (const address of ['-p22', 'host;rm', 'a"b', "a'b", 'x\ny']) {
     let threw = false
     try { parseHost({ name: 'h', address, user: 'u' }) } catch { threw = true }
     assert(threw, 'accepted ' + JSON.stringify(address))
@@ -540,7 +558,7 @@ await test('client registers the ssh settings section and row config page', asyn
   const saved = Object.fromEntries(['window','document','navigator','MutationObserver'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
   const stub = (key, value) => Object.defineProperty(globalThis, key, { value, configurable: true, writable: true })
   class FakeForm {
-    constructor(scope, specs) { this.scope = scope; this.specs = specs }
+    constructor(scope, specs) { this.scope = scope; this.specs = specs; if (specs.some((spec) => spec.field === 'hosts')) FakeForm.lastSpecs = specs }
     bind(project) { this.project = project; return { getSnapshot: () => project(), subscribe: () => () => {} } }
     shell() { return { available: true, writable: true, dirty: true, invalid: false, saving: false, failed: false } }
     field(name) { return { text: name === 'enabled' ? 'true' : '12', overridden: false, invalid: false } }
@@ -574,9 +592,33 @@ await test('client registers the ssh settings section and row config page', asyn
     eq(row.entry.key, 'dsh-pwsh-plugin' + '#' + 'ssh')
     const injected = section.entry.inject()
     const state = injected.hooks.sshSettings.getSnapshot()
-    eq([state.writable, Object.keys(state.fields).sort()], [true, ['approvalList', 'enabled', 'globalMax', 'hardCapHours', 'hosts', 'idleMinutes']])
+    eq([state.writable, Object.keys(state.fields).sort()], [true, ['approvalList', 'approvalListInvert', 'enabled', 'globalMax', 'hardCapHours', 'hosts', 'idleMinutes']])
     const page = section.component({ view: 'page', useSshSettings: (selector) => selector(state), ...injected })
     assert(page !== null && page.type === 'div', 'the page renders a container')
+    const findSetting = (node, setting) => {
+      if (node === null || node === undefined) return undefined
+      if (Array.isArray(node)) { for (const child of node) { const hit = findSetting(child, setting); if (hit !== undefined) return hit } return undefined }
+      if (typeof node !== 'object') return undefined
+      if (node.props?.['data-setting'] === setting) return node
+      return findSetting(node.children, setting)
+    }
+    const invert = findSetting(page, 'approvalListInvert')
+    assert(invert !== undefined, 'the approval invert switch is rendered')
+    eq(invert.type, 'Switch')
+    eq(invert.props.checked, false)
+    assert(String(invert.props.label).includes('反转'), invert.props.label)
+    const hostsSpec = FakeForm.lastSpecs.find((spec) => spec.field === 'hosts')
+    assert(hostsSpec !== undefined, 'the hosts spec exists')
+    for (const invalid of ['{}', 'x', '[1]', '{"bad alias":"example.com"}', '{"ok":""}', '{"ok":"a b"}', '[{"name":"ok","address":"example.com","port":70000}]']) {
+      eq(hostsSpec.parse(invalid), undefined, invalid)
+    }
+    const parsed = hostsSpec.parse('{"ok":"user@example.com"}')
+    eq(parsed.kind, 'set')
+    eq(parsed.value.length, 1)
+    eq([parsed.value[0].name, parsed.value[0].address, parsed.value[0].user], ['ok', 'example.com', 'user'])
+    const bare = hostsSpec.parse('{"ok":"example.com"}')
+    eq(bare.kind, 'set')
+    eq(bare.value[0].user, undefined)
     assert(section.component({ view: 'summary' }).length > 0, 'the summary is a non-empty line')
   } finally {
     for (const [name, descriptor] of Object.entries(saved)) { if (descriptor === undefined) delete globalThis[name]; else Object.defineProperty(globalThis, name, descriptor) }

@@ -88,8 +88,9 @@ const scope = {
 }
 let client, slots = [], observerCallback, watchStopped = false
 const { SettingsFormModel, settingsNumberField, settingsTextField } = modelModule
+const Switch = () => {}
 vm.runInNewContext(readFileSync(new URL('../client/index.js', import.meta.url), 'utf8'), {
-  window: { __ModuleLoader__: { load({ factory }) { client = factory(name => name === 'react' ? React : { SettingsFormModel, SettingsForm() {}, Switch() {}, Button() {}, settingsNumberField, settingsTextField }) } } },
+  window: { __ModuleLoader__: { load({ factory }) { client = factory(name => name === 'react' ? React : { SettingsFormModel, SettingsForm() {}, Switch, Button() {}, settingsNumberField, settingsTextField }) } } },
   document: { documentElement: { lang: 'zh-CN' } }, navigator: { language: 'zh-CN' },
   MutationObserver: class { constructor(fn) { observerCallback = fn } observe() {} disconnect() { watchStopped = true } },
 })
@@ -186,6 +187,28 @@ try {
   check('stale-write-does-not-overwrite', () => assert(config.enforcePwshRun.get()))
   await assert.rejects(() => settings.mutate('pwsh-run', [{ op: 'set', path: ['timeoutMs'], value: 12 }]), /not volatile/)
   check('process-settings-not-editable-through-form', () => assert.equal(config.timeoutMs, 15000))
+  const sshProps = section('ssh').options.inject()
+  const sshState = () => sshProps.hooks.sshSettings.getSnapshot()
+  const waitSshSaved = async () => { for (let i = 0; i < 100 && sshState().saving; i++) await new Promise(r => setTimeout(r, 10)); assert(!sshState().saving) }
+  const findSwitch = (node) => {
+    if (node === null || node === undefined) return undefined
+    if (Array.isArray(node)) { for (const child of node) { const hit = findSwitch(child); if (hit !== undefined) return hit } return undefined }
+    if (typeof node !== 'object') return undefined
+    if (node.type === Switch && node.props?.['data-setting'] === 'approvalListInvert') return node
+    return findSwitch(node.props?.children ?? node.children)
+  }
+  check('ssh-form-exposes-approval-invert-switch', () => {
+    assert(Object.hasOwn(sshState().fields, 'approvalListInvert'))
+    const page = section('ssh').Component({ view: 'page', useSshSettings: selector => selector(sshState()), ...sshProps })
+    const node = findSwitch(page)
+    assert(node !== undefined, 'approvalListInvert Switch is rendered')
+    assert.equal(node.props.checked, false)
+    assert.match(node.props.label, /反转/)
+  })
+  sshProps.edit('approvalListInvert', 'true')
+  check('ssh-invert-edit-is-staged', () => assert(sshState().dirty && sshConfig.approvalListInvert.get() === false))
+  sshProps.save(); await waitSshSaved()
+  check('ssh-invert-save-lands-in-live-config', () => assert.equal(sshConfig.approvalListInvert.get(), true))
   writable = false; for (const fn of listeners) fn()
   props.edit('enforcePwshRun', 'false'); props.save(); await waitSaved()
   check('read-only-form-does-not-save', () => assert(config.enforcePwshRun.get()))

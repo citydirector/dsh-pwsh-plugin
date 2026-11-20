@@ -20,7 +20,7 @@ export const inject = ['tools']
 // stateDir 例外——它决定会话登记与审计日志落在哪，改了应当重挂插件，不该就地改。
 export const Config = Schema.object({
   enabled: Schema.boolean().default(true).volatile(),
-  hosts: Schema.union([Schema.array(Schema.any()), Schema.string()]).default([]).volatile(),
+  hosts: Schema.union([Schema.array(Schema.any()), Schema.dict(Schema.any()), Schema.string()]).default([]).volatile(),
   approvalList: Schema.string().default('').volatile(),
   approvalListInvert: Schema.boolean().default(false).volatile(),
   idleMinutes: Schema.natural().default(MANAGER_DEFAULTS.idleMinutes).volatile(),

@@ -37,6 +37,16 @@
     approvalListInvert: false
 ```
 
+也可以写成更紧凑的别名映射，值可以是 `user@host` 或 `host`：
+
+```yaml
+    hosts:
+      example: deploy@example.com
+      lab: 127.0.0.1
+```
+
+省略 `user` 时用插件进程的本机登录名；远端登录名和本机不同时请显式写 `user` 或 `user@host`。
+
 不想碰 YAML 也可以：在「设置 → SSH 会话」里填，或在插件管理里点 `ssh` 行的「配置」，两处是同一份表单（见「设置页」）。
 
 表单能不能出现，取决于宿主有没有服务 `ssh` 命名空间。宿主只保留 `Config` 里带 `volatile()` 的字段——`dsh-settings` 的 `volatileForm` 对没有任何 volatile 字段的 schema 返回 `undefined`，`describe` 于是整条丢掉这个条目，页面既不渲染也不报错。本模块除 `stateDir` 外都是 volatile，所以行还是 `disabled: true` 时这一行没有配置页，启用之后才出现。
@@ -57,10 +67,10 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| `name` | 模型用的名字，字母数字与 `._-` |
-| `address` | 主机名、IPv4，或 `[IPv6]`；不得以 `-` 开头，不得含空白、引号、`@` |
+| `name` | 模型用的名字（别名），字母数字开头，之后可用 `._-`，最长 64；别名映射里键就是它 |
+| `address` / `host` | `user@host` 或 `host`；host 可以是主机名、IPv4 或 `[IPv6]`，不得以 `-` 开头，不得含空白或引号 |
 | `port` | 1–65535，默认 22 |
-| `user` | 登录名 |
+| `user` | 登录名；地址里的 `user@` 优先，两者不能同时给出不同值。省略时用本机登录名 |
 | `via` | `windows`（默认）或 `wsl`；每台主机固定一侧，不会自动换侧 |
 | `wslDistro` | 仅 `via: wsl`，指定发行版 |
 | `agentSocket` | 仅 `via: wsl`，作为 `SSH_AUTH_SOCK` 传给 WSL 里的 ssh |
@@ -70,14 +80,14 @@
 | `hostKeyFingerprint` | 预留字段：只校验格式（`SHA256:…`），**不做 known_hosts 比对、不提供信任保证**；主机信任仍由 ssh 的 `StrictHostKeyChecking=accept-new` 与私有 known_hosts 负责 |
 | `loadProfile` | `true` 时用登录 shell 读 profile，默认 `false` |
 
-清单外的主机一律拒绝，错误里列出可用主机。未知字段、非法值的条目会被丢弃，其余主机照常可用，错误在 `ssh_list` 的 `configErrors` 里列出。
+`hosts` 接受数组，也接受 `{ 别名: "user@host" | "host" | { address, user?, port? } }` 形式的别名映射；空数组表示清空，空映射无效。清单外的主机一律拒绝，错误里列出可用主机。未知字段、非法值的条目会被丢弃，其余主机照常可用，错误在 `ssh_list` 的 `configErrors` 里列出。
 
 ## 审批名单
 
 `approvalList` 每行一条：IP、CIDR（IPv4/IPv6）、主机名（精确匹配）或 `*.example.com`（匹配子域）。`#` 之后是注释。
 
 - 默认：命中名单的主机，`ssh_open` 和每一条 `ssh_exec` 都要手动批准；其余主机自动放行。
-- `approvalListInvert: true`：反转，名单内自动放行，名单外全部要批准。
+- `approvalListInvert: true`：反转，名单内自动放行，名单外全部要批准。设置页上对应「反转审批名单」开关。
 - 主机名也会在连接前解析一次，解析出的 IP 同样拿去比 CIDR（主机名指向受保护网段也会命中）。IPv4 映射的 IPv6 地址按 IPv4 比较。
 - 审批走宿主的 `ask` 决策。如果装了 `dsh-approval-review`，请把 `ssh_open` / `ssh_exec` 的策略设成人工，否则复核模型可能代为放行。
 
@@ -180,7 +190,8 @@ dead 原因：`network`、`remote-exit`、`killed`、`idle`、`hard-cap`、`host
 | 空闲超时 | `idleMinutes` | 数字（分钟，0 关闭） |
 | 硬上限 | `hardCapHours` | 数字 1–168 |
 | 全局会话上限 | `globalMax` | 数字 1–64 |
-| 主机清单 | `hosts` | JSON 数组文本，语法错或非数组会拦住保存 |
+| 主机清单 | `hosts` | JSON 数组或别名映射文本；空对象、非对象、别名带空白、host 为空/带空白、端口越界都会拦住保存 |
+| 反转审批名单 | `approvalListInvert` | 开关 |
 | 审批名单 | `approvalList` | 多行文本 |
 
 其余键（`env`、`sshPath`、`knownHosts`、`stateDir`、`logMaxMB` 等）仍在 `cordis.patch.yml` / profile 配置里改。
@@ -212,9 +223,9 @@ dead 原因：`network`、`remote-exit`、`killed`、`idle`、`hard-cap`、`host
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled` | `true` | 启用 SSH |
-| `hosts` | `[]` | 主机清单（数组，或 JSON 文本） |
+| `hosts` | `[]` | 主机清单（数组、别名映射，或 JSON 文本） |
 | `approvalList` | `''` | 审批名单，多行 |
-| `approvalListInvert` | `false` | 反转名单 |
+| `approvalListInvert` | `false` | 反转名单（设置页有开关） |
 | `idleMinutes` | 30 | 空闲超时，0 关闭 |
 | `hardCapHours` | 24 | 硬上限 |
 | `globalMax` | 8 | 全局会话上限 |
@@ -249,7 +260,7 @@ node test/sshtest.mjs
 
 两层替身：本机 `sh` 当远端（transport 层）+ 假时钟；插件接线用假 ctx 和一个直接 `exec sh` 的假 ssh 可执行文件。
 
-真 sshd 用例（5 项）会起一个临时 sshd：只绑 `127.0.0.1`、端口由内核挑（不用 22）、主机钥匙与用户钥匙都放在临时目录里、认证走临时 `ssh-agent`，结束一律 kill 并删目录。覆盖：连接、命令输出、变量与 cwd 跨命令保留、退出码、stdout/stderr 分离、主机钥匙钉进 known_hosts。连接走插件自己的 `transportFor`，不是在测试里另拼一份 argv。
+真 sshd 用例（5 项）会起一个临时 sshd：只绑 `127.0.0.1`、端口由内核挑（不用 22）、主机钥匙与用户钥匙都放在临时目录里、认证走临时 `ssh-agent`，结束一律 kill 并删目录。端口在「内核释放」和「sshd 绑定」之间有被抢的窗口，启动失败会换一个新端口重试，最多 3 次；3 次都失败才记为失败，错误里带尝试过的端口。覆盖：连接、命令输出、变量与 cwd 跨命令保留、退出码、stdout/stderr 分离、主机钥匙钉进 known_hosts。连接走插件自己的 `transportFor`，不是在测试里另拼一份 argv。
 
 缺 `sshd` / `ssh` / `ssh-keygen` / `ssh-agent` / `ssh-add` 时只 SKIP（单独计入 `skip=`，不算通过），并打印缺哪个；环境齐备却启动不起来（端口没监听、agent 失败）一律记为失败，不会伪装成跳过。
 
