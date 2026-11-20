@@ -13,11 +13,11 @@ boot.plugin(sandboxModule.default??sandboxModule,{});await new Promise(r=>setTim
 const subprocess=new local.LocalSubprocessRuntime(boot)
 let replacementSandbox
 const root=resolve('_skadi_temp/file-tools-test-'+Date.now());mkdirSync(root,{recursive:true})
-let mode='danger-full-access', approvalResult='allowed-once', approvalHook, approvals=0, pass=0, currentCwd=root
+let lastRequest, mode='danger-full-access', approvalResult='allowed-once', approvalHook, approvals=0, pass=0, currentCwd=root
 const effects=[],tools=new Map(), guards=[]
 const policy=()=>({mode,workspaceRoot:root})
-const ctx={subprocess,tools:{register(def){tools.set(def.name,def);const d=boot.tools.register(def);return()=>{d();tools.delete(def.name)}},guard(fn){guards.push(fn);const d=boot.tools.guard(fn);return()=>{d();guards.splice(guards.indexOf(fn),1)}}},effect(fn){const d=fn();effects.push(d);return d},get(name){if(name==='sandbox')return replacementSandbox??boot.get('sandbox');if(name==='workingDirectory')return{async ensure(){return currentCwd}};if(name==='approval')return{async request(q){assert(q.reason.includes('fixed targets'));approvals++;approvalHook?.();return approvalResult}}}}
-// recycleApproval 默认 session；这批既有用例逐条验证审批时机，统一用 always 保持原语义。
+const ctx={subprocess,tools:{register(def){tools.set(def.name,def);const d=boot.tools.register(def);return()=>{d();tools.delete(def.name)}},guard(fn){guards.push(fn);const d=boot.tools.guard(fn);return()=>{d();guards.splice(guards.indexOf(fn),1)}}},effect(fn){const d=fn();effects.push(d);return d},get(name){if(name==='sandbox')return replacementSandbox??boot.get('sandbox');if(name==='workingDirectory')return{async ensure(){return currentCwd}};if(name==='approval')return{async request(q){assert(q.reason.includes('fixed targets'));lastRequest=q;approvals++;approvalHook?.();return approvalResult}}}}
+// recycleApproval 默认 always；会话内授权的用例里再临时切到 session。
 const fileConfig={pwshPath:process.env.PWSH_BIN??'pwsh',recycleApproval:'always'}
 installFileTools(ctx,fileConfig,policy)
 const exec={agent:{ctx:boot,session:{id:'files-test',header:{cwd:root},append(){}}},callId:'test-removal'}
@@ -102,13 +102,21 @@ try {
  fileConfig.recycleApproval='session';approvals=0
  p=await plan(onceA);await remove(p.planId)
  check('session-approval-asks-once',()=>assert(!existsSync(onceA)&&approvals===1))
- p=await plan(onceB);await remove(p.planId)
- check('session-approval-reuses-within-boundary',()=>assert(!existsSync(onceB)&&approvals===1))
+ check('session-approval-prompt-says-it-covers-the-session',()=>assert(lastRequest.reason.includes('Session approval is enabled')&&lastRequest.displayReason.includes('会话内授权')))
+ p=await plan(onceB);await call('file_remove',{action:'execute',planId:p.planId})
+ check('session-approval-reuses-without-escalation-tag',()=>assert(!existsSync(onceB)&&approvals===1))
+ // 设置页「清除」把 recycleApprovalEpoch 加一：已有授权作废，下一次重新问宿主。
+ const onceD=join(root,'once-d.txt');writeFileSync(onceD,'d')
+ fileConfig.recycleApprovalEpoch=1;p=await plan(onceD)
+ await assert.rejects(()=>call('file_remove',{action:'execute',planId:p.planId}),/same file_remove execute call/)
+ p=await plan(onceD);await remove(p.planId)
+ check('clearing-in-settings-revokes-session-approval',()=>assert(!existsSync(onceD)&&approvals===2))
+ approvals=0
  const onceC=join(root,'once-c.txt');writeFileSync(onceC,'c')
  fileConfig.recycleApproval='always';p=await plan(onceC);await remove(p.planId)
- check('always-mode-asks-every-time',()=>assert(!existsSync(onceC)&&approvals===2))
+ check('always-mode-asks-every-time',()=>assert(!existsSync(onceC)&&approvals===1))
  const {Config}=await import('../plugin/config.mjs')
- check('recycle-approval-defaults-to-session',()=>assert.equal(Config({}).recycleApproval.get(),'session'))
+ check('recycle-approval-defaults-to-always',()=>{assert.equal(Config({}).recycleApproval.get(),'always');assert.equal(Config({}).recycleApprovalEpoch.get(),0)})
  // 宿主在程序结束时给的取消原因是字符串；FileOperations 必须把它存成 Error。
  const {FileOperations}=await import('../plugin/file-scan.mjs')
  const ops=new FileOperations(),stringJob=ops.start('op-string-'+Date.now(),{key:'k',backendIdentity:'b'},'file_remove:execute',async()=>{throw 'run_code settled'})

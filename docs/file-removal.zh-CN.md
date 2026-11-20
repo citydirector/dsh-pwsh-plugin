@@ -60,7 +60,13 @@ Agent 确认清单与宿主审批是两件事。`workspace-write` 下回收站�
 
 宿主审批服务必须返回本次允许；拒绝、取消或审批通道不可用都不会执行，也不应换一个 shell 重试。批准后再次检查会话权限边界和到期时间。
 
-`recycleApproval` 决定批准的复用粒度，默认 `session`：同一会话、同一工作目录、同一沙箱策略下，一次批准覆盖后续删除，范围清单仍然每次都要看。三者任一变化即失配，下一次删除重新申请；插件卸载或热替换会清空记录。改成 `always` 则每次删除都重新询问宿主。`read-only` 下这两个文件工具均拒绝写操作，Windows 身份检查也无法在 ConstrainedLanguage 中启动，因此 `file_remove` 规划同样明确拒绝。
+`recycleApproval` 决定批准的复用粒度，默认 `always`：每次需要额外权限的回收都询问宿主。宿主只有 `allowed-once` 这一种授权，把它延伸到整个会话是插件替用户做的放宽，所以必须由用户在设置页打开「会话内一次授权持续有效」（`session`）：
+
+- 同一会话、同一工作目录、同一沙箱策略（且沙箱后端没被替换）下只问一次；三者任一变化即失配，下一次重新申请。子会话有自己的会话 ID，不继承。
+- 开启时，插件会在发给宿主的审批理由后追加一句「批准后本会话后续回收不再询问」，这句话由插件写，不由模型写。
+- 命中授权后，`execute` 不必再带 `sandbox_permissions` / `justification`，模型也就不会把整条命令拿去提权。没命中时，错误信息会要求只给这一次 `file_remove execute` 加提权参数，不要用 pwsh/bash 提权重跑。
+- 作废时机：会话结束（`agent/disposed`）、开关切回 `always`、设置页点「清除会话内授权」（把 `recycleApprovalEpoch` 加一）、`/recycle-approval revoke`（本会话）或 `revoke-all`、插件卸载或热替换。`/recycle-approval status` 可以查看条数。
+- 范围清单（plan → execute）不受影响，每次都要审阅。`read-only` 下这两个文件工具均拒绝写操作，Windows 身份检查也无法在 ConstrainedLanguage 中启动，因此 `file_remove` 规划同样明确拒绝。
 
 批量回收不是事务。先前成功的目标不会因为后面的文件被锁而还原；错误正文会带 `removed` 与诊断，不能把失败当作全部未执行。若进程在回收途中被取消或超时，应先重新检查现场，再为剩余目标创建新计划。
 

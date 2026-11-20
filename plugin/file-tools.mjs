@@ -1,3 +1,4 @@
+import { RecycleApprovals, SESSION_NOTICE } from './recycle-approvals.mjs'
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
@@ -40,8 +41,16 @@ export function assertRemovable(targets, boundary, home, windows) {
 /** 每个操作单独取策略并启动受限工作进程；没有宿主直接删除文件的旁路。 */
 export function installFileTools(ctx, config, resolvePolicy) {
  const plans=new Map(), temporary=new Map(), reservations=new Map(), cleaning=new Set(), operations=new FileOperations()
- // 一次批准只在同一会话、同一目录、同一策略下复用；key 里含这三样，边界一变自然失配。
- const recycleApprovals=new Map()
+ // 会话内授权（recycleApproval=session，默认关）：见 recycle-approvals.mjs。
+ const recycleApprovals=new RecycleApprovals()
+ const syncApprovals=()=>recycleApprovals.sync(live(config?.recycleApproval),Number(live(config?.recycleApprovalEpoch)??0))
+ syncApprovals()
+ // 开关关掉或设置页点了清除：宿主就地改 volatile 引用后发这个事件（只发给本 fiber），立刻丢记录。
+ if(typeof ctx.on==='function'){
+  ctx.effect(()=>ctx.on('loader/volatile-update',()=>{syncApprovals()}),'pwsh-run.recycle-approvals.config')
+  // 会话结束：丢掉这个会话的记录。子会话有自己的 session id，不继承父会话的授权。
+  ctx.effect(()=>ctx.on('agent/disposed',event=>{const id=event?.agent?.session?.id;if(typeof id==='string')recycleApprovals.revokeSession(id)}),'pwsh-run.recycle-approvals.session')
+ }
  const limits=fileScanLimits(config)
  let stopped=false
  const shutdown=new AbortController()
@@ -116,16 +125,19 @@ export function installFileTools(ctx, config, resolvePolicy) {
  }
  const approve=async(args,c,exec,targets)=>{
   if(c.policy.mode==='danger-full-access') return c.policy
-  if(live(config?.recycleApproval)!=='always'&&recycleApprovals.has(c.key)&&recycleApprovals.get(c.key)===c.backendIdentity) return {...c.policy,mode:'danger-full-access'}
-  if(args.sandbox_permissions!=='danger-full-access'||typeof args.justification!=='string'||!args.justification.trim()) throw Error('Recycling writes outside the workspace. Request sandbox_permissions="danger-full-access" with justification for this exact plan; it will require Host approval.')
+  syncApprovals()
+  // 已有会话内授权：不再要求模型带 sandbox_permissions / justification，也就没有提错权的机会。
+  if(recycleApprovals.covers(c)) return {...c.policy,mode:'danger-full-access'}
+  if(args.sandbox_permissions!=='danger-full-access'||typeof args.justification!=='string'||!args.justification.trim()) throw Error('Recycling writes outside the workspace. Add sandbox_permissions="danger-full-access" and a justification to this same file_remove execute call (same planId); it will require Host approval. Do not re-run the deletion through pwsh, pwsh_run or bash with escalated permissions: only this call needs the escalation tag.')
   const approval=ctx.get('approval')
   if(!approval||!exec.agent) throw Error('No Host approval service is available; no deletion was performed.')
-  const decision=await approval.request({agent:exec.agent,toolName:'file_remove',callId:exec.callId??exec.id,reason:'escalate sandbox to danger-full-access: recycle these fixed targets only: '+JSON.stringify(targets)+'. '+args.justification,displayReason:'将已确认的固定清单送入回收站（回收站位于工作区外）：'+targets.join(', '),signal:exec.signal})
+  const decision=await approval.request({agent:exec.agent,toolName:'file_remove',callId:exec.callId??exec.id,reason:'escalate sandbox to danger-full-access: recycle these fixed targets only: '+JSON.stringify(targets)+'. '+args.justification+(recycleApprovals.enabled()?SESSION_NOTICE.reason:''),displayReason:'将已确认的固定清单送入回收站（回收站位于工作区外）：'+targets.join(', ')+(recycleApprovals.enabled()?SESSION_NOTICE.display:''),signal:exec.signal})
   if(decision!=='allowed-once') throw Error('Host approval '+decision+'; deletion remains denied. Do not work around this decision.')
   const current=await context(exec)
   if(current.key!==c.key||current.backendIdentity!==c.backendIdentity) throw Error('Sandbox boundary changed during approval; create a new plan.')
-  // always 模式每次都要问，不留记录；session 模式才复用它。
-  if(live(config?.recycleApproval)!=='always') recycleApprovals.set(c.key,c.backendIdentity)
+  // 等审批期间设置可能变了：再同步一次，只有仍是 session 才留记录（grant 在 always 下什么也不做）。
+  syncApprovals()
+  recycleApprovals.grant(current)
   return {...c.policy,mode:'danger-full-access'}
  }
  const prunePlans=()=>{for(const [id,p] of plans)if(p.expires<=Date.now()){plans.delete(id);reservations.delete(id)}}
@@ -235,5 +247,29 @@ export function installFileTools(ctx, config, resolvePolicy) {
    try{const result=await run({op:'clean',backend:t.backend,cwd:t.cwd,paths:[t.path],id:args.tempId,identity:t.id},c,activeExec,c.policy,()=>{},progress=>{job.progress={...job.progress,...progress}});temporary.delete(args.tempId);return result}
    finally{cleaning.delete(args.tempId)}
   })}catch(error){cleaning.delete(args.tempId);throw error}
+ })
+ // /recycle-approval：查看或撤销会话内授权。设置页的「清除」按钮走 recycleApprovalEpoch，这里是对话内的入口。
+ ctx.inject?.(['commands'],child=>{
+  child.commands.register({
+   name:'recycle-approval',
+   description:'Show or revoke session-wide recycling approvals: /recycle-approval status | revoke | revoke-all',
+   handler:async invocation=>{
+    syncApprovals()
+    const session=invocation?.agent?.session?.id
+    const [action='status']=String(invocation?.rawInput??'').trim().split(/\s+/u).filter(Boolean)
+    switch(action){
+     case 'status':
+      if(!recycleApprovals.enabled())return {kind:'success',text:'会话内授权未开启：每次回收都会询问宿主。'}
+      return {kind:'success',text:typeof session==='string'?'本会话有 '+recycleApprovals.countSession(session)+' 条会话内授权（全部会话共 '+recycleApprovals.size+' 条）。':'全部会话共 '+recycleApprovals.size+' 条会话内授权。'}
+     case 'revoke':
+      if(typeof session!=='string')return {kind:'error',text:'找不到当前会话；要清除全部请用 /recycle-approval revoke-all。'}
+      return {kind:'success',text:'已撤销本会话的 '+recycleApprovals.revokeSession(session)+' 条授权，下次回收会重新询问。'}
+     case 'revoke-all':
+      return {kind:'success',text:'已撤销全部会话的 '+recycleApprovals.clear()+' 条授权。'}
+     default:
+      return {kind:'error',text:'用法：/recycle-approval status | revoke | revoke-all'}
+    }
+   },
+  })
  })
 }

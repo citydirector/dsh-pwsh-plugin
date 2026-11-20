@@ -16,7 +16,9 @@ export const Config = Schema.object({
   fileOperationTimeoutMs: Schema.number().min(1).max(1800000).step(1).default(FILE_SCAN_DEFAULTS.fileOperationTimeoutMs),
   enforcePwshRun: Schema.boolean().default(false).volatile(),
   enforceFileRemoval: Schema.boolean().default(false).volatile(),
-  // 回收站写入不可回滚，宿主批准的粒度由这里决定：session 在同一会话、同一目录、同一策略下复用
-  // 一次批准；always 每次删除都重新问。范围确认（plan/execute 两段）不受影响。
-  recycleApproval: Schema.union([Schema.const('session'), Schema.const('always')]).default('session').volatile(),
+  // 回收站写入不可回滚。宿主只给 allowed-once，复用到整个会话是插件替用户放宽，所以默认 always（每次都问），
+  // session 由用户在设置页打开：同一会话、同一目录、同一策略下复用一次批准。范围确认（plan/execute）不受影响。
+  recycleApproval: Schema.union([Schema.const('always'), Schema.const('session')]).default('always').volatile(),
+  // 设置页「清除会话内授权」把它加一；值一变，已有的会话内授权全部作废。
+  recycleApprovalEpoch: Schema.natural().default(0).volatile(),
 })

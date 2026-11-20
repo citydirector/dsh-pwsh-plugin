@@ -66,7 +66,7 @@ Open **pwsh settings** in the settings sidebar, or the plugin row's configuratio
 | --- | --- | --- |
 | Require pwsh_run | `enforcePwshRun` | Refuse ordinary built-in `pwsh` calls and direct the model to `pwsh_run`. Read-only sessions, explicit background jobs and valid requests for a higher permission mode remain available; elevation still needs host approval. |
 | Review targets before deletion | `enforceFileRemoval` | Block common direct deletion commands in `pwsh`, `pwsh_run` and `bash`, and direct the model to review a removal plan. |
-| Reuse one recycling approval | `recycleApproval` | `session` (default) reuses one Host approval per session, directory and sandbox policy; `always` asks on every deletion. The plan inventory is still reviewed each time. |
+| Keep one approval for the session | `recycleApproval` | `always` (default) asks the Host on every recycling that needs it. `session` asks once per session, working directory and sandbox policy, says so in the approval prompt, and later recycling proceeds without the escalation tag. The plan inventory is still reviewed each time. **Clear session approvals** on the same page (or `/recycle-approval revoke-all`) revokes them; so do ending the session and switching back to `always`. Child sessions do not inherit approvals. |
 
 The guards check tool entries and common script syntax; they do not inspect every child program or prevent every filesystem deletion.
 

@@ -7,12 +7,18 @@ window.__ModuleLoader__.load({
     const NS = 'pwsh-run'
     const FIELD = 'enforcePwshRun'
     const REMOVE = 'enforceFileRemoval'
+    const RECYCLE = 'recycleApproval'
+    const EPOCH = 'recycleApprovalEpoch'
     const COPY = {
       zh: {
         title: 'pwsh 设置', group: '工具路由', label: '强制使用 pwsh_run',
         removal: '删除确认', removalLabel: '删除前先确认范围',
         removalHint: '识别到常见的 PowerShell 或 bash 删除命令时，先拦下原脚本，引导模型通过 file_remove 查看固定清单后再确认回收。',
         removalLimit: '这是脚本入口检查，无法覆盖任意子程序。工具登记的临时目录可通过 file_temp 清理；已有异常目录不会自动改权限。回收站需要额外权限时，仍由宿主审批。',
+        recycleLabel: '会话内一次授权持续有效',
+        recycleHint: '开启后，回收需要宿主批准时，同一会话、同一工作目录、同一沙箱策略下只问一次，之后的回收直接放行；批准弹窗会写明这一点。范围清单每次仍要确认。会话结束、关掉此开关或点「清除」都会作废已有授权。子会话不继承。',
+        recycleClear: '清除会话内授权', recycleCleared: '已清除，下次回收会重新询问。', recycleClearFailed: '清除失败，请刷新配置后重试。',
+        recycleCommand: '对话里也可以用 /recycle-approval status | revoke | revoke-all。',
         summary: '管理 PowerShell 路由与删除确认。',
         intro: '统一管理当前 profile 的 PowerShell 调用与文件删除确认。',
         hint: '开启后，普通 pwsh 调用会在执行前被拒绝。短命令可用 pwsh_run 的 mode=isolated，每次独立运行，超时也不会清空已有常驻状态。关闭此开关可恢复普通原生调用。',
@@ -26,6 +32,10 @@ window.__ModuleLoader__.load({
         removal: 'Deletion confirmation', removalLabel: 'Review targets before deletion',
         removalHint: 'Block common PowerShell and bash deletion commands and direct the model to review a fixed file_remove plan before recycling.',
         removalLimit: 'An entry check cannot inspect arbitrary child programs. Registered scratch directories can use file_temp cleanup; existing ACLs are never repaired automatically. Recycling that needs wider access still requires Host approval.',
+        recycleLabel: 'Keep one approval for the session',
+        recycleHint: 'When on, recycling that needs Host approval asks once per session, working directory and sandbox policy, then later recycling proceeds; the approval prompt says so. The target inventory is still reviewed every time. Ending the session, turning this off or pressing Clear revokes existing approvals. Child sessions do not inherit them.',
+        recycleClear: 'Clear session approvals', recycleCleared: 'Cleared. The next recycling asks again.', recycleClearFailed: 'Not cleared. Refresh the configuration and try again.',
+        recycleCommand: 'In a conversation you can also use /recycle-approval status | revoke | revoke-all.',
         summary: 'Manage PowerShell routing and deletion confirmation.',
         intro: 'Manage PowerShell routing and file removal for the current profile.',
         hint: 'When enabled, ordinary pwsh calls are blocked. Short commands can use pwsh_run with mode=isolated: each runs independently and a timeout preserves existing persistent state. Disable this switch to restore ordinary native calls.',
@@ -54,6 +64,8 @@ window.__ModuleLoader__.load({
       if (props.view === 'summary') return t.summary
       const state = props.usePwshSettings((value) => value)
       const disabled = !state.writable || state.saving
+      const [cleared, setCleared] = React.useState(undefined)
+      const clearApprovals = () => { setCleared(undefined); Promise.resolve(props.clearRecycleApprovals()).then((ok) => setCleared(ok === true), () => setCleared(false)) }
       return h('div', { style: style.page, 'data-pwsh-settings': '' },
         h('header', null, h('h2', { style: style.title }, t.title), h('p', { style: style.intro }, t.intro)),
         h(SettingsForm, { labels: t.form, state, onSave: props.save, onDiscard: props.discard },
@@ -75,17 +87,36 @@ window.__ModuleLoader__.load({
             h('div', { style: style.status, role: 'status' },
               h('span', null, state.removalAccepted ? t.on : t.off),
               state.removalField.overridden ? h(Button, { style: style.reset, variant: 'ghost', size: 'sm', disabled, onClick: () => props.resetField(REMOVE) }, t.inherited) : null),
-            h('p', { style: style.note }, t.removalLimit))))
+            h('p', { style: style.note }, t.removalLimit),
+            h('div', { style: style.row },
+              h('div', { style: style.field }, h('span', { style: style.label }, t.recycleLabel), h('p', { style: style.note }, t.recycleHint)),
+              h(Switch, { label: t.recycleLabel, checked: state.recycleField.text === 'session', disabled, 'data-setting': RECYCLE, onChange: (value) => props.edit(RECYCLE, value ? 'session' : 'always') })),
+            h('div', { style: style.status, role: 'status' },
+              h('span', null, state.recycleAccepted ? t.on : t.off),
+              cleared === true ? h('span', null, t.recycleCleared) : cleared === false ? h('span', null, t.recycleClearFailed) : null,
+              h(Button, { style: style.reset, variant: 'ghost', size: 'sm', disabled: !state.writable, 'data-action': 'clear-recycle-approvals', onClick: clearApprovals }, t.recycleClear),
+              state.recycleField.overridden ? h(Button, { variant: 'ghost', size: 'sm', disabled, onClick: () => props.resetField(RECYCLE) }, t.inherited) : null),
+            h('p', { style: style.note }, t.recycleCommand))))
     }
     function apply(ctx) {
       const scope = ctx.configForms.get(NS)
-      const form = new SettingsFormModel(scope, [FIELD, REMOVE].map(field => ({
+      const form = new SettingsFormModel(scope, [...[FIELD, REMOVE].map(field => ({
         field,
         format: (value) => value === true ? 'true' : 'false',
         parse: (text) => text === 'true' || text === 'false' ? { kind: 'set', value: text === 'true' } : undefined,
-      })))
-      const store = form.bind(() => ({ ...form.shell(), field: form.field(FIELD), accepted: scope.getSnapshot().value?.[FIELD] === true, removalField: form.field(REMOVE), removalAccepted: scope.getSnapshot().value?.[REMOVE] === true }))
-      const inject = () => ({ hooks: { pwshSettings: store }, ...form.actions() })
+      })), {
+        field: RECYCLE,
+        format: (value) => value === 'session' ? 'session' : 'always',
+        parse: (text) => text === 'session' || text === 'always' ? { kind: 'set', value: text } : undefined,
+      }])
+      const store = form.bind(() => ({ ...form.shell(), field: form.field(FIELD), accepted: scope.getSnapshot().value?.[FIELD] === true, removalField: form.field(REMOVE), removalAccepted: scope.getSnapshot().value?.[REMOVE] === true, recycleField: form.field(RECYCLE), recycleAccepted: scope.getSnapshot().value?.[RECYCLE] === 'session' }))
+      // 清除不走暂存表单：直接把清除计数加一并写入，和其他未保存的修改互不影响。
+      const clearRecycleApprovals = () => {
+        const snapshot = scope.getSnapshot()
+        const current = Number(snapshot.value?.[EPOCH])
+        return scope.mutate([{ op: 'set', path: [EPOCH], value: (Number.isSafeInteger(current) && current >= 0 ? current : 0) + 1 }], snapshot.revision)
+      }
+      const inject = () => ({ hooks: { pwshSettings: store }, ...form.actions(), clearRecycleApprovals })
       ctx.effect(() => () => form.dispose(), 'pwsh-run.form')
       ctx.effect(() => {
         let dispose = () => {}
