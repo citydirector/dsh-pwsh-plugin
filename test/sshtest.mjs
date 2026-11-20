@@ -536,7 +536,9 @@ await test('client registers the ssh settings section and row config page', asyn
   // 宿主不会按 Config 自动出表单，设置页由 client/index.js 自己登记；这里用最小桩检查形状。
   const registered = []
   const disposers = []
-  const saved = { window: globalThis.window, document: globalThis.document, navigator: globalThis.navigator, MutationObserver: globalThis.MutationObserver }
+  // Node 21 起 globalThis.navigator 是只读 getter，直接赋值会抛；按描述符打桩再原样还原。
+  const saved = Object.fromEntries(['window','document','navigator','MutationObserver'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  const stub = (key, value) => Object.defineProperty(globalThis, key, { value, configurable: true, writable: true })
   class FakeForm {
     constructor(scope, specs) { this.scope = scope; this.specs = specs }
     bind(project) { this.project = project; return { getSnapshot: () => project(), subscribe: () => () => {} } }
@@ -556,10 +558,10 @@ await test('client registers the ssh settings section and row config page', asyn
   }
   let loaded
   try {
-    globalThis.window = { __ModuleLoader__: { load: (value) => { loaded = value } } }
-    globalThis.document = { documentElement: { lang: 'zh-CN' } }
-    globalThis.navigator = { language: 'zh-CN' }
-    globalThis.MutationObserver = class { observe() {} disconnect() {} }
+    stub('window', { __ModuleLoader__: { load: (value) => { loaded = value } } })
+    stub('document', { documentElement: { lang: 'zh-CN' } })
+    stub('navigator', { language: 'zh-CN' })
+    stub('MutationObserver', class { observe() {} disconnect() {} })
     new Function(readFileSync(new URL('../client/index.js', import.meta.url), 'utf8'))()
     assert(loaded?.factory !== undefined, 'the client module should call the module loader')
     const plugin = loaded.factory((id) => id === 'react' ? react : primitives)
@@ -577,7 +579,7 @@ await test('client registers the ssh settings section and row config page', asyn
     assert(page !== null && page.type === 'div', 'the page renders a container')
     assert(section.component({ view: 'summary' }).length > 0, 'the summary is a non-empty line')
   } finally {
-    for (const [name, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value }
+    for (const [name, descriptor] of Object.entries(saved)) { if (descriptor === undefined) delete globalThis[name]; else Object.defineProperty(globalThis, name, descriptor) }
     for (const dispose of disposers) if (typeof dispose === 'function') dispose()
   }
 })
