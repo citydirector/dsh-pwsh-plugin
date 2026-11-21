@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import net from 'node:net'
 import { join, resolve } from 'node:path'
 import { parseHost, parseHostList, parseApprovalList, approvalFor } from '../plugin/ssh/hosts.mjs'
-import { buildSshArgv } from '../plugin/ssh/argv.mjs'
+import { buildSshArgv, describeCredentials } from '../plugin/ssh/argv.mjs'
 import { SentinelSplitter, commandScript } from '../plugin/ssh/framing.mjs'
 import { decodeOutput, foldCarriageReturns, OutputBuffer, renderSnapshot } from '../plugin/ssh/output.mjs'
 import { SshSession } from '../plugin/ssh/session.mjs'
@@ -143,6 +143,42 @@ await test('via=wsl passes agentSocket through env', () => {
   const { command, args } = buildSshArgv(host, { privateKnownHosts: '~/.ssh/dsh_known_hosts' })
   eq(command, 'wsl.exe')
   eq(args.slice(0, 6), ['-d', 'Ubuntu', '-e', 'env', 'SSH_AUTH_SOCK=/home/u/.ssh/agent.sock', 'ssh'])
+})
+
+await test('credentials stay on the via side: identityFile, identityAgent, pipe through env', () => {
+  const known = { privateKnownHosts: '~/.ssh/dsh_known_hosts' }
+  const wsl = parseHost({ name: 'w', address: 'root@192.0.2.5', via: 'wsl', identityFile: '~/.ssh/qq_bot', identityAgent: 'none' })
+  const w = buildSshArgv(wsl, known)
+  eq(w.env, undefined)
+  assert(!w.args.some((arg) => String(arg).startsWith('SSH_AUTH_SOCK=')), 'no agent socket when identityAgent is none')
+  const wi = w.args.indexOf('IdentityFile=~/.ssh/qq_bot')
+  assert(wi > 0 && w.args[wi - 1] === '-o' && w.args[wi + 2] === 'IdentitiesOnly=yes', 'IdentityFile comes with IdentitiesOnly')
+  assert(w.args.includes('IdentityAgent=none'))
+  assert(w.args.indexOf('IdentityAgent=none') < w.args.indexOf('--'), 'options come before the host')
+  const win = parseHost({ name: 'x', address: 'root@192.0.2.5', identityFile: 'C:/Users/you/.ssh/qq_bot', identityAgent: '\\\\.\\pipe\\openssh-ssh-agent' })
+  const x = buildSshArgv(win, known)
+  eq(x.command, 'ssh')
+  eq(x.env, { SSH_AUTH_SOCK: '\\\\.\\pipe\\openssh-ssh-agent' })
+  assert(!x.args.some((arg) => String(arg).includes('\\')), 'no backslash reaches the ssh argv')
+  assert(x.args.includes('IdentityFile=C:/Users/you/.ssh/qq_bot'))
+  // 旧字段 agentSocket 仍然生效，并且与 identityAgent 等价
+  const legacy = parseHost({ name: 'l', address: 'u@192.0.2.5', via: 'wsl', agentSocket: '/home/u/a.sock' })
+  eq([legacy.identityAgent, legacy.agentSocket], ['/home/u/a.sock', '/home/u/a.sock'])
+  for (const [entry, pattern] of [
+    [{ name: 'b1', address: 'u@h', identityAgent: '/tmp/a.sock' }, /pipe/],
+    [{ name: 'b2', address: 'u@h', identityAgent: '\\\\.\\pipe\\a b' }, /pipe/],
+    [{ name: 'b3', address: 'u@h', identityFile: 'C:\\Users\\u\\.ssh\\k' }, /plain path/],
+    [{ name: 'b4', address: 'u@h', identityFile: '-oProxyCommand=x' }, /plain path/],
+    [{ name: 'b5', address: 'u@h', via: 'wsl', agentSocket: '/a', identityAgent: '/b' }, /disagree/],
+    [{ name: 'b6', address: 'u@h', identityAgent: 7 }, /string/],
+  ]) {
+    let error
+    try { parseHost(entry) } catch (caught) { error = caught }
+    assert(error !== undefined && pattern.test(error.message), entry.name + ': ' + error?.message)
+  }
+  const line = describeCredentials(wsl)
+  assert(line.includes('via wsl') && line.includes('agent none') && line.includes('key ~/.ssh/qq_bot only') && line.includes('root@192.0.2.5:22'), line)
+  assert(describeCredentials(parseHost({ name: 'd', address: 'u@h' })).includes('agent default'))
 })
 
 await test('approval list: IP, CIDR, hostname, wildcard, invert', () => {
@@ -345,6 +381,16 @@ await test('non-POSIX remote is refused at probe', async () => {
   // cat 会把脚本原样回显，探测行里 $$ 不是数字 → 拒绝。
   await rejects(session.open(), /probe-failed|POSIX/)
   eq(session.state, 'dead')
+})
+
+await test('auth failure names the side, agent and key that were used', async () => {
+  const host = parseHost({ name: 'w', address: 'root@192.0.2.5', via: 'wsl', identityAgent: '/home/u/.ssh/agent.sock' })
+  const transport = { spawnMain: () => spawn('sh', ['-c', 'echo "root@192.0.2.5: Permission denied (publickey)." >&2; exit 255'], { stdio: 'pipe' }), runSide: async () => ({ code: 0 }) }
+  const s = new SshSession({ id: 's1', host, transport, spoolDir: spool })
+  let error
+  try { await s.open() } catch (caught) { error = caught }
+  assert(error !== undefined, 'open should fail')
+  assert(/Permission denied/.test(error.message) && error.message.includes('via wsl · root@192.0.2.5:22 · agent /home/u/.ssh/agent.sock'), error.message)
 })
 
 await test('network drop marks the session dead(network)', async () => {
@@ -667,6 +713,9 @@ await test('client registers the ssh settings section and row config page', asyn
     eq(parsed.value.length, 1)
     eq([parsed.value[0].name, parsed.value[0].address, parsed.value[0].user], ['ok', 'example.com', 'user'])
     eq(hostsSpec.parse('[]').kind, 'clear', 'an empty array clears the list')
+    eq(hostsSpec.parse('[{"name":"k","address":"u@h","via":"wsl","identityFile":"~/.ssh/k","identityAgent":"none"}]').value[0].identityFile, '~/.ssh/k')
+    eq(hostsSpec.parse('[{"name":"k","address":"u@h","identityAgent":"\\\\\\\\.\\\\pipe\\\\openssh-ssh-agent"}]').kind, 'set')
+    for (const invalid of ['[{"name":"k","address":"u@h","identityFile":"C:\\\\Users\\\\k"}]', '[{"name":"k","address":"u@h","identityAgent":"/tmp/a"}]', '[{"name":"k","address":"u@h","agentSocket":"/tmp/a"}]']) eq(hostsSpec.parse(invalid), undefined, invalid)
     const bare = hostsSpec.parse('{"ok":"example.com"}')
     eq(bare.kind, 'set')
     eq(bare.value[0].user, undefined)

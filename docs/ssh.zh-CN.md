@@ -27,7 +27,8 @@
         address: 127.0.0.1
         user: test
         via: wsl
-        agentSocket: /home/test/.ssh/agent.sock
+        identityFile: ~/.ssh/lab_ed25519   # 只用 WSL 里这把钥匙
+        identityAgent: none                # 不碰任何 agent
         shell: bash
         encoding: gb18030
         maxSessions: 2
@@ -73,7 +74,9 @@
 | `user` | 登录名；地址里的 `user@` 优先，两者不能同时给出不同值。省略时用本机登录名 |
 | `via` | `windows`（默认）或 `wsl`；每台主机固定一侧，不会自动换侧 |
 | `wslDistro` | 仅 `via: wsl`，指定发行版 |
-| `agentSocket` | 仅 `via: wsl`，作为 `SSH_AUTH_SOCK` 传给 WSL 里的 ssh |
+| `identityFile` | `via` 那一侧的私钥路径，生成 `-o IdentityFile=… -o IdentitiesOnly=yes`，只用这一把钥匙。Windows 写 `C:/Users/you/.ssh/key`（正斜杠，反斜杠会被拒），WSL 写 `~/.ssh/key` |
+| `identityAgent` | `via` 那一侧的 agent。`none` 生成 `-o IdentityAgent=none`；WSL 写 socket 路径，Windows 写命名管道（JSON 里是 `"\\\\.\\pipe\\openssh-ssh-agent"`），都作为 `SSH_AUTH_SOCK` 传给那一侧的 ssh，管道名不进 argv |
+| `agentSocket` | `identityAgent` 的旧名，仅 `via: wsl`；两者同给时必须一致 |
 | `shell` | 首选 `bash`/`zsh`/`sh`，找不到就按 bash → zsh → sh |
 | `encoding` | 远端输出编码，例如 `gb18030`，默认 UTF-8 |
 | `maxSessions` | 这台主机的并发会话上限，默认 4 |
@@ -107,7 +110,9 @@ ssh -T -e none -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UpdateHos
 - `BatchMode=yes`：不会弹密码框，认证只靠 agent 或密钥。
 - known_hosts 两份：插件私有的在前，用户自己的在后。首次连接自动记到私有文件；主机密钥变更时 ssh 直接失败。
 - 命令行 `-o` 优先于 `~/.ssh/config`，所以 config 里的 `RemoteCommand`、`RequestTTY` 改不了会话形态；`ProxyJump`、`IdentityFile` 等照常生效。
-- `via: wsl` 用 `wsl.exe [-d <distro>] -e env [SSH_AUTH_SOCK=<agentSocket>] ssh ...`，`~` 指 WSL 里的家目录。
+- `via: wsl` 用 `wsl.exe [-d <distro>] -e env [SSH_AUTH_SOCK=<identityAgent>] ssh ...`，`~` 指 WSL 里的家目录。
+- 凭据只在 `via` 这一侧找：密钥文件、agent、`~/.ssh/config`、known_hosts 都是那一侧的，另一侧读不到也不影响。只要那一侧自己有钥匙（`identityFile`）或自己的 agent（`identityAgent`），就能连上。`BatchMode=yes` 不问口令，带口令的钥匙必须先加进同一侧的 agent。
+- 连接失败时，报错末尾会附一行 `via … · user@host:port · agent … · key …`，说明这次用的是哪一侧、哪个 agent、哪把钥匙。
 - ssh 进程由宿主进程直接启动，不经沙箱受限令牌（受限令牌下管道会 `EPERM`）。它只连远端，不读写本地工作区。
 
 ## 远端 shell 与分帧

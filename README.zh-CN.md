@@ -108,7 +108,7 @@ $env:DSH_HOME = '<DSH 数据目录>'
 
 可选模块（`dsh-pwsh-plugin/ssh`，条目 id `ssh`，在 `cordis.patch.yml` 里**默认启用**），给模型提供常驻 SSH shell：`ssh_open`、`ssh_exec`、`ssh_read`、`ssh_kill`、`ssh_list`。主机清单为空时不会连接任何东西，在「设置 → SSH 会话」里填好即可使用。
 
-- 系统 OpenSSH，每会话一条连接，固定安全参数（`BatchMode=yes`、`RemoteCommand=none`、`RequestTTY=no`、`ForwardAgent=no` 等），插件私有 known_hosts 排在用户的之前。每台主机固定走一侧：`via: windows` 或 `via: wsl`（可配 `agentSocket`）。
+- 系统 OpenSSH，每会话一条连接，固定安全参数（`BatchMode=yes`、`RemoteCommand=none`、`RequestTTY=no`、`ForwardAgent=no` 等），插件私有 known_hosts 排在用户的之前。每台主机固定走一侧：`via: windows` 或 `via: wsl`（凭据只在那一侧找，可按主机指定 `identityFile`、`identityAgent`）。
 - 只能连清单里的主机。审批名单（IP、CIDR、主机名或 `*.example.com`）命中的主机，`ssh_open` 和每条 `ssh_exec` 都要手动批准；`approvalListInvert` 把它反转成放行名单。
 - 变量与 `cd` 跨命令保留。一个会话同一时刻一条命令；后台任务返回 `jobId`，结束时插入一行提示。
 - 空闲 30 分钟、硬上限 24 小时、每主机 4 个、全局 8 个。会话归根 DSH 会话所有。

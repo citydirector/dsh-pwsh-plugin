@@ -194,7 +194,8 @@ window.__ModuleLoader__.load({
           ['port', '端口，默认 22'],
           ['via', '"windows"（默认，用 Windows 的 ssh.exe）或 "wsl"（在 WSL 里跑 ssh）'],
           ['wslDistro', 'WSL 发行版名，只用于 via: "wsl"'],
-          ['agentSocket', 'WSL 内的 ssh-agent socket 路径，只用于 via: "wsl"'],
+          ['identityFile', '这一侧的私钥路径，只用这一把钥匙。Windows 写 C:/Users/you/.ssh/key（正斜杠），WSL 写 ~/.ssh/key'],
+          ['identityAgent', '这一侧的 agent："none" 表示不用 agent；WSL 写 socket 路径，Windows 写管道，JSON 里是 "\\\\\\\\.\\\\pipe\\\\openssh-ssh-agent"。旧字段 agentSocket 仍可用'],
           ['shell', '远端 shell：bash、zsh 或 sh'],
           ['encoding', '远端输出编码，例如 utf-8、gbk'],
           ['maxSessions', '这台主机同时开的会话数，1–64，默认 4'],
@@ -232,7 +233,8 @@ window.__ModuleLoader__.load({
           ['port', 'port, default 22'],
           ['via', '"windows" (default, Windows ssh.exe) or "wsl" (ssh inside WSL)'],
           ['wslDistro', 'WSL distribution, only with via: "wsl"'],
-          ['agentSocket', 'ssh-agent socket path inside WSL, only with via: "wsl"'],
+          ['identityFile', 'private key on that side, used alone; Windows C:/Users/you/.ssh/key (forward slashes), WSL ~/.ssh/key'],
+          ['identityAgent', 'agent on that side: "none" for no agent, a socket path in WSL, or a pipe on Windows, in JSON "\\\\\\\\.\\\\pipe\\\\openssh-ssh-agent"; agentSocket still works'],
           ['shell', 'remote shell: bash, zsh or sh'],
           ['encoding', 'remote output encoding, e.g. utf-8 or gbk'],
           ['maxSessions', 'concurrent sessions on this host, 1-64, default 4'],
@@ -256,8 +258,8 @@ window.__ModuleLoader__.load({
     // 示例只用保留地址（example.com、192.0.2.0/24），能直接通过 parseHostsText 的校验。
     const SSH_HOSTS_EXAMPLE = JSON.stringify([
       { name: 'web', address: 'deploy@web.example.com' },
-      { name: 'db', address: 'admin@192.0.2.10', port: 2222, shell: 'bash', maxSessions: 2 },
-      { name: 'lab', address: 'dev@lab.example.com', via: 'wsl', wslDistro: 'Ubuntu', encoding: 'utf-8' },
+      { name: 'db', address: 'admin@192.0.2.10', port: 2222, identityFile: 'C:/Users/you/.ssh/db_ed25519', shell: 'bash', maxSessions: 2 },
+      { name: 'lab', address: 'dev@lab.example.com', via: 'wsl', wslDistro: 'Ubuntu', identityFile: '~/.ssh/lab_ed25519', identityAgent: 'none', encoding: 'utf-8' },
     ], null, 2)
     const SSH_HOSTS_SHORT_EXAMPLE = '{\n  "web": "deploy@web.example.com",\n  "db": "admin@192.0.2.10"\n}'
     const sshSettingsCopy = () => (document.documentElement.lang || navigator.language || 'en').toLowerCase().startsWith('zh') ? SSH_SETTINGS.zh : SSH_SETTINGS.en
@@ -326,7 +328,9 @@ window.__ModuleLoader__.load({
     const HOST_BAD_RE = /[\s"'\x60\\\x00-\x1f\x7f@]/
     // 与 plugin/ssh/hosts.mjs 的 KNOWN_KEYS 保持一致：服务端会把带未知字段的条目整条丢掉，
     // 表单里先拦住，免得「保存成功但主机不见了」。
-    const HOST_KNOWN_KEYS = new Set(['name', 'address', 'host', 'port', 'user', 'via', 'wslDistro', 'agentSocket', 'shell', 'encoding', 'maxSessions', 'hostKeyFingerprint', 'loadProfile'])
+    const HOST_KNOWN_KEYS = new Set(['name', 'address', 'host', 'port', 'user', 'via', 'wslDistro', 'agentSocket', 'identityAgent', 'identityFile', 'shell', 'encoding', 'maxSessions', 'hostKeyFingerprint', 'loadProfile'])
+    const HOST_PATH_BAD_RE = /[\s"'\x60\\\x00-\x1f\x7f]/
+    const HOST_PIPE_RE = /^\\\\\.\\pipe\\[A-Za-z0-9._-]{1,128}$/
     const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
     function splitUserHost(text) {
       const at = text.lastIndexOf('@')
@@ -360,6 +364,15 @@ window.__ModuleLoader__.load({
       if (entry.via !== undefined && entry.via !== 'windows' && entry.via !== 'wsl') throw new Error('hosts[' + index + '] "' + name + '": via must be "windows" or "wsl"')
       if (entry.loadProfile !== undefined && typeof entry.loadProfile !== 'boolean') throw new Error('hosts[' + index + '] "' + name + '": loadProfile must be true or false')
       if (entry.address !== undefined && entry.host !== undefined) throw new Error('hosts[' + index + '] "' + name + '": use either address or host, not both')
+      const plainPath = (value) => typeof value === 'string' && value !== '' && !value.startsWith('-') && !HOST_PATH_BAD_RE.test(value)
+      if (entry.identityFile !== undefined && !plainPath(entry.identityFile)) throw new Error('hosts[' + index + '] "' + name + '": identityFile must be a plain path; on Windows write C:/Users/... with forward slashes')
+      if (entry.agentSocket !== undefined && (entry.via !== 'wsl' || !plainPath(entry.agentSocket))) throw new Error('hosts[' + index + '] "' + name + '": agentSocket is a WSL path and needs via: "wsl"')
+      if (entry.identityAgent !== undefined) {
+        const agent = entry.identityAgent
+        const ok = agent === 'none' || (entry.via === 'wsl' ? plainPath(agent) : typeof agent === 'string' && HOST_PIPE_RE.test(agent))
+        if (!ok) throw new Error('hosts[' + index + '] "' + name + '": identityAgent must be "none", a WSL socket path, or a Windows pipe')
+        if (entry.agentSocket !== undefined && entry.agentSocket !== agent) throw new Error('hosts[' + index + '] "' + name + '": agentSocket and identityAgent disagree')
+      }
       const rawAddress = entry.address ?? entry.host
       if (typeof rawAddress !== 'string') throw new Error('hosts[' + index + '] "' + name + '": host is required')
       const split = splitUserHost(rawAddress)

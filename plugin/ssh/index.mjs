@@ -82,14 +82,14 @@ export function transportFor(config) {
   const run = (host) => buildSshArgv(host, { privateKnownHosts: live(config.knownHosts), userKnownHosts: live(config.userKnownHosts) }, { sshPath: live(config.sshPath), wslPath: live(config.wslPath) })
   return (host) => ({
     spawnMain() {
-      const { command, args } = run(host)
-      return spawn(command, args, { stdio: 'pipe', windowsHide: true })
+      const { command, args, env } = run(host)
+      return spawn(command, args, { stdio: 'pipe', windowsHide: true, ...(env ? { env: { ...process.env, ...env } } : {}) })
     },
     runSide(script) {
       return new Promise((resolve) => {
-        const { command, args } = run(host)
+        const { command, args, env } = run(host)
         let child
-        try { child = spawn(command, args, { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true }) } catch { resolve({ code: null }); return }
+        try { child = spawn(command, args, { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true, ...(env ? { env: { ...process.env, ...env } } : {}) }) } catch { resolve({ code: null }); return }
         const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 15000)
         child.on('error', () => {})
         child.on('exit', (code) => { clearTimeout(timer); resolve({ code }) })

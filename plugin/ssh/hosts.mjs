@@ -18,6 +18,8 @@ const ENCODING_RE = /^[A-Za-z0-9_-]{1,32}$/
 const FINGERPRINT_RE = /^SHA256:[A-Za-z0-9+/]{43}=?$/
 const DISTRO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const UNSAFE_PATH_RE = /[\s"'`\\\x00-\x1f\x7f]/
+// Windows 侧的 agent 是命名管道。走 SSH_AUTH_SOCK 环境变量传给 ssh.exe，不进 -o（ssh 的选项解析会吃掉反斜杠）。
+const WINDOWS_PIPE_RE = /^\\\\\.\\pipe\\[A-Za-z0-9._-]{1,128}$/
 
 function localUser() {
   const candidates = []
@@ -77,7 +79,7 @@ function optionalPath(value, name) {
   return value
 }
 
-const KNOWN_KEYS = new Set(['name', 'address', 'host', 'port', 'user', 'via', 'wslDistro', 'agentSocket', 'shell', 'encoding', 'maxSessions', 'hostKeyFingerprint', 'loadProfile'])
+const KNOWN_KEYS = new Set(['name', 'address', 'host', 'port', 'user', 'via', 'wslDistro', 'agentSocket', 'identityAgent', 'identityFile', 'shell', 'encoding', 'maxSessions', 'hostKeyFingerprint', 'loadProfile'])
 
 /** 一台主机的条目。错误信息带上主机名，方便用户在设置页定位。 */
 export function parseHost(entry, index = 0) {
@@ -109,8 +111,21 @@ export function parseHost(entry, index = 0) {
       if (typeof entry.wslDistro !== 'string' || !DISTRO_RE.test(entry.wslDistro)) throw new Error('wslDistro is not a valid distribution name')
       wslDistro = entry.wslDistro
     }
+    // 凭据只在 via 这一侧找：identityFile 是那一侧的私钥路径，identityAgent 是那一侧的 agent。
+    // agentSocket 是 identityAgent 的旧名（只用于 wsl），两者同给时必须一致。
     const agentSocket = optionalPath(entry.agentSocket, 'agentSocket')
-    if (agentSocket !== undefined && via !== 'wsl') throw new Error('agentSocket only applies to via: wsl')
+    if (agentSocket !== undefined && via !== 'wsl') throw new Error('agentSocket only applies to via: wsl; use identityAgent for a Windows pipe')
+    let identityAgent
+    if (entry.identityAgent !== undefined && entry.identityAgent !== null && entry.identityAgent !== '') {
+      if (typeof entry.identityAgent !== 'string') throw new Error('identityAgent must be a string')
+      if (entry.identityAgent === 'none') identityAgent = 'none'
+      else if (via === 'windows') {
+        if (!WINDOWS_PIPE_RE.test(entry.identityAgent)) throw new Error('identityAgent for via: windows must be "none" or a pipe like \\\\.\\pipe\\openssh-ssh-agent')
+        identityAgent = entry.identityAgent
+      } else identityAgent = optionalPath(entry.identityAgent, 'identityAgent')
+      if (agentSocket !== undefined && agentSocket !== identityAgent) throw new Error('agentSocket and identityAgent disagree; keep only identityAgent')
+    } else identityAgent = agentSocket
+    const identityFile = optionalPath(entry.identityFile, 'identityFile')
     let shell
     if (entry.shell !== undefined) {
       if (!SHELLS.has(entry.shell)) throw new Error('shell must be bash, zsh or sh')
@@ -139,7 +154,10 @@ export function parseHost(entry, index = 0) {
       userDefaulted,
       via,
       wslDistro,
-      agentSocket,
+      identityAgent,
+      // 旧字段名保留在结构上，免得外部代码读 agentSocket 时拿到 undefined
+      agentSocket: identityAgent === 'none' || via !== 'wsl' ? undefined : identityAgent,
+      identityFile,
       shell,
       encoding,
       maxSessions: integer(entry.maxSessions, 'maxSessions', 1, 64, HOST_DEFAULTS.maxSessions),

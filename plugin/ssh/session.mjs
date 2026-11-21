@@ -3,6 +3,7 @@
 import { EventEmitter } from 'node:events'
 import { SentinelSplitter, newNonce, probeScript, setupScript, commandScript, killDescendantsScript } from './framing.mjs'
 import { OutputBuffer, renderSnapshot, decodeOutput } from './output.mjs'
+import { describeCredentials } from './argv.mjs'
 
 export const DEAD_REASONS = Object.freeze(['network', 'remote-exit', 'killed', 'idle', 'hard-cap', 'host-removed', 'dsh-restart', 'probe-failed'])
 
@@ -106,7 +107,10 @@ export class SshSession extends EventEmitter {
     const fail = (message) => {
       const detail = Buffer.concat(this.stderrText).toString('utf8').trim().split('\n').slice(-5).join('\n')
       this.terminate('probe-failed')
-      return new SessionError('probe-failed', detail ? `${message}\n${detail}` : message)
+      // 带上这次用的是哪一侧、哪个 agent、哪把钥匙：Permission denied 本身看不出该去哪一侧查。
+      let context = ''
+      try { context = '\n' + describeCredentials(this.host) } catch {}
+      return new SessionError('probe-failed', (detail ? `${message}\n${detail}` : message) + context)
     }
     const probe = this.stdout.expect(`__DSH_PROBE_${nonce} `)
     this.setState('probing')
