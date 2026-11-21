@@ -11,7 +11,7 @@ import { parseHostList, parseApprovalList } from './hosts.mjs'
 import { buildSshArgv } from './argv.mjs'
 import { SshManager, MANAGER_DEFAULTS } from './manager.mjs'
 import { SessionError } from './session.mjs'
-import { registerProjection, PROJECTION_KEY } from './projection.mjs'
+import { mountProjection, PROJECTION_KEY, registration as projectionRegistration } from './projection.mjs'
 
 export const name = 'ssh'
 export const inject = ['tools']
@@ -300,6 +300,7 @@ export function apply(ctx, config) {
         sessions: manager.list(rootKey(exec.agent)),
         hosts: [...manager.hosts.values()].map((h) => ({ name: h.name, via: h.via, user: h.user, ...(h.userDefaulted ? { userFrom: 'local-login' } : {}) })),
         enabled: manager.settings.enabled,
+        projection: { key: PROJECTION_KEY, registered: projectionRegistration.registered, ...(projectionRegistration.error === null ? {} : { error: projectionRegistration.error }) },
         ...(manager.configErrors.length > 0 ? { configErrors: manager.configErrors } : {}),
       }
     },
@@ -311,7 +312,7 @@ export function apply(ctx, config) {
     void manager.ownerClosed(rootKey(agent))
   }), 'ssh.owner-closed')
 
-  ctx.inject?.(['sessionProjections'], (child) => registerProjection(child))
+  ctx.inject?.(['sessionProjections'], (child) => mountProjection(child))
 
   // /ssh 命令：标签页与设置页的按钮走这里（宿主 remote.commands 通道，不注册 HTTP 路由）。
   ctx.inject?.(['commands'], (child) => {

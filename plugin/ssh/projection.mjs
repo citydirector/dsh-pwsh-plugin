@@ -137,22 +137,43 @@ export function projectionDefinition() {
   return {
     key: PROJECTION_KEY,
     stateSchema,
-    stateVersion: 1,
+    // 2：折叠开始认代码模式的 ptc-dispatch 事件。按宿主契约，语义变了就要换版本，
+    // 否则持久化缓存里 v1 的空检查点会被继续采用，老会话恢复出来仍是空表。
+    stateVersion: 2,
     init: () => initState(),
     apply: (state, event) => applyEvent(state, event),
     wire: { viewSchema, view },
   }
 }
 
+// 注册结果留一份可查的记录：投影没挂上时标签页只会空着，没有别的症状。
+export const registration = { attempted: false, registered: false, error: null }
+
 export function registerProjection(ctx, { onError } = {}) {
+  registration.attempted = true
   // register() 本身随 ctx 的生命周期撤销，热替换不会留下重复注册。
-  // 宿主契约要求在消费投影前等注册完成，这里把 Promise 交回去；但 plugin/index.mjs 的
-  // ctx.inject 回调忽略返回值，未处理的拒绝会拖垮整个宿主进程，所以默认在这里收尾。
-  const pending = Promise.resolve(ctx.sessionProjections.register(projectionDefinition()))
-  return pending.catch((error) => {
+  // 它返回的是可 await 的 dispose（thenable），解析值是 ProjectionHandle。
+  // 同步抛错也收进 Promise，免得在 inject 回调里直接炸掉。
+  const pending = Promise.resolve().then(() => ctx.sessionProjections.register(projectionDefinition()))
+  return pending.then((handle) => {
+    registration.registered = true
+    registration.error = null
+    return handle
+  }, (error) => {
+    registration.registered = false
+    registration.error = String(error?.message ?? error)
     if (typeof onError === 'function') return onError(error)
-    // 注册失败不会抛给调用方（见上），所以这里必须留下能查的痕迹：Tab 会一直空着。
-    try { ctx.logger?.warn?.('ssh projection registration failed; the sessions tab will stay empty: ' + String(error?.message ?? error)) } catch {}
+    try { ctx.logger?.warn?.('ssh projection registration failed; the sessions tab will stay empty: ' + registration.error) } catch {}
     return undefined
   })
+}
+
+/**
+ * 给 ctx.inject 用的回调。必须解析成 undefined：cordis 把插件体（inject 回调就是一个插件体）
+ * 的返回值当 effect 收集，Promise 解析出的值只能是函数或空值。把 ProjectionHandle 这个对象
+ * 交回去会抛 TypeError('Invalid effect')，子 fiber 进入失败态并被卸载，注册随之释放：
+ * 宿主快照与推送里就再也没有 sshSessions，标签页一直是「还没有 SSH 会话」。
+ */
+export async function mountProjection(child) {
+  await registerProjection(child)
 }

@@ -11,7 +11,7 @@ import { SentinelSplitter, commandScript } from '../plugin/ssh/framing.mjs'
 import { decodeOutput, foldCarriageReturns, OutputBuffer, renderSnapshot } from '../plugin/ssh/output.mjs'
 import { SshSession } from '../plugin/ssh/session.mjs'
 import { SshManager } from '../plugin/ssh/manager.mjs'
-import { applyEvent, initState, view, registerProjection } from '../plugin/ssh/projection.mjs'
+import { applyEvent, initState, view, registerProjection, mountProjection } from '../plugin/ssh/projection.mjs'
 import * as plugin from '../plugin/ssh/index.mjs'
 
 if (process.platform === 'win32') {
@@ -626,13 +626,29 @@ await test('projection registration matches the host contract', async () => {
   const pending = registerProjection(ctx)
   assert(typeof pending?.then === 'function', 'registerProjection hands back a promise a caller may await')
   assert(await pending === handle, 'the registration handle is passed through')
-  eq([definition.key, definition.stateVersion], ['sshSessions', 1])
+  eq([definition.key, definition.stateVersion], ['sshSessions', 2])
   // 宿主运行时只调 .parse：状态与视图都要过得了这两个 schema
   const state = definition.stateSchema.parse(definition.init())
   const next = definition.apply(state, { type: 'tool/call', data: { callId: 'c1', name: 'ssh_open', arguments: { host: 'local' } } })
   definition.wire.viewSchema.parse(definition.wire.view(next))
   // plugin/index.mjs 不 await 这个 Promise：拒绝必须被收在这里，不能变成未处理的拒绝
   eq(await registerProjection({ sessionProjections: { register: () => Promise.reject(new Error('boom')) } }), undefined)
+})
+
+await test('the inject callback keeps the registration alive under cordis', async () => {
+  // 回归：inject 回调曾把 ProjectionHandle 当返回值交回，cordis 视为无效 effect，
+  // 子 fiber 失败卸载，注册立刻被释放，标签页永远拿不到 sshSessions。
+  const handle = { stateOf: () => undefined, readerFor: () => undefined, dispose: () => {} }
+  eq(await mountProjection({ sessionProjections: { register: () => Promise.resolve(handle) } }), undefined)
+  let cordis
+  try { cordis = await import('@deepseek-ai/cordis') } catch { return skipTest('cordis inject regression', 'cordis is not installed') }
+  const root = new cordis.Context()
+  let live = 0
+  root.provide('sessionProjections', { register: () => { live += 1; return Object.assign(() => { live -= 1 }, { then: (ok, no) => Promise.resolve(handle).then(ok, no) }) } })
+  const fiber = root.inject(['sessionProjections'], (child) => mountProjection(child))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert(fiber.state !== 3, 'the inject fiber must not fail (state ' + fiber.state + ')')
+  eq(live, 1)
 })
 
 // ---- 浏览器半侧：SSH 设置分组 -------------------------------------------------
