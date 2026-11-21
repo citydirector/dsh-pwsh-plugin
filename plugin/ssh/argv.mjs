@@ -46,6 +46,9 @@ export function buildSshArgv(host, paths, { sshPath = 'ssh', wslPath = 'wsl.exe'
   if (host.identityFile !== undefined) sshArgs.push('-o', 'IdentityFile=' + host.identityFile, '-o', 'IdentitiesOnly=yes')
   if (host.identityAgent === 'none') sshArgs.push('-o', 'IdentityAgent=none')
   const agent = host.identityAgent !== undefined && host.identityAgent !== 'none' ? host.identityAgent : undefined
+  // 命令行 -o 压过用户 ~/.ssh/config 里的 IdentityAgent；用 SSH_AUTH_SOCK 关键字让 ssh 自己读环境变量，
+  // 免得把带反斜杠的命名管道塞进 argv —— ssh 解析 -o 时会把反斜杠当转义。
+  if (host.via === 'windows' && agent !== undefined) sshArgs.push('-o', 'IdentityAgent=SSH_AUTH_SOCK')
   sshArgs.push('-p', String(host.port), '-l', host.user, '--', host.sshHost, 'exec /bin/sh')
 
   // Windows 侧：管道名经环境变量交给 ssh.exe；argv 里不出现反斜杠。

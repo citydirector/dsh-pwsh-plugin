@@ -77,19 +77,33 @@ export function rootKey(agent) {
 // volatile 字段在解析后的 config 上是带 get() 的引用，不是值；每次使用时解包才拿到最新的。
 const live = (field) => (field !== null && typeof field === 'object' && typeof field.get === 'function' ? field.get() : field)
 
+// OpenSSH 的 Windows 移植层在 init_prog_paths() 里找不到 ProgramData 就直接 cleanup_exit(255)，
+// 而且这条 fatal 路径连 stderr 都不写。父进程的环境块万一不完整，ssh 会静默死掉，
+// 报错里只剩一个 255 —— 所以这里补一个默认值，不让它因为一个缺失变量就整进程退出。
+function childEnv(override) {
+  const base = { ...process.env }
+  if (!base.ProgramData) base.ProgramData = (base.SystemDrive ?? 'C:') + '\\ProgramData'
+  return override === undefined ? base : { ...base, ...override }
+}
+
 // 导出给真机用例复用：测试要走生产那条 spawn 路径，别再自己拼一份。
 export function transportFor(config) {
   const run = (host) => buildSshArgv(host, { privateKnownHosts: live(config.knownHosts), userKnownHosts: live(config.userKnownHosts) }, { sshPath: live(config.sshPath), wslPath: live(config.wslPath) })
   return (host) => ({
+    // 连接失败时把真正跑的那条命令行出来：agent 走环境变量、argv 里看不到，排障时要看的是这一条。
+    describe() {
+      const { command, args } = run(host)
+      return command + ' ' + args.join(' ')
+    },
     spawnMain() {
       const { command, args, env } = run(host)
-      return spawn(command, args, { stdio: 'pipe', windowsHide: true, ...(env ? { env: { ...process.env, ...env } } : {}) })
+      return spawn(command, args, { stdio: 'pipe', windowsHide: true, env: childEnv(env) })
     },
     runSide(script) {
       return new Promise((resolve) => {
         const { command, args, env } = run(host)
         let child
-        try { child = spawn(command, args, { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true, ...(env ? { env: { ...process.env, ...env } } : {}) }) } catch { resolve({ code: null }); return }
+        try { child = spawn(command, args, { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true, env: childEnv(env) }) } catch { resolve({ code: null }); return }
         const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 15000)
         child.on('error', () => {})
         child.on('exit', (code) => { clearTimeout(timer); resolve({ code }) })

@@ -55,6 +55,8 @@ export class SshSession extends EventEmitter {
     this.jobs = new Map() // 已结束的后台任务，供 ssh_read
     this.nextJob = 1
     this.stderrText = []
+    this.stdoutBytes = 0
+    this.stderrBytes = 0
     this.child = undefined
   }
 
@@ -96,8 +98,8 @@ export class SshSession extends EventEmitter {
     this.stderr = new SentinelSplitter((data) => this.sinkStderr(data))
     this.sinkStdout = () => {} // 探测哨兵之前的输出全丢弃
     this.sinkStderr = (data) => { if (this.state === 'connecting' || this.state === 'probing') this.stderrText.push(data) }
-    child.stdout.on('data', (chunk) => this.stdout.push(chunk))
-    child.stderr.on('data', (chunk) => this.stderr.push(chunk))
+    child.stdout.on('data', (chunk) => { this.stdoutBytes += chunk.length; this.stdout.push(chunk) })
+    child.stderr.on('data', (chunk) => { this.stderrBytes += chunk.length; this.stderr.push(chunk) })
     child.stdin.on('error', () => {})
     child.on('error', (error) => { this.stderrText.push(Buffer.from(String(error.message))); this.onExit(null) })
     child.on('exit', (code) => this.onExit(code))
@@ -110,7 +112,11 @@ export class SshSession extends EventEmitter {
       // 带上这次用的是哪一侧、哪个 agent、哪把钥匙：Permission denied 本身看不出该去哪一侧查。
       let context = ''
       try { context = '\n' + describeCredentials(this.host) } catch {}
-      return new SessionError('probe-failed', (detail ? `${message}\n${detail}` : message) + context)
+      // 退出码与两个流的字节数，是区分「进程没跑起来」和「跑起来被拒」的唯一线索：
+      // ssh 在 ProgramData 缺失这类早期失败里只留一个 255 和两个空流，没有这三项就只能瞎猜。
+      const diag = ['exit=' + (this.exitCode ?? 'none'), 'stdout=' + this.stdoutBytes + 'B', 'stderr=' + this.stderrBytes + 'B']
+      try { const cmd = this.transport?.describe?.(); if (typeof cmd === 'string' && cmd !== '') diag.push('command=' + cmd) } catch {}
+      return new SessionError('probe-failed', (detail ? `${message}\n${detail}` : message) + '\n[' + diag.join(' · ') + ']' + context)
     }
     const probe = this.stdout.expect(`__DSH_PROBE_${nonce} `)
     this.setState('probing')

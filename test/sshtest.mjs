@@ -161,6 +161,14 @@ await test('credentials stay on the via side: identityFile, identityAgent, pipe 
   eq(x.env, { SSH_AUTH_SOCK: '\\\\.\\pipe\\openssh-ssh-agent' })
   assert(!x.args.some((arg) => String(arg).includes('\\')), 'no backslash reaches the ssh argv')
   assert(x.args.includes('IdentityFile=C:/Users/you/.ssh/qq_bot'))
+  // 命令行 -o 必须压过 ~/.ssh/config 里的 IdentityAgent，否则清单写了 agent、实际用的却是别的。
+  assert(x.args.includes('IdentityAgent=SSH_AUTH_SOCK'), 'windows agent is selected through the SSH_AUTH_SOCK keyword')
+  assert(x.args.indexOf('IdentityAgent=SSH_AUTH_SOCK') < x.args.indexOf('--'), 'options come before the host')
+  assert(!w.args.includes('IdentityAgent=SSH_AUTH_SOCK'), 'the keyword belongs to the windows branch only')
+  // 报错时要能看见真正跑的命令行：agent 走环境变量，argv 里没有它，describe() 是唯一线索。
+  const shown = plugin.transportFor({ sshPath: 'ssh', wslPath: 'wsl.exe', knownHosts: '~/.ssh/dsh_known_hosts', userKnownHosts: undefined })(win).describe()
+  assert(shown.startsWith('ssh ') && shown.includes('IdentityAgent=SSH_AUTH_SOCK') && shown.includes('-- 192.0.2.5'), 'describe() shows the real command line')
+  assert(!shown.includes('\\'), 'describe() never prints a backslash')
   // 旧字段 agentSocket 仍然生效，并且与 identityAgent 等价
   const legacy = parseHost({ name: 'l', address: 'u@192.0.2.5', via: 'wsl', agentSocket: '/home/u/a.sock' })
   eq([legacy.identityAgent, legacy.agentSocket], ['/home/u/a.sock', '/home/u/a.sock'])
