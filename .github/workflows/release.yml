@@ -79,9 +79,22 @@ jobs:
       - name: Publish
         run: npm publish --provenance --access public
 
+      # 发布被接受，不等于立刻能在 registry 上查到：npm 的自动审查会让新版本在
+      # Versions 页上挂成 Validating，期间按版本查是 404。这一步只报告，不判定成败 ——
+      # 否则日志里那句 E404 会让人以为发布失败，实际只是还没露头。
       - name: Report what landed
         run: |
           name=$(node -p "require('./package.json').name")
           version=$(node -p "require('./package.json').version")
-          echo "published $name@$version"
-          npm view "$name@$version" dist.tarball dist.integrity --json || true
+          for _ in $(seq 1 10); do
+            if npm view "$name@$version" dist.tarball --json >/dev/null 2>&1; then
+              echo "published $name@$version"
+              npm view "$name@$version" dist.tarball dist.integrity --json
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "::notice title=Registry not updated yet::$name@$version is not visible on the registry."
+          echo "The publish was accepted. npm may still be running its automated review,"
+          echo "in which case the versions page lists the version as Validating."
+          echo "Check https://www.npmjs.com/package/$name?activeTab=versions"
