@@ -109,7 +109,7 @@ $env:DSH_HOME = '<DSH 数据目录>'
 可选模块（`dsh-pwsh-plugin/ssh`，条目 id `ssh`，在 `cordis.patch.yml` 里**默认启用**），给模型提供常驻 SSH shell：`ssh_open`、`ssh_exec`、`ssh_read`、`ssh_kill`、`ssh_list`。主机清单为空时不会连接任何东西，在「设置 → SSH 会话」里填好即可使用。
 
 - 系统 OpenSSH，每会话一条连接，固定安全参数（`BatchMode=yes`、`RemoteCommand=none`、`RequestTTY=no`、`ForwardAgent=no` 等），插件私有 known_hosts 排在用户的之前。每台主机固定走一侧：`via: windows` 或 `via: wsl`（凭据只在那一侧找，可按主机指定 `identityFile`、`identityAgent`）。
-- agent 里的钥匙比服务端允许的尝试次数多时，`ssh_open` 改成一次只报一把，一次最多试 3 把（用生成的 `.pub` 配 `IdentitiesOnly`，私钥始终留在 agent 里）；试通的指纹记在 `stateDir`，不改配置文件，也可在主机清单用 `identityFingerprint` 手配。都不行时把已排除与未试的指纹一起报给模型，请用户挑。
+- agent 里的钥匙比服务端允许的尝试次数多时，`ssh_open` 改成一次只报一把，一次最多试 3 把（用生成的 `.pub` 配 `IdentitiesOnly`，私钥始终留在 agent 里）；试通的指纹记在 `stateDir`，不改配置文件，也可在主机清单用 `identityFingerprint` 手配；`/ssh identities` 查看、`/ssh forget-identity <别名>|all` 清除。都不行时把已排除与未试的指纹一起报给模型，请用户挑。
 - 只能连清单里的主机。审批名单（IP、CIDR、主机名或 `*.example.com`）命中的主机，`ssh_open` 和每条 `ssh_exec` 都要手动批准；`approvalListInvert` 把它反转成放行名单。
 - 变量与 `cd` 跨命令保留。一个会话同一时刻一条命令；后台任务返回 `jobId`，结束时插入一行提示。
 - 空闲 30 分钟、硬上限 24 小时、每主机 4 个、全局 8 个。会话归根 DSH 会话所有。
@@ -161,7 +161,7 @@ pnpm test
 pnpm run test:all
 ```
 
-完整回归目前为 **17 组、385 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。启动测试时请给真实环境：环境块完全为空时 PowerShell 一个原生可执行文件都起不来（绝对路径也不行），`child-utf8-output` 会以空输出失败；只删 `PATH`、`SystemRoot`、`WINDIR` 复现不了，必须整块为空。反过来，手工拼的环境至少要带齐 `PATH`、`SystemRoot`、`SystemDrive`、`WINDIR`、`COMSPEC`、`TEMP`、`PATHEXT`、`USERPROFILE`；少 `PATHEXT` 时 `& cmd` 同样起不来，症状一模一样。那是启动环境的问题，不是插件回归。
+完整回归目前为 **17 组、391 项断言**，需要 Windows、Node.js 24、PowerShell 7、WSL 和可加载的 DSH 运行时。自动发现运行时失败时可设置 `DSH_MODULES` 或 `DSH_MODULES_ASAR`；发布验收不接受跳过。在未套用插件围栏的普通 WSL shell 中运行 `bash wsl/acceptance.sh`。启动测试时请给真实环境：环境块完全为空时 PowerShell 一个原生可执行文件都起不来（绝对路径也不行），`child-utf8-output` 会以空输出失败；只删 `PATH`、`SystemRoot`、`WINDIR` 复现不了，必须整块为空。反过来，手工拼的环境至少要带齐 `PATH`、`SystemRoot`、`SystemDrive`、`WINDIR`、`COMSPEC`、`TEMP`、`PATHEXT`、`USERPROFILE`；少 `PATHEXT` 时 `& cmd` 同样起不来，症状一模一样。那是启动环境的问题，不是插件回归。
 
 发版前先提交改动，再执行：
 
