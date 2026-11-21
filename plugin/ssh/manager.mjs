@@ -209,12 +209,15 @@ export class SshManager {
 
   row(s, now = this.clock.now()) {
     const expiresAt = s.openedAt + this.settings.hardCapHours * 3600000
-    return {
+    const row = {
       ...s.snapshot(),
       idleDeadline: this.settings.idleMinutes > 0 && s.state === 'idle' ? s.lastActivity + this.settings.idleMinutes * MINUTE : undefined,
       expiresAt,
       countdown: s.state !== 'dead' && expiresAt - now <= COUNTDOWN_MS ? formatDuration(expiresAt - now) : undefined,
     }
+    // 快照里 null 表示「没有」的字段会被工具层拒收：PTC 只接受无损 JSON，undefined 不是它认的值。
+    // 在边界上清掉一次，比让每个调用方各自记得清要可靠。
+    return Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined))
   }
 
   /** 所有 DSH 会话的会话，设置页总表用。 */

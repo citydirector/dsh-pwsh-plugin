@@ -785,6 +785,9 @@ await test('plugin wiring: tools, approval gate, read-only, rootKey', async () =
   const listed = await tools.get('ssh_list').execute({}, { agent })
   eq(listed.sessions.length, 1)
   eq(listed.hosts.find((h) => h.name === 'local'), { name: 'local', via: 'windows', user: 'tester' })
+  // 工具返回值必须能无损往返 JSON：宿主只收无损 JSON，列里混进 undefined 会让整个 ssh_list 在调用侧报错。
+  // 这条钉的是「会话还活着时列一次」——快照里 mode / deadReason / jobId 大多没有值。
+  eq(JSON.parse(JSON.stringify(listed)), listed)
   mode = 'workspace-write'
   assert(existsSync(join(work, 'state', 'sessions.json')))
   await tools.get('ssh_kill').execute({ sessionId: 's1' }, { agent })
