@@ -558,6 +558,7 @@ await test('projection registration matches the host contract', async () => {
 })
 
 // ---- 浏览器半侧：SSH 设置分组 -------------------------------------------------
+const hostsSpecFor = (FakeForm) => FakeForm.lastSpecs.find((spec) => spec.field === 'hosts')
 await test('client registers the ssh settings section and row config page', async () => {
   // 宿主不会按 Config 自动出表单，设置页由 client/index.js 自己登记；这里用最小桩检查形状。
   const registered = []
@@ -615,7 +616,48 @@ await test('client registers the ssh settings section and row config page', asyn
     eq(invert.type, 'Switch')
     eq(invert.props.checked, false)
     assert(String(invert.props.label).includes('反转'), invert.props.label)
-    const hostsSpec = FakeForm.lastSpecs.find((spec) => spec.field === 'hosts')
+    // 说明文案跟着开关走：默认关闭时只描述「名单内要审批」，打开后只描述「名单内免审批」
+    const texts = (node, out = []) => {
+      if (typeof node === 'string') out.push(node)
+      else if (Array.isArray(node)) node.forEach((child) => texts(child, out))
+      else if (node !== null && typeof node === 'object') texts(node.children, out)
+      return out
+    }
+    const find = (node, test) => {
+      if (Array.isArray(node)) { for (const child of node) { const hit = find(child, test); if (hit !== undefined) return hit } return undefined }
+      if (node === null || typeof node !== 'object') return undefined
+      if (test(node)) return node
+      return find(node.children, test)
+    }
+    const offText = texts(page).join('\n')
+    assert(offText.includes('关闭：名单是「要审批」的主机') && offText.includes('名单内的主机在 ssh_open 与每条 ssh_exec 时都要人工批准，名单外自动放行'), 'off copy describes the gate')
+    assert(!offText.includes('名单内的主机自动放行') && !offText.includes('关闭时相反'), 'off copy does not describe the inverted mode')
+    const onState = { ...state, fields: { ...state.fields, approvalListInvert: { text: 'true', overridden: true, invalid: false } } }
+    const onPage = section.component({ view: 'page', useSshSettings: (selector) => selector(onState), ...injected })
+    const onText = texts(onPage).join('\n')
+    eq(findSetting(onPage, 'approvalListInvert').props.checked, true)
+    assert(onText.includes('开启：名单是「免审批」的主机') && onText.includes('名单内的主机自动放行，名单外的主机'), 'on copy describes the allow list')
+    assert(!offText.includes('disabled: true'), 'the scope note no longer says the row ships disabled')
+    // 主机清单示例：能被表单解析，也能被服务端整条接受；只在清单为空时可一键填入
+    const example = find(page, (node) => node.props?.['data-ssh-hosts-example'] !== undefined)
+    assert(example !== undefined && example.type === 'details', 'the hosts example is rendered')
+    const [full, short] = texts(example).filter((text) => /^[[{]/.test(text.trim()))
+    const parsedExample = hostsSpecFor(FakeForm).parse(full)
+    eq([parsedExample.kind, parsedExample.value.map((entry) => entry.name)], ['set', ['web', 'db', 'lab']])
+    const served = parseHostList(full)
+    eq([served.hosts.size, served.errors], [3, []], 'the server accepts every example host')
+    eq(hostsSpecFor(FakeForm).parse(short).value.map((entry) => entry.name), ['web', 'db'])
+    assert(!/\b(?!192\.0\.2\.)\d+\.\d+\.\d+\.\d+\b/.test(full) && !/@(?![\w.]*example\.com|192\.0\.2\.)/.test(full), 'the example only uses reserved addresses')
+    const fill = find(example, (node) => node.props?.['data-action'] === 'fill-ssh-hosts-example')
+    eq(fill.props.disabled, true, 'a non-empty host list is not overwritten')
+    const emptyState = { ...state, fields: { ...state.fields, hosts: { text: '[ ]', overridden: false, invalid: false } } }
+    const edits = []
+    const emptyPage = section.component({ view: 'page', useSshSettings: (selector) => selector(emptyState), ...injected, edit: (name, value) => edits.push([name, value]) })
+    const emptyFill = find(emptyPage, (node) => node.props?.['data-action'] === 'fill-ssh-hosts-example')
+    eq(emptyFill.props.disabled, false)
+    emptyFill.props.onClick()
+    eq(edits, [['hosts', full]])
+    const hostsSpec = hostsSpecFor(FakeForm)
     assert(hostsSpec !== undefined, 'the hosts spec exists')
     for (const invalid of ['{}', 'x', '[1]', '{"bad alias":"example.com"}', '{"ok":""}', '{"ok":"a b"}', '[{"name":"ok","address":"example.com","port":70000}]', '[{"name":"ok","address":"example.com","adress":"typo"}]', '{"ok":{"host":"example.com","via":"linux"}}', '{"ok":{"host":"example.com","loadProfile":"yes"}}']) {
       eq(hostsSpec.parse(invalid), undefined, invalid)

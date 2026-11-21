@@ -184,16 +184,34 @@ window.__ModuleLoader__.load({
         enabledHint: '关闭后拒绝新建会话；已经开着的会话进入 draining，跑完当前命令后关闭。',
         idleMinutes: '空闲超时（分钟，0 关闭）', hardCapHours: '硬上限（小时，1–168）', globalMax: '全局会话上限（1–64）',
         limits: '空闲只由 ssh_exec 计时；把限额改小要 5 分钟宽限才生效。',
-        hosts: '主机清单（JSON 数组或别名映射）',
-        hostsHint: '每项 { name, address: "user@host" 或 "host", user?, port?, via?: "windows"|"wsl", wslDistro?, agentSocket?, shell?, encoding?, maxSessions?, loadProfile? }；也可写 { "别名": "user@host" }。省略 user 时用本机登录名。模型只能用 name 点名主机，清单外一律拒绝。',
+        hosts: '主机清单（JSON）',
+        hostsHint: '每台主机一项。name 是模型点名用的别名，address 写 user@host 或 host；省略 user 时用本机登录名。清单外的主机一律拒绝。',
+        hostsExample: '完整示例与字段说明', hostsFill: '填入示例', hostsFillHint: '示例只在清单为空时可以填入，填入后改成你自己的主机再保存。',
+        hostsShort: '只要别名和地址时，可以写成简写：',
+        hostsFields: [
+          ['name', '必填，别名，字母数字开头，可含 . _ -'],
+          ['address', '必填，user@host 或 host；IPv6 写成 [::1]'],
+          ['port', '端口，默认 22'],
+          ['via', '"windows"（默认，用 Windows 的 ssh.exe）或 "wsl"（在 WSL 里跑 ssh）'],
+          ['wslDistro', 'WSL 发行版名，只用于 via: "wsl"'],
+          ['agentSocket', 'WSL 内的 ssh-agent socket 路径，只用于 via: "wsl"'],
+          ['shell', '远端 shell：bash、zsh 或 sh'],
+          ['encoding', '远端输出编码，例如 utf-8、gbk'],
+          ['maxSessions', '这台主机同时开的会话数，1–64，默认 4'],
+          ['hostKeyFingerprint', '主机公钥指纹，SHA256:<base64>'],
+          ['loadProfile', '是否加载登录 profile，默认 false'],
+        ],
         approval: '审批名单（每行一条）',
-        approvalHint: 'IP、CIDR、主机名或 *.example.com，# 之后是注释。命中后 ssh_open 与每条 ssh_exec 都要人工批准；留空则不拦。',
+        approvalRules: 'IP、CIDR、主机名或 *.example.com，# 之后是注释。',
+        approvalGate: '当前：名单内的主机在 ssh_open 与每条 ssh_exec 时都要人工批准，名单外自动放行；留空则全部放行。',
+        approvalAllow: '当前：名单内的主机自动放行，名单外的主机在 ssh_open 与每条 ssh_exec 时都要人工批准；留空则全部要批准。',
         approvalInvert: '反转审批名单',
-        approvalInvertHint: '开启后名单内自动放行，名单外的主机在 ssh_open 与每条 ssh_exec 时都要人工批准；关闭时相反。',
+        approvalInvertOff: '关闭：名单是「要审批」的主机。',
+        approvalInvertOn: '开启：名单是「免审批」的主机。',
         invalid: '格式不对，保存已被拦下。',
         hostsInvalid: '主机清单无效：别名映射不能为空（清空请写 []）；别名不能为空或含空白；地址必须是 host 或 user@host，host 不能为空或含空白；端口 1–65535；via 只能是 windows 或 wsl；不认识的字段会被拒绝。',
         resetAll: '全部恢复默认',
-        scope: '对当前 profile 的全部预设与会话生效。插件管理里的 ssh 行默认 disabled: true，先启用它，这一页才有可写的配置。',
+        scope: '对当前 profile 的全部预设与会话生效。如果插件管理里把 ssh 行停用了，这一页没有可写的配置。',
         form: { unavailable: '配置暂不可用，请确认 ssh 条目已在当前主机启用。', readOnly: '当前部署的配置只读，无法保存修改。', saveFailed: '保存失败，请刷新配置后重试。', save: '保存', saving: '保存中…' },
       },
       en: {
@@ -204,19 +222,44 @@ window.__ModuleLoader__.load({
         enabledHint: 'Turning this off refuses new sessions; open ones drain and close after the running command.',
         idleMinutes: 'Idle timeout (minutes, 0 disables)', hardCapHours: 'Hard cap (hours, 1–168)', globalMax: 'Global session limit (1–64)',
         limits: 'Only ssh_exec counts as activity; shrinking a limit takes effect after a 5 minute grace period.',
-        hosts: 'Hosts (JSON array or alias map)',
-        hostsHint: 'Each entry { name, address: "user@host" or "host", user?, port?, via?: "windows"|"wsl", wslDistro?, agentSocket?, shell?, encoding?, maxSessions?, loadProfile? }; an alias map like { "alias": "user@host" } also works. Without user, the local login name is used. The model may only name a host by name; anything else is refused.',
+        hosts: 'Hosts (JSON)',
+        hostsHint: 'One entry per host. name is the alias the model uses; address is user@host or host, and without a user the local login name is used. Hosts not in the list are refused.',
+        hostsExample: 'Full example and field reference', hostsFill: 'Insert example', hostsFillHint: 'The example can only be inserted into an empty list; replace it with your own hosts before saving.',
+        hostsShort: 'When you only need an alias and an address, the short form works too:',
+        hostsFields: [
+          ['name', 'required alias; starts with a letter or digit, may contain . _ -'],
+          ['address', 'required, user@host or host; write IPv6 as [::1]'],
+          ['port', 'port, default 22'],
+          ['via', '"windows" (default, Windows ssh.exe) or "wsl" (ssh inside WSL)'],
+          ['wslDistro', 'WSL distribution, only with via: "wsl"'],
+          ['agentSocket', 'ssh-agent socket path inside WSL, only with via: "wsl"'],
+          ['shell', 'remote shell: bash, zsh or sh'],
+          ['encoding', 'remote output encoding, e.g. utf-8 or gbk'],
+          ['maxSessions', 'concurrent sessions on this host, 1-64, default 4'],
+          ['hostKeyFingerprint', 'host key fingerprint, SHA256:<base64>'],
+          ['loadProfile', 'load the login profile, default false'],
+        ],
         approval: 'Approval list (one per line)',
-        approvalHint: 'IP, CIDR, host name or *.example.com; # starts a comment. Matching hosts require manual approval for ssh_open and every ssh_exec. Empty means nothing is gated.',
+        approvalRules: 'IP, CIDR, host name or *.example.com; # starts a comment.',
+        approvalGate: 'Now: listed hosts ask for approval on ssh_open and every ssh_exec, other hosts run without asking; an empty list gates nothing.',
+        approvalAllow: 'Now: listed hosts run without asking, every other host asks for approval on ssh_open and every ssh_exec; an empty list gates everything.',
         approvalInvert: 'Invert the approval list',
-        approvalInvertHint: 'When on, listed hosts are allowed automatically and every other host asks for approval on ssh_open and each ssh_exec; when off, the list gates instead.',
+        approvalInvertOff: 'Off: the list names hosts that need approval.',
+        approvalInvertOn: 'On: the list names hosts that skip approval.',
         invalid: 'Not valid, so the save is blocked.',
         hostsInvalid: 'Invalid host list: an alias map may not be empty (write [] to clear); an alias may not be empty or contain whitespace; an address must be host or user@host with a non-empty host and no whitespace; port 1-65535; via is windows or wsl; unknown fields are refused.',
         resetAll: 'Restore all defaults',
-        scope: 'Applies to every preset and session in this profile. The ssh row in plugin management starts disabled, enable it first or this page has nothing writable.',
+        scope: 'Applies to every preset and session in this profile. If the ssh row is disabled in plugin management, this page has nothing writable.',
         form: { unavailable: 'Configuration unavailable. Check that the ssh entry is enabled on this Host.', readOnly: 'Configuration is read-only in this deployment.', saveFailed: 'Not saved. Refresh the configuration and try again.', save: 'Save', saving: 'Saving…' },
       },
     }
+    // 示例只用保留地址（example.com、192.0.2.0/24），能直接通过 parseHostsText 的校验。
+    const SSH_HOSTS_EXAMPLE = JSON.stringify([
+      { name: 'web', address: 'deploy@web.example.com' },
+      { name: 'db', address: 'admin@192.0.2.10', port: 2222, shell: 'bash', maxSessions: 2 },
+      { name: 'lab', address: 'dev@lab.example.com', via: 'wsl', wslDistro: 'Ubuntu', encoding: 'utf-8' },
+    ], null, 2)
+    const SSH_HOSTS_SHORT_EXAMPLE = '{\n  "web": "deploy@web.example.com",\n  "db": "admin@192.0.2.10"\n}'
     const sshSettingsCopy = () => (document.documentElement.lang || navigator.language || 'en').toLowerCase().startsWith('zh') ? SSH_SETTINGS.zh : SSH_SETTINGS.en
     const inputStyle = { padding: '5px 8px', fontSize: 13, boxSizing: 'border-box', color: 'inherit', background: 'transparent', border: '1px solid var(--border, rgba(127,127,127,.4))', borderRadius: 6, fontFamily: 'inherit' }
     function SshSettingsPage(props) {
@@ -225,6 +268,10 @@ window.__ModuleLoader__.load({
       const state = props.useSshSettings((value) => value)
       const disabled = !state.writable || state.saving
       const field = (name) => state.fields[name] ?? { text: '', overridden: false, invalid: false }
+      // 两段说明都跟着开关走（含未保存的修改），默认关闭时不会再出现自相矛盾的文案。
+      const inverted = field('approvalListInvert').text === 'true'
+      const hostsEmpty = ['', '[]', '{}'].includes(field('hosts').text.replace(/\s+/g, ''))
+      const codeStyle = { margin: 0, padding: '6px 8px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12, whiteSpace: 'pre', overflowX: 'auto', border: '1px solid var(--border, rgba(127,127,127,.4))', borderRadius: 6 }
       const number = (name, label) => h('div', { style: style.row },
         h('div', { style: style.field }, h('span', { style: style.label }, label)),
         h('input', { type: 'text', inputMode: 'numeric', value: field(name).text, disabled, spellCheck: false, onChange: (event) => props.edit(name, event.target.value), style: { ...inputStyle, width: 120 } }))
@@ -251,11 +298,21 @@ window.__ModuleLoader__.load({
             h('p', { style: style.note }, t.limits),
             h('h3', { style: style.group }, t.hostsGroup),
             area('hosts', t.hosts, t.hostsHint, 8, t.hostsInvalid),
+            h('details', { style: { ...style.note, display: 'grid', gap: 6 }, 'data-ssh-hosts-example': '' },
+              h('summary', { style: { cursor: 'pointer' } }, t.hostsExample),
+              h('pre', { style: codeStyle }, SSH_HOSTS_EXAMPLE),
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+                h(Button, { variant: 'ghost', size: 'sm', disabled: disabled || !hostsEmpty, 'data-action': 'fill-ssh-hosts-example', onClick: () => props.edit('hosts', SSH_HOSTS_EXAMPLE) }, t.hostsFill),
+                h('span', null, t.hostsFillHint)),
+              h('ul', { style: { margin: 0, paddingLeft: 18 } },
+                ...t.hostsFields.map(([key, text]) => h('li', { key }, h('code', null, key), ' — ', text))),
+              h('span', null, t.hostsShort),
+              h('pre', { style: codeStyle }, SSH_HOSTS_SHORT_EXAMPLE)),
             h('h3', { style: style.group }, t.approvalGroup),
             h('div', { style: style.row },
-              h('div', { style: style.field }, h('span', { style: style.label }, t.approvalInvert), h('p', { style: style.note }, t.approvalInvertHint)),
-              h(Switch, { label: t.approvalInvert, checked: field('approvalListInvert').text === 'true', disabled, 'data-setting': 'approvalListInvert', onChange: (value) => props.edit('approvalListInvert', value ? 'true' : 'false') })),
-            area('approvalList', t.approval, t.approvalHint, 4),
+              h('div', { style: style.field }, h('span', { style: style.label }, t.approvalInvert), h('p', { style: style.note }, inverted ? t.approvalInvertOn : t.approvalInvertOff)),
+              h(Switch, { label: t.approvalInvert, checked: inverted, disabled, 'data-setting': 'approvalListInvert', onChange: (value) => props.edit('approvalListInvert', value ? 'true' : 'false') })),
+            area('approvalList', t.approval, t.approvalRules + ' ' + (inverted ? t.approvalAllow : t.approvalGate), 4),
             h('p', { style: style.note }, t.scope))))
     }
     // hosts 在 Config 里是数组（也接受 JSON 文本）；表单还接受紧凑的别名映射：
