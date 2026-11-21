@@ -379,6 +379,13 @@ await test('whitelist: unknown host lists available hosts', async () => {
   m.dispose()
 })
 
+await test('whitelist: an empty host list says where to add hosts', async () => {
+  const { m } = newManager(new FakeClock())
+  m.configure({ hosts: new Map() })
+  await rejects(m.open('A', { host: 'local' }), /no hosts are configured; add them under Settings/)
+  m.dispose()
+})
+
 await test('ids increase per DSH session and are never reused; ended vs never existed', async () => {
   const { m } = newManager(new FakeClock())
   const a = await m.open('A', { host: 'local' })

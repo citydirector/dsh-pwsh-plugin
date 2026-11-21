@@ -10,7 +10,7 @@
 
 ## 启用
 
-`cordis.patch.yml` 里已经带了 `ssh` 条目，默认 `disabled: true`。验收后把它改成 `false`（或在插件管理里启用），并填写主机清单。
+`cordis.patch.yml` 里已经带了 `ssh` 条目，**默认启用**（`disabled: false`）。装上后在「设置 → SSH 会话」里填写主机清单即可使用；清单为空时 `ssh_open` 只会回一句 `no hosts are configured`，不会连接任何东西。不再需要它时，把这一行改成 `disabled: true`，或关掉「启用 SSH」开关。
 
 ```yaml
 - id: ssh
@@ -49,7 +49,7 @@
 
 不想碰 YAML 也可以：在「设置 → SSH 会话」里填，或在插件管理里点 `ssh` 行的「配置」，两处是同一份表单（见「设置页」）。
 
-表单能不能出现，取决于宿主有没有服务 `ssh` 命名空间。宿主只保留 `Config` 里带 `volatile()` 的字段——`dsh-settings` 的 `volatileForm` 对没有任何 volatile 字段的 schema 返回 `undefined`，`describe` 于是整条丢掉这个条目，页面既不渲染也不报错。本模块除 `stateDir`、`sshPath`、`wslPath` 外都是 volatile（这三项改了要重挂插件），所以行还是 `disabled: true` 时这一行没有配置页，启用之后才出现。
+表单能不能出现，取决于宿主有没有服务 `ssh` 命名空间。宿主只保留 `Config` 里带 `volatile()` 的字段——`dsh-settings` 的 `volatileForm` 对没有任何 volatile 字段的 schema 返回 `undefined`，`describe` 于是整条丢掉这个条目，页面既不渲染也不报错。本模块除 `stateDir`、`sshPath`、`wslPath` 外都是 volatile（这三项改了要重挂插件），所以行被 `disabled: true` 关掉时这一行没有配置页，启用之后才出现。
 
 ## 工具
 

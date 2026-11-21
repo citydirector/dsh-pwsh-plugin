@@ -106,7 +106,7 @@ See the [file-removal guide](docs/file-removal.zh-CN.md) for approval examples, 
 
 ## SSH sessions
 
-An optional module (`dsh-pwsh-plugin/ssh`, entry id `ssh`, shipped **disabled** in `cordis.patch.yml`) gives the model persistent SSH shells: `ssh_open`, `ssh_exec`, `ssh_read`, `ssh_kill`, `ssh_list`.
+An optional module (`dsh-pwsh-plugin/ssh`, entry id `ssh`, **enabled** in `cordis.patch.yml`) gives the model persistent SSH shells: `ssh_open`, `ssh_exec`, `ssh_read`, `ssh_kill`, `ssh_list`. With an empty host list it connects to nothing; add hosts under **Settings → SSH sessions**.
 
 - System OpenSSH, one connection per session, fixed safe options (`BatchMode=yes`, `RemoteCommand=none`, `RequestTTY=no`, `ForwardAgent=no`, …) and a private known_hosts file in front of yours. Each host runs on a fixed side: `via: windows` or `via: wsl` (with an optional `agentSocket`).
 - Only hosts in the list can be reached. An approval list (IP, CIDR, hostname or `*.example.com`) makes `ssh_open` and every `ssh_exec` on matching hosts ask for manual approval; `approvalListInvert` flips it into an allow-list.
@@ -160,7 +160,7 @@ pnpm test
 pnpm run test:all
 ```
 
-The full regression suite currently has **17 scripts / 381 assertions**. It needs Windows, Node.js 24, PowerShell 7, WSL and a loadable DSH runtime. Use `DSH_MODULES` or `DSH_MODULES_ASAR` when automatic runtime discovery is unavailable; release validation must finish without skips. Run `bash wsl/acceptance.sh` from a plain WSL shell, outside the plugin's fence. Launch the suite with a real environment: with an empty environment block PowerShell cannot start any native executable, not even by absolute path, and `child-utf8-output` fails with empty output. Dropping only `PATH`, `SystemRoot` and `WINDIR` does not reproduce it — the whole block has to be empty. Conversely, a hand-built block must carry at least `PATH`, `SystemRoot`, `SystemDrive`, `WINDIR`, `COMSPEC`, `TEMP`, `PATHEXT` and `USERPROFILE`; without `PATHEXT` even `& cmd` fails and the symptom looks the same. That is the launch environment, not a plugin regression.
+The full regression suite currently has **17 scripts / 384 assertions**. It needs Windows, Node.js 24, PowerShell 7, WSL and a loadable DSH runtime. Use `DSH_MODULES` or `DSH_MODULES_ASAR` when automatic runtime discovery is unavailable; release validation must finish without skips. Run `bash wsl/acceptance.sh` from a plain WSL shell, outside the plugin's fence. Launch the suite with a real environment: with an empty environment block PowerShell cannot start any native executable, not even by absolute path, and `child-utf8-output` fails with empty output. Dropping only `PATH`, `SystemRoot` and `WINDIR` does not reproduce it — the whole block has to be empty. Conversely, a hand-built block must carry at least `PATH`, `SystemRoot`, `SystemDrive`, `WINDIR`, `COMSPEC`, `TEMP`, `PATHEXT` and `USERPROFILE`; without `PATHEXT` even `& cmd` fails and the symptom looks the same. That is the launch environment, not a plugin regression.
 
 For a release, commit changes, then run:
 

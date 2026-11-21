@@ -33,10 +33,10 @@
         sshAgentSocket: $HOME/.ssh/wsl2-ssh-agent.sock
 
     # SSH 会话模块（ssh_open / ssh_exec / ssh_read / ssh_kill / ssh_list），见 docs/ssh.zh-CN.md。
-    # 默认关闭：填好主机清单、验收后改成 false 再启用。
+    # 默认启用；主机清单为空时不会连接任何东西，填好清单即可用。
     - id: ssh
       name: dsh-pwsh-plugin/ssh
-      disabled: true
+      disabled: false
       config:
         enabled: true
         hosts: []

@@ -117,7 +117,9 @@ export class SshManager {
   }
 
   hostListText() {
-    return this.hosts.size === 0 ? 'no hosts are configured' : `available hosts: ${[...this.hosts.keys()].join(', ')}`
+    return this.hosts.size === 0
+      ? 'no hosts are configured; add them under Settings -> SSH sessions (the ssh row in plugin management)'
+      : `available hosts: ${[...this.hosts.keys()].join(', ')}`
   }
 
   /** ssh_open 前的审批判断（解析 IP 由调用方给）。 */
