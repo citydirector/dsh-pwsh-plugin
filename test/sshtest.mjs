@@ -695,13 +695,29 @@ await test('client registers the ssh settings section and row config page', asyn
     // 主机清单示例：能被表单解析，也能被服务端整条接受；只在清单为空时可一键填入
     const example = find(page, (node) => node.props?.['data-ssh-hosts-example'] !== undefined)
     assert(example !== undefined && example.type === 'details', 'the hosts example is rendered')
-    const [full, short] = texts(example).filter((text) => /^[[{]/.test(text.trim()))
+    const blocks = texts(example).filter((text) => /^[[{]/.test(text.trim()))
+    const [full, short] = [blocks[0], blocks[blocks.length - 1]]
     const parsedExample = hostsSpecFor(FakeForm).parse(full)
     eq([parsedExample.kind, parsedExample.value.map((entry) => entry.name)], ['set', ['web', 'db', 'lab']])
     const served = parseHostList(full)
     eq([served.hosts.size, served.errors], [3, []], 'the server accepts every example host')
     eq(hostsSpecFor(FakeForm).parse(short).value.map((entry) => entry.name), ['web', 'db'])
     assert(!/\b(?!192\.0\.2\.)\d+\.\d+\.\d+\.\d+\b/.test(full) && !/@(?![\w.]*example\.com|192\.0\.2\.)/.test(full), 'the example only uses reserved addresses')
+    // 认证写法示例：每行都能单独放进数组；Windows 管道在 JSON 里是成对的反斜杠
+    const recipes = find(example, (node) => node.props?.['data-ssh-hosts-recipes'] !== undefined)
+    const recipeText = (id) => texts(find(recipes, (node) => node.props?.['data-recipe'] === id)).join('')
+    eq(recipeText('winAgent'), String.raw`{"name":"win-agent","address":"root@192.0.2.20","identityAgent":"\\\\.\\pipe\\openssh-ssh-agent"}`)
+    for (const id of ['winAgent', 'winKey', 'wslKey', 'wslBridge']) {
+      const text = '[' + recipeText(id) + ']'
+      eq(hostsSpecFor(FakeForm).parse(text).kind, 'set', id)
+      const served = parseHostList(text)
+      eq([served.hosts.size, served.errors], [1, []], id)
+    }
+    eq([...parseHostList('[' + recipeText('winAgent') + ']').hosts.values()][0].identityAgent, String.raw`\\.\pipe\openssh-ssh-agent`)
+    assert(texts(example).join('\n').includes(String.raw`"\\\\.\\pipe\\openssh-ssh-agent"`), 'the escaping note shows the JSON form')
+    // 少写一对反斜杠的两种常见错误都会被拦下
+    eq(hostsSpecFor(FakeForm).parse(String.raw`[{"name":"k","address":"u@h","identityAgent":"\\.\pipe\openssh-ssh-agent"}]`), undefined, 'single backslashes are not valid JSON')
+    eq(hostsSpecFor(FakeForm).parse(String.raw`[{"name":"k","address":"u@h","identityAgent":"\\.\\pipe\\openssh-ssh-agent"}]`), undefined, 'a pipe missing its leading backslash')
     const fill = find(example, (node) => node.props?.['data-action'] === 'fill-ssh-hosts-example')
     eq(fill.props.disabled, true, 'a non-empty host list is not overwritten')
     const emptyState = { ...state, fields: { ...state.fields, hosts: { text: '[ ]', overridden: false, invalid: false } } }

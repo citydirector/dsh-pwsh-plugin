@@ -188,6 +188,14 @@ window.__ModuleLoader__.load({
         hostsHint: '每台主机一项。name 是模型点名用的别名，address 写 user@host 或 host；省略 user 时用本机登录名。清单外的主机一律拒绝。',
         hostsExample: '完整示例与字段说明', hostsFill: '填入示例', hostsFillHint: '示例只在清单为空时可以填入，填入后改成你自己的主机再保存。',
         hostsShort: '只要别名和地址时，可以写成简写：',
+        hostsRecipes: '常见认证写法（每行是一台主机，复制进数组里改地址即可）：',
+        hostsRecipeTitles: {
+          winAgent: 'Windows 的 ssh-agent（不经 WSL 桥）',
+          winKey: 'Windows 只用一把私钥文件，不用 agent',
+          wslKey: 'WSL 只用自己的私钥，不碰 Windows',
+          wslBridge: 'WSL 经 wsl2-ssh-agent 桥用 Windows 的 agent',
+        },
+        hostsEscape: 'JSON 字符串里一个反斜杠要写成两个：管道 \\\\.\\pipe\\openssh-ssh-agent 在清单里写成 "\\\\\\\\.\\\\pipe\\\\openssh-ssh-agent"。文件路径改用正斜杠（C:/Users/you/.ssh/key）就不用转义。',
         hostsFields: [
           ['name', '必填，别名，字母数字开头，可含 . _ -'],
           ['address', '必填，user@host 或 host；IPv6 写成 [::1]'],
@@ -210,7 +218,7 @@ window.__ModuleLoader__.load({
         approvalInvertOff: '关闭：名单是「要审批」的主机。',
         approvalInvertOn: '开启：名单是「免审批」的主机。',
         invalid: '格式不对，保存已被拦下。',
-        hostsInvalid: '主机清单无效：别名映射不能为空（清空请写 []）；别名不能为空或含空白；地址必须是 host 或 user@host，host 不能为空或含空白；端口 1–65535；via 只能是 windows 或 wsl；不认识的字段会被拒绝。',
+        hostsInvalid: '主机清单无效：别名映射不能为空（清空请写 []）；别名不能为空或含空白；地址必须是 host 或 user@host，host 不能为空或含空白；端口 1–65535；via 只能是 windows 或 wsl；JSON 里的反斜杠要成对写（管道是 "\\\\\\\\.\\\\pipe\\\\名字"）；不认识的字段会被拒绝。',
         resetAll: '全部恢复默认',
         scope: '对当前 profile 的全部预设与会话生效。如果插件管理里把 ssh 行停用了，这一页没有可写的配置。',
         form: { unavailable: '配置暂不可用，请确认 ssh 条目已在当前主机启用。', readOnly: '当前部署的配置只读，无法保存修改。', saveFailed: '保存失败，请刷新配置后重试。', save: '保存', saving: '保存中…' },
@@ -227,6 +235,14 @@ window.__ModuleLoader__.load({
         hostsHint: 'One entry per host. name is the alias the model uses; address is user@host or host, and without a user the local login name is used. Hosts not in the list are refused.',
         hostsExample: 'Full example and field reference', hostsFill: 'Insert example', hostsFillHint: 'The example can only be inserted into an empty list; replace it with your own hosts before saving.',
         hostsShort: 'When you only need an alias and an address, the short form works too:',
+        hostsRecipes: 'Common ways to authenticate (each line is one host; copy it into the array and change the address):',
+        hostsRecipeTitles: {
+          winAgent: 'Windows ssh-agent, without the WSL bridge',
+          winKey: 'Windows, one private key file, no agent',
+          wslKey: 'WSL, its own private key, nothing from Windows',
+          wslBridge: 'WSL using the Windows agent through wsl2-ssh-agent',
+        },
+        hostsEscape: 'In a JSON string every backslash is written twice: the pipe \\\\.\\pipe\\openssh-ssh-agent becomes "\\\\\\\\.\\\\pipe\\\\openssh-ssh-agent" in the list. Write file paths with forward slashes (C:/Users/you/.ssh/key) and nothing needs escaping.',
         hostsFields: [
           ['name', 'required alias; starts with a letter or digit, may contain . _ -'],
           ['address', 'required, user@host or host; write IPv6 as [::1]'],
@@ -249,7 +265,7 @@ window.__ModuleLoader__.load({
         approvalInvertOff: 'Off: the list names hosts that need approval.',
         approvalInvertOn: 'On: the list names hosts that skip approval.',
         invalid: 'Not valid, so the save is blocked.',
-        hostsInvalid: 'Invalid host list: an alias map may not be empty (write [] to clear); an alias may not be empty or contain whitespace; an address must be host or user@host with a non-empty host and no whitespace; port 1-65535; via is windows or wsl; unknown fields are refused.',
+        hostsInvalid: 'Invalid host list: an alias map may not be empty (write [] to clear); an alias may not be empty or contain whitespace; an address must be host or user@host with a non-empty host and no whitespace; port 1-65535; via is windows or wsl; backslashes in JSON come in pairs (a pipe is "\\\\\\\\.\\\\pipe\\\\name"); unknown fields are refused.',
         resetAll: 'Restore all defaults',
         scope: 'Applies to every preset and session in this profile. If the ssh row is disabled in plugin management, this page has nothing writable.',
         form: { unavailable: 'Configuration unavailable. Check that the ssh entry is enabled on this Host.', readOnly: 'Configuration is read-only in this deployment.', saveFailed: 'Not saved. Refresh the configuration and try again.', save: 'Save', saving: 'Saving…' },
@@ -261,6 +277,14 @@ window.__ModuleLoader__.load({
       { name: 'db', address: 'admin@192.0.2.10', port: 2222, identityFile: 'C:/Users/you/.ssh/db_ed25519', shell: 'bash', maxSessions: 2 },
       { name: 'lab', address: 'dev@lab.example.com', via: 'wsl', wslDistro: 'Ubuntu', identityFile: '~/.ssh/lab_ed25519', identityAgent: 'none', encoding: 'utf-8' },
     ], null, 2)
+    // 每种认证方式一行。字符串里的 '\\\\.\\pipe\\…' 是 JS 转义，值本身是 \\.\pipe\…；JSON.stringify 会再成对写出来，
+    // 正好就是用户要粘进清单的样子。
+    const SSH_HOSTS_RECIPES = [
+      ['winAgent', { name: 'win-agent', address: 'root@192.0.2.20', identityAgent: '\\\\.\\pipe\\openssh-ssh-agent' }],
+      ['winKey', { name: 'win-key', address: 'root@192.0.2.21', identityFile: 'C:/Users/you/.ssh/id_ed25519', identityAgent: 'none' }],
+      ['wslKey', { name: 'wsl-key', address: 'root@192.0.2.22', via: 'wsl', identityFile: '~/.ssh/id_ed25519', identityAgent: 'none' }],
+      ['wslBridge', { name: 'wsl-bridge', address: 'root@192.0.2.23', via: 'wsl', identityAgent: '/home/you/.ssh/wsl2-ssh-agent.sock' }],
+    ].map(([id, entry]) => [id, JSON.stringify(entry)])
     const SSH_HOSTS_SHORT_EXAMPLE = '{\n  "web": "deploy@web.example.com",\n  "db": "admin@192.0.2.10"\n}'
     const sshSettingsCopy = () => (document.documentElement.lang || navigator.language || 'en').toLowerCase().startsWith('zh') ? SSH_SETTINGS.zh : SSH_SETTINGS.en
     const inputStyle = { padding: '5px 8px', fontSize: 13, boxSizing: 'border-box', color: 'inherit', background: 'transparent', border: '1px solid var(--border, rgba(127,127,127,.4))', borderRadius: 6, fontFamily: 'inherit' }
@@ -308,6 +332,12 @@ window.__ModuleLoader__.load({
                 h('span', null, t.hostsFillHint)),
               h('ul', { style: { margin: 0, paddingLeft: 18 } },
                 ...t.hostsFields.map(([key, text]) => h('li', { key }, h('code', null, key), ' — ', text))),
+              h('span', null, t.hostsRecipes),
+              h('div', { style: { display: 'grid', gap: 4 }, 'data-ssh-hosts-recipes': '' },
+                ...SSH_HOSTS_RECIPES.map(([id, text]) => h('div', { key: id, style: { display: 'grid', gap: 2 } },
+                  h('span', null, t.hostsRecipeTitles[id]),
+                  h('pre', { style: codeStyle, 'data-recipe': id }, text)))),
+              h('span', null, t.hostsEscape),
               h('span', null, t.hostsShort),
               h('pre', { style: codeStyle }, SSH_HOSTS_SHORT_EXAMPLE)),
             h('h3', { style: style.group }, t.approvalGroup),

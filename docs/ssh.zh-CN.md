@@ -85,6 +85,27 @@
 
 `hosts` 接受数组，也接受 `{ 别名: "user@host" | "host" | { address, user?, port? } }` 形式的别名映射；空数组表示清空，空映射无效。清单外的主机一律拒绝，错误里列出可用主机。未知字段、非法值的条目会被丢弃，其余主机照常可用，错误在 `ssh_list` 的 `configErrors` 里列出。
 
+### 认证写法
+
+凭据只在 `via` 那一侧找。下面每行是一台主机，在设置页里放进 JSON 数组即可：
+
+| 场景 | 写法 |
+| --- | --- |
+| Windows 的 ssh-agent（不经 WSL 桥） | `{ "name": "win-agent", "address": "root@192.0.2.20", "identityAgent": "\\\\.\\pipe\\openssh-ssh-agent" }` |
+| Windows 只用一把私钥文件，不用 agent | `{ "name": "win-key", "address": "root@192.0.2.21", "identityFile": "C:/Users/you/.ssh/id_ed25519", "identityAgent": "none" }` |
+| WSL 只用自己的私钥，不碰 Windows | `{ "name": "wsl-key", "address": "root@192.0.2.22", "via": "wsl", "identityFile": "~/.ssh/id_ed25519", "identityAgent": "none" }` |
+| WSL 经 wsl2-ssh-agent 桥用 Windows 的 agent | `{ "name": "wsl-bridge", "address": "root@192.0.2.23", "via": "wsl", "identityAgent": "/home/you/.ssh/wsl2-ssh-agent.sock" }` |
+
+反斜杠的写法取决于你写在哪里。管道名本身是 `\\.\pipe\openssh-ssh-agent`：
+
+| 写在哪 | 写法 |
+| --- | --- |
+| 设置页（JSON） | `"\\\\.\\pipe\\openssh-ssh-agent"`，每个反斜杠写两遍 |
+| `cordis.yml`，YAML 单引号 | `'\\.\pipe\openssh-ssh-agent'`，原样写 |
+| `cordis.yml`，YAML 双引号 | `"\\\\.\\pipe\\openssh-ssh-agent"`，和 JSON 一样 |
+
+常见错误：在 JSON 里写成单个反斜杠（`"\\.\pipe\…"`，这本身就不是合法 JSON），或者只写了 `"\\.\\pipe\\…"`（解析出来少一个开头的反斜杠）。这两种情况设置页都会拦下，不让保存。文件路径一律用正斜杠，就不用转义。
+
 ## 审批名单
 
 `approvalList` 每行一条：IP、CIDR（IPv4/IPv6）、主机名（精确匹配）或 `*.example.com`（匹配子域）。`#` 之后是注释。
