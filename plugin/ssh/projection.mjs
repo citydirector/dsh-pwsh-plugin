@@ -1,5 +1,6 @@
 // SSH 标签页的会话投影：完全由会话事件折叠出来（宿主投影没有直接推送接口）。
-// 来源：ssh_* 的 tool/call 与 tool/result，以及本模块注入的 [ssh] 通知（user/message, source.kind = ssh）。
+// 来源：ssh_* 的 tool/call 与 tool/result、代码模式下等价的 ptc-dispatch 事件（见 asSessionEvent），
+// 以及本模块注入的 [ssh] 通知（user/message, source.kind = ssh）。
 // 倒计时不进状态，客户端按 expiresAt / idleDeadline 自己算，免得每秒产生事件。
 
 export const PROJECTION_KEY = 'sshSessions'
@@ -23,7 +24,15 @@ function resultText(message) {
   const parts = []
   for (const block of blocks) {
     if (block.type === 'text') parts.push(block.text)
-    else if (block.type === 'tool-result') for (const inner of block.content ?? block.output ?? []) if (inner?.type === 'text') parts.push(inner.text)
+    else if (block.type === 'tool-result') {
+      // output 可能是 { type, value } 对象而不是数组；对象不能 for...of。
+      const inner = block.content ?? block.output
+      const list = Array.isArray(inner) ? inner : Array.isArray(inner?.value) ? inner.value : inner !== undefined ? [inner] : []
+      for (const item of list) {
+        if (item?.type === 'text' && typeof item.text === 'string') parts.push(item.text)
+        else if (item?.type === 'text' && typeof item.value === 'string') parts.push(item.value)
+      }
+    }
   }
   return parts.join('\n')
 }
@@ -32,9 +41,24 @@ function parseJson(text) {
   try { const value = JSON.parse(text); return plainObject(value) ? value : undefined } catch { return undefined }
 }
 
+// 状态会被宿主 structuredClone 后写进持久化投影缓存（契约要求是纯 JSON）。
+// undefined、NaN、Infinity 不是 JSON：值为 undefined 的键直接去掉（等于清空该字段），
+// 不是有限数的数字也去掉。只收字符串、有限数、布尔、null。
+function jsonFields(fields) {
+  const out = {}
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined) continue
+    if (typeof value === 'number' && !Number.isFinite(value)) continue
+    if (value !== null && typeof value === 'object') continue
+    if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') continue
+    out[key] = value
+  }
+  return out
+}
+
 function setRow(state, id, patch, at) {
   const prev = state.rows[id] ?? { sessionId: id }
-  const rows = { ...state.rows, [id]: { ...prev, ...patch, updatedAt: at ?? prev.updatedAt } }
+  const rows = { ...state.rows, [id]: jsonFields({ ...prev, ...patch, updatedAt: at ?? prev.updatedAt }) }
   const ids = Object.keys(rows)
   if (ids.length > MAX_ROWS) {
     const dead = ids.filter((key) => rows[key].state === 'dead').slice(0, ids.length - MAX_ROWS)
@@ -43,21 +67,62 @@ function setRow(state, id, patch, at) {
   return { ...state, rows }
 }
 
+// 会话编号只在一个宿主进程内递增：DSH 重启后同一对话里又会从 s1 开始。
+// 新的 ssh_open 拿到一个已有行的编号时，旧行改挂到 `<id>~<n>` 下留作历史，
+// 显示用的 sessionId 不变；后续按编号的 exec/kill/通知只落在最新那一行。
+function retireRow(state, id) {
+  const prev = state.rows[id]
+  if (prev === undefined) return state
+  let n = 1
+  while (state.rows[`${id}~${n}`] !== undefined) n++
+  const rows = { ...state.rows }
+  delete rows[id]
+  rows[`${id}~${n}`] = prev.state === 'dead' ? prev : jsonFields({ ...prev, state: 'dead', mode: undefined, jobId: undefined, deadReason: 'replaced' })
+  return { ...state, rows }
+}
+
 /** 纯函数：一条事件折进状态。不关心的事件原样返回同一引用。 */
+/**
+ * 代码模式（PTC）把 `run_code` 里的子调用记成另一对事件：`tool/ptc-dispatch-start`
+ * 与 `tool/ptc-dispatch`。只认 `tool/call` / `tool/result` 的话，脚本里调的 ssh_*
+ * 一条也进不来 —— 标签页会一直停在「本会话还没有 SSH 会话」。
+ * 这里把两条事件改写成已有形状，折叠逻辑不必知道消息有两个来源。
+ */
+function asSessionEvent(event) {
+  if (event.type === 'tool/ptc-dispatch-start') {
+    const data = event.data ?? {}
+    return { ...event, type: 'tool/call', data: { name: data.name, callId: data.subCallId, arguments: data.arguments } }
+  }
+  if (event.type === 'tool/ptc-dispatch') {
+    const data = event.data ?? {}
+    if (typeof data.subCallId !== 'string') return event
+    const content = Array.isArray(data.content) ? data.content : []
+    return { ...event, type: 'tool/result', data: { message: { source: { kind: 'tool', callId: data.subCallId }, isError: data.isError === true, content } } }
+  }
+  return event
+}
+
+// 宿主在快照、恢复、推送里同步调用 apply；这里抛错会拖垮整条会话的投影读取
+// （会话打不开、列表里退化）。投影只是给标签页看的，宁可漏一条也不能抛。
 export function applyEvent(state, event) {
-  const at = typeof event.time === 'number' ? event.time : typeof event.at === 'number' ? event.at : undefined
-  if (event.type === 'tool/call') {
-    const { name, callId, arguments: args } = event.data ?? {}
+  try { return applyEventUnsafe(state, event) } catch { return state }
+}
+
+function applyEventUnsafe(state, event) {
+  const normalized = asSessionEvent(event)
+  const at = typeof normalized.time === 'number' ? normalized.time : typeof normalized.at === 'number' ? normalized.at : undefined
+  if (normalized.type === 'tool/call') {
+    const { name, callId, arguments: args } = normalized.data ?? {}
     if (!TOOLS.has(name) || typeof callId !== 'string') return state
     const parsed = typeof args === 'string' ? parseJson(args) : plainObject(args) ? args : undefined
-    let next = { ...state, calls: { ...state.calls, [callId]: { name, sessionId: parsed?.sessionId, background: parsed?.background === true } } }
+    let next = { ...state, calls: { ...state.calls, [callId]: jsonFields({ name, sessionId: typeof parsed?.sessionId === 'string' ? parsed.sessionId : undefined, background: parsed?.background === true }) } }
     if (name === 'ssh_exec' && typeof parsed?.sessionId === 'string' && next.rows[parsed.sessionId] !== undefined && next.rows[parsed.sessionId].state !== 'dead') {
       next = setRow(next, parsed.sessionId, { state: 'running', mode: parsed.background === true ? 'bg' : 'fg', lastActivity: at }, at)
     }
     return next
   }
-  if (event.type === 'tool/result') {
-    const message = event.data?.message
+  if (normalized.type === 'tool/result') {
+    const message = normalized.data?.message
     const callId = resultCallId(message)
     const call = callId === undefined ? undefined : state.calls[callId]
     if (call === undefined) return state
@@ -67,6 +132,7 @@ export function applyEvent(state, event) {
     const value = parseJson(resultText(message))
     const failed = message?.isError === true || value === undefined
     if (call.name === 'ssh_open' && !failed && typeof value.sessionId === 'string') {
+      next = retireRow(next, value.sessionId)
       next = setRow(next, value.sessionId, { host: value.host, state: 'idle', cwd: value.cwd, shell: value.shell, os: value.os, expiresAt: value.expiresAt, idleMinutes: value.idleMinutes, openedAt: at, lastActivity: at, deadReason: undefined, mode: undefined }, at)
     } else if (call.name === 'ssh_exec' && typeof call.sessionId === 'string' && next.rows[call.sessionId] !== undefined) {
       const row = next.rows[call.sessionId]
@@ -78,6 +144,12 @@ export function applyEvent(state, event) {
     } else if (call.name === 'ssh_kill' && typeof call.sessionId === 'string' && !failed) {
       next = setRow(next, call.sessionId, { state: 'dead', deadReason: value.reason ?? 'killed', mode: undefined }, at)
     } else if (call.name === 'ssh_list' && !failed && Array.isArray(value.sessions)) {
+      // ssh_list 列出的是本对话当前全部活会话：表里还算活、但不在列表里的行，
+      // 是宿主重启或别处结束后没留下通知的，标成已结束，免得一直挂着「空闲 0s」。
+      const listed = new Set(value.sessions.map((s) => s?.sessionId))
+      for (const [rowId, row] of Object.entries(next.rows)) {
+        if (row.state !== 'dead' && !listed.has(rowId)) next = setRow(next, rowId, { state: 'dead', mode: undefined, jobId: undefined, deadReason: 'gone' }, at)
+      }
       for (const s of value.sessions) {
         if (typeof s?.sessionId !== 'string') continue
         next = setRow(next, s.sessionId, { host: s.host, state: s.state, mode: s.mode, cwd: s.cwd, deadReason: s.deadReason, expiresAt: s.expiresAt, lastActivity: s.lastActivity }, at)
@@ -85,8 +157,8 @@ export function applyEvent(state, event) {
     }
     return next
   }
-  if (event.type === 'user/message' && event.data?.source?.kind === 'ssh') {
-    const text = (event.data.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n')
+  if (normalized.type === 'user/message' && normalized.data?.source?.kind === 'ssh') {
+    const text = (normalized.data.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n')
     let next = state
     for (const line of text.split('\n')) {
       const m = /^\[ssh\] (\S+) · (s\d+) (后台任务 (j\d+) 已结束|会话已结束：([^，。]+))/.exec(line)
@@ -105,7 +177,10 @@ const viewCache = new WeakMap()
 export function view(state) {
   const cached = viewCache.get(state)
   if (cached !== undefined) return cached
-  const rows = Object.values(state.rows).sort((a, b) => Number(a.sessionId.slice(1)) - Number(b.sessionId.slice(1)))
+  // rowId 是行的唯一键（客户端拿它做 React key）；按打开时间排，缺时间的按编号。
+  const rows = Object.entries(state.rows)
+    .map(([rowId, row]) => ({ ...row, rowId }))
+    .sort((a, b) => (a.openedAt ?? 0) - (b.openedAt ?? 0) || Number(a.sessionId.slice(1)) - Number(b.sessionId.slice(1)) || (a.rowId < b.rowId ? -1 : 1))
   const value = { rows }
   viewCache.set(state, value)
   return value
@@ -115,22 +190,43 @@ export function projectionDefinition() {
   return {
     key: PROJECTION_KEY,
     stateSchema,
-    stateVersion: 1,
+    // 2：折叠开始认代码模式的 ptc-dispatch 事件。按宿主契约，语义变了就要换版本，
+    // 否则持久化缓存里 v1 的空检查点会被继续采用，老会话恢复出来仍是空表。
+    stateVersion: 2,
     init: () => initState(),
     apply: (state, event) => applyEvent(state, event),
     wire: { viewSchema, view },
   }
 }
 
+// 注册结果留一份可查的记录：投影没挂上时标签页只会空着，没有别的症状。
+export const registration = { attempted: false, registered: false, error: null }
+
 export function registerProjection(ctx, { onError } = {}) {
+  registration.attempted = true
   // register() 本身随 ctx 的生命周期撤销，热替换不会留下重复注册。
-  // 宿主契约要求在消费投影前等注册完成，这里把 Promise 交回去；但 plugin/index.mjs 的
-  // ctx.inject 回调忽略返回值，未处理的拒绝会拖垮整个宿主进程，所以默认在这里收尾。
-  const pending = Promise.resolve(ctx.sessionProjections.register(projectionDefinition()))
-  return pending.catch((error) => {
+  // 它返回的是可 await 的 dispose（thenable），解析值是 ProjectionHandle。
+  // 同步抛错也收进 Promise，免得在 inject 回调里直接炸掉。
+  const pending = Promise.resolve().then(() => ctx.sessionProjections.register(projectionDefinition()))
+  return pending.then((handle) => {
+    registration.registered = true
+    registration.error = null
+    return handle
+  }, (error) => {
+    registration.registered = false
+    registration.error = String(error?.message ?? error)
     if (typeof onError === 'function') return onError(error)
-    // 注册失败不会抛给调用方（见上），所以这里必须留下能查的痕迹：Tab 会一直空着。
-    try { ctx.logger?.warn?.('ssh projection registration failed; the sessions tab will stay empty: ' + String(error?.message ?? error)) } catch {}
+    try { ctx.logger?.warn?.('ssh projection registration failed; the sessions tab will stay empty: ' + registration.error) } catch {}
     return undefined
   })
+}
+
+/**
+ * 给 ctx.inject 用的回调。必须解析成 undefined：cordis 把插件体（inject 回调就是一个插件体）
+ * 的返回值当 effect 收集，Promise 解析出的值只能是函数或空值。把 ProjectionHandle 这个对象
+ * 交回去会抛 TypeError('Invalid effect')，子 fiber 进入失败态并被卸载，注册随之释放：
+ * 宿主快照与推送里就再也没有 sshSessions，标签页一直是「还没有 SSH 会话」。
+ */
+export async function mountProjection(child) {
+  await registerProjection(child)
 }
