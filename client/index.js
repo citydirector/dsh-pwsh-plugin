@@ -479,7 +479,9 @@ window.__ModuleLoader__.load({
           // 命名空间由宿主按「行 id」服务：行没启用时这里不登记，页面上也就没有可写的配置。
           dispose = ctx.configForms.whileServed([SSH_NS], () => {
             const section = ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'ssh', order: 44, label: sshSettingsCopy().title, inject }, SshSettingsPage))
-            const rowKey = (ctx.pkg?.name ?? SSH_PACKAGE) + '#' + SSH_NS
+            // 不碰 ctx.pkg：热装时页面上的 ctx 是 cordis 的追踪代理，没声明 inject 的属性一读就抛
+            // "cannot get property pkg without inject"，整个客户端插件同步失败。包名本来就是固定的。
+            const rowKey = SSH_PACKAGE + '#' + SSH_NS
             const row = ctx.slots.inject('plugins.row.config', () => ctx.slots.register({ name: 'plugins.row.config', key: rowKey, inject }, SshSettingsPage))
             return () => { row(); section() }
           })
