@@ -11,7 +11,7 @@ import { SentinelSplitter, commandScript } from '../plugin/ssh/framing.mjs'
 import { decodeOutput, foldCarriageReturns, OutputBuffer, renderSnapshot } from '../plugin/ssh/output.mjs'
 import { SshSession } from '../plugin/ssh/session.mjs'
 import { SshManager } from '../plugin/ssh/manager.mjs'
-import { applyEvent, initState, view, registerProjection } from '../plugin/ssh/projection.mjs'
+import { applyEvent, initState, view, registerProjection, registration } from '../plugin/ssh/projection.mjs'
 import * as plugin from '../plugin/ssh/index.mjs'
 
 if (process.platform === 'win32') {
@@ -626,6 +626,7 @@ await test('projection registration matches the host contract', async () => {
   const pending = registerProjection(ctx)
   assert(typeof pending?.then === 'function', 'registerProjection hands back a promise a caller may await')
   assert(await pending === handle, 'the registration handle is passed through')
+  eq([registration.attempted, registration.registered, registration.error], [true, true, null])
   eq([definition.key, definition.stateVersion], ['sshSessions', 1])
   // 宿主运行时只调 .parse：状态与视图都要过得了这两个 schema
   const state = definition.stateSchema.parse(definition.init())
@@ -633,6 +634,8 @@ await test('projection registration matches the host contract', async () => {
   definition.wire.viewSchema.parse(definition.wire.view(next))
   // plugin/index.mjs 不 await 这个 Promise：拒绝必须被收在这里，不能变成未处理的拒绝
   eq(await registerProjection({ sessionProjections: { register: () => Promise.reject(new Error('boom')) } }), undefined)
+  // 失败必须留痕：标签页空着时，ssh_list 是唯一能看到原因的地方。
+  eq([registration.attempted, registration.registered, registration.error], [true, false, 'boom']) 
 })
 
 // ---- 浏览器半侧：SSH 设置分组 -------------------------------------------------
