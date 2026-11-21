@@ -1,6 +1,5 @@
 // SSH 标签页的会话投影：完全由会话事件折叠出来（宿主投影没有直接推送接口）。
-// 来源：ssh_* 的 tool/call 与 tool/result、代码模式下等价的 ptc-dispatch 事件（见 asSessionEvent），
-// 以及本模块注入的 [ssh] 通知（user/message, source.kind = ssh）。
+// 来源：ssh_* 的 tool/call 与 tool/result，以及本模块注入的 [ssh] 通知（user/message, source.kind = ssh）。
 // 倒计时不进状态，客户端按 expiresAt / idleDeadline 自己算，免得每秒产生事件。
 
 export const PROJECTION_KEY = 'sshSessions'
@@ -45,31 +44,10 @@ function setRow(state, id, patch, at) {
 }
 
 /** 纯函数：一条事件折进状态。不关心的事件原样返回同一引用。 */
-/**
- * 代码模式（PTC）把 `run_code` 里的子调用记成另一对事件：`tool/ptc-dispatch-start`
- * 与 `tool/ptc-dispatch`。只认 `tool/call` / `tool/result` 的话，脚本里调的 ssh_*
- * 一条也进不来 —— 标签页会一直停在「本会话还没有 SSH 会话」。
- * 这里把两条事件改写成已有形状，折叠逻辑不必知道消息有两个来源。
- */
-function asSessionEvent(event) {
-  if (event.type === 'tool/ptc-dispatch-start') {
-    const data = event.data ?? {}
-    return { ...event, type: 'tool/call', data: { name: data.name, callId: data.subCallId, arguments: data.arguments } }
-  }
-  if (event.type === 'tool/ptc-dispatch') {
-    const data = event.data ?? {}
-    if (typeof data.subCallId !== 'string') return event
-    const content = Array.isArray(data.content) ? data.content : []
-    return { ...event, type: 'tool/result', data: { message: { source: { kind: 'tool', callId: data.subCallId }, isError: data.isError === true, content } } }
-  }
-  return event
-}
-
 export function applyEvent(state, event) {
-  const normalized = asSessionEvent(event)
-  const at = typeof normalized.time === 'number' ? normalized.time : typeof normalized.at === 'number' ? normalized.at : undefined
-  if (normalized.type === 'tool/call') {
-    const { name, callId, arguments: args } = normalized.data ?? {}
+  const at = typeof event.time === 'number' ? event.time : typeof event.at === 'number' ? event.at : undefined
+  if (event.type === 'tool/call') {
+    const { name, callId, arguments: args } = event.data ?? {}
     if (!TOOLS.has(name) || typeof callId !== 'string') return state
     const parsed = typeof args === 'string' ? parseJson(args) : plainObject(args) ? args : undefined
     let next = { ...state, calls: { ...state.calls, [callId]: { name, sessionId: parsed?.sessionId, background: parsed?.background === true } } }
@@ -78,8 +56,8 @@ export function applyEvent(state, event) {
     }
     return next
   }
-  if (normalized.type === 'tool/result') {
-    const message = normalized.data?.message
+  if (event.type === 'tool/result') {
+    const message = event.data?.message
     const callId = resultCallId(message)
     const call = callId === undefined ? undefined : state.calls[callId]
     if (call === undefined) return state
@@ -107,8 +85,8 @@ export function applyEvent(state, event) {
     }
     return next
   }
-  if (normalized.type === 'user/message' && normalized.data?.source?.kind === 'ssh') {
-    const text = (normalized.data.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n')
+  if (event.type === 'user/message' && event.data?.source?.kind === 'ssh') {
+    const text = (event.data.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n')
     let next = state
     for (const line of text.split('\n')) {
       const m = /^\[ssh\] (\S+) · (s\d+) (后台任务 (j\d+) 已结束|会话已结束：([^，。]+))/.exec(line)
