@@ -16,6 +16,7 @@ const HOSTNAME_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?
 const SHELLS = new Set(['bash', 'zsh', 'sh'])
 const ENCODING_RE = /^[A-Za-z0-9_-]{1,32}$/
 const FINGERPRINT_RE = /^SHA256:[A-Za-z0-9+/]{43}=?$/
+const IDENTITY_FINGERPRINT_RE = /^SHA256:[A-Za-z0-9+/]{43}$/
 const DISTRO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const UNSAFE_PATH_RE = /[\s"'`\\\x00-\x1f\x7f]/
 // Windows 侧的 agent 是命名管道。走 SSH_AUTH_SOCK 环境变量传给 ssh.exe，不进 -o（ssh 的选项解析会吃掉反斜杠）。
@@ -79,7 +80,7 @@ function optionalPath(value, name) {
   return value
 }
 
-const KNOWN_KEYS = new Set(['name', 'address', 'host', 'port', 'user', 'via', 'wslDistro', 'agentSocket', 'identityAgent', 'identityFile', 'shell', 'encoding', 'maxSessions', 'hostKeyFingerprint', 'loadProfile'])
+const KNOWN_KEYS = new Set(['name', 'address', 'host', 'port', 'user', 'via', 'wslDistro', 'agentSocket', 'identityAgent', 'identityFile', 'shell', 'encoding', 'maxSessions', 'hostKeyFingerprint', 'identityFingerprint', 'loadProfile'])
 
 /** 一台主机的条目。错误信息带上主机名，方便用户在设置页定位。 */
 export function parseHost(entry, index = 0) {
@@ -126,6 +127,14 @@ export function parseHost(entry, index = 0) {
       if (agentSocket !== undefined && agentSocket !== identityAgent) throw new Error('agentSocket and identityAgent disagree; keep only identityAgent')
     } else identityAgent = agentSocket
     const identityFile = optionalPath(entry.identityFile, 'identityFile')
+    // 登录钥匙的指纹（ssh-keygen -lf 的写法），从 agent 里只挑这一把；和 hostKeyFingerprint（服务端主机公钥）不是一回事。
+    let identityFingerprint
+    if (entry.identityFingerprint !== undefined && entry.identityFingerprint !== null && entry.identityFingerprint !== '') {
+      if (typeof entry.identityFingerprint !== 'string' || !IDENTITY_FINGERPRINT_RE.test(entry.identityFingerprint)) throw new Error('identityFingerprint must look like SHA256:<43 base64 characters>, as ssh-keygen -lf prints it')
+      if (identityFile !== undefined) throw new Error('identityFile and identityFingerprint both pick the key; keep one')
+      if (identityAgent === 'none') throw new Error('identityFingerprint picks a key from the agent; it cannot be used with identityAgent: "none"')
+      identityFingerprint = entry.identityFingerprint
+    }
     let shell
     if (entry.shell !== undefined) {
       if (!SHELLS.has(entry.shell)) throw new Error('shell must be bash, zsh or sh')
@@ -158,6 +167,7 @@ export function parseHost(entry, index = 0) {
       // 旧字段名保留在结构上，免得外部代码读 agentSocket 时拿到 undefined
       agentSocket: identityAgent === 'none' || via !== 'wsl' ? undefined : identityAgent,
       identityFile,
+      identityFingerprint,
       shell,
       encoding,
       maxSessions: integer(entry.maxSessions, 'maxSessions', 1, 64, HOST_DEFAULTS.maxSessions),

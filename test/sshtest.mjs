@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import net from 'node:net'
+import { createHash, randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { parseHost, parseHostList, parseApprovalList, approvalFor } from '../plugin/ssh/hosts.mjs'
 import { buildSshArgv, describeCredentials } from '../plugin/ssh/argv.mjs'
@@ -11,7 +12,7 @@ import { SentinelSplitter, commandScript } from '../plugin/ssh/framing.mjs'
 import { decodeOutput, foldCarriageReturns, OutputBuffer, renderSnapshot } from '../plugin/ssh/output.mjs'
 import { SshSession } from '../plugin/ssh/session.mjs'
 import { SshManager } from '../plugin/ssh/manager.mjs'
-import { parseAgentKeys, findWorkingIdentity } from '../plugin/ssh/identities.mjs'
+import { parseAgentKeys, agentKeyList, keyFingerprint, IdentityStore, PROBE_LIMIT } from '../plugin/ssh/identities.mjs'
 import { applyEvent, initState, view, registerProjection, mountProjection, registration } from '../plugin/ssh/projection.mjs'
 import * as plugin from '../plugin/ssh/index.mjs'
 
@@ -1079,56 +1080,133 @@ await test('agent key listing drops anything that is not a public key', () => {
   eq(parseAgentKeys('').length, 0)
 })
 
-await test('keys are offered one at a time until one gets through', async () => {
-  const keys = parseAgentKeys(['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL first-key', 'ssh-rsa AAAAB3Nza second-key'].join('\n'))
-  const tried = []
-  const fakeSpawn = (command, args) => {
-    const file = args.find((arg) => arg.startsWith('IdentityFile=')).slice('IdentityFile='.length)
-    const line = readFileSync(file, 'utf8')
-    const second = line.includes('second-key')
-    tried.push(second ? 'second' : 'first')
-    return spawn('sh', ['-c', second ? 'echo __DSH_KEY_OK__' : 'echo denied >&2; exit 255'], { stdio: 'pipe' })
+const tooMany = () => ({ spawnMain: () => spawn('sh', ['-c', 'echo "Received disconnect from 127.0.0.1 port 22:2: Too many authentication failures" >&2; exit 255'], { stdio: 'pipe' }), runSide: async () => ({ code: 0 }) })
+const denied = () => ({ spawnMain: () => spawn('sh', ['-c', 'echo "tester@127.0.0.1: Permission denied (publickey)." >&2; exit 255'], { stdio: 'pipe' }), runSide: async () => ({ code: 0 }) })
+// 造 n 把假钥匙：base64 内容各不相同，指纹就各不相同。
+const fakeKeys = (n) => agentKeyList(Array.from({ length: n }, (_, i) => 'ssh-ed25519 ' + Buffer.from('key-' + i).toString('base64') + ' key' + i).join('\n'))
+// good：能进的那把（下标），undefined 表示一把都进不去。
+const fakeIdentities = ({ keys, good, store }) => {
+  const probed = []
+  return {
+    probed,
+    store: store ?? new IdentityStore(join(work, 'ids-' + randomUUID() + '.json')),
+    listKeys: async () => keys,
+    pubFile: (key) => '/pub/' + key.label,
+    probe: async (_host, key) => { probed.push(key.label); return good !== undefined && key.label === 'key' + good },
   }
-  const found = await findWorkingIdentity({
-    host: { name: 'w', via: 'windows' },
-    spawn: fakeSpawn,
-    keys,
-    dir: join(work, 'agent-keys'),
-    argvFor: (host) => ({ command: 'sh', args: ['-c', 'unused', 'IdentityFile=' + host.identityFile], env: {} }),
-  })
-  eq(tried, ['first', 'second'])
-  eq([found.label, found.tried], ['second-key', 2])
-  assert(existsSync(found.identityFile), 'the chosen key should have a .pub on disk')
+}
+const keyTransport = (good) => (host) => host.identityFile === undefined ? tooMany() : host.identityFile === '/pub/key' + good ? localTransport() : denied()
+
+await test('fingerprints follow ssh-keygen: SHA256 of the key blob, no padding', () => {
+  const line = 'ssh-ed25519 ' + Buffer.from('abc').toString('base64') + ' me'
+  eq(keyFingerprint(line), 'SHA256:' + createHash('sha256').update('abc').digest('base64').replace(/=+$/, ''))
+  eq(agentKeyList(line + '\n' + line.replace(' me', ' dup')).length, 1, 'the same key listed twice counts once')
 })
 
-await test('too many keys: the manager retries with one key and remembers it', async () => {
-  const seen = []
+await test('too many keys: at most three are probed, then the error lists excluded and untried keys', async () => {
+  const keys = fakeKeys(5)
+  const ids = fakeIdentities({ keys })
+  const { m } = newManager(new FakeClock(), { identities: ids, transportFor: () => tooMany() })
+  const error = await m.open('A', { host: 'local' }).catch((e) => e)
+  eq(error.code, 'identity')
+  eq(ids.probed, ['key0', 'key1', 'key2'])
+  eq([error.result.excluded.length, error.result.untried.length], [3, 2])
+  assert(/Excluded/.test(error.message) && /not tried yet/.test(error.message) && error.message.includes(keys[4].fingerprint), error.message)
+  // 再来一次：跳过已排除的三把，接着试剩下的
+  await m.open('A', { host: 'local' }).catch(() => {})
+  eq(ids.probed, ['key0', 'key1', 'key2', 'key3', 'key4'])
+  eq(PROBE_LIMIT, 3)
+  m.dispose()
+})
+
+await test('too many keys: the key that gets in is learned, exclusions are released', async () => {
+  const keys = fakeKeys(4)
+  const ids = fakeIdentities({ keys, good: 1 })
   const transports = []
-  const { m } = newManager(new FakeClock(), {
-    discovery: async (host) => { seen.push(host.name); return { identityFile: '/tmp/one.pub', label: 'card', tried: 2 } },
-    transportFor: (host) => {
-      transports.push(host.identityFile)
-      if (host.identityFile !== undefined) return localTransport()
-      return { spawnMain: () => spawn('sh', ['-c', 'echo "Received disconnect from 127.0.0.1 port 22:2: Too many authentication failures" >&2; exit 255'], { stdio: 'pipe' }), runSide: async () => ({ code: 0 }) }
-    },
-  })
+  const { m } = newManager(new FakeClock(), { identities: ids, transportFor: (host) => { transports.push(host.identityFile); return keyTransport(1)(host) } })
   const first = await m.open('A', { host: 'local' })
-  eq(first.identityPinned, { label: 'card', tried: 2 })
-  eq(seen, ['local'])
-  await m.open('A', { host: 'local' })
-  eq(transports, [undefined, '/tmp/one.pub', '/tmp/one.pub'])
+  eq(first.identity, { source: 'probed', fingerprint: keys[1].fingerprint, label: 'key1', tried: 2 })
+  eq(m.rejectedKeys.size, 0, 'exclusions are dropped once a key works')
+  eq(m.list('A').length, 1, 'the failed first handshake is not left in the list')
+  const second = await m.open('A', { host: 'local' })
+  eq(second.identity.source, 'learned')
+  eq(ids.probed, ['key0', 'key1'], 'the learned key is used without probing again')
+  eq(transports, [undefined, '/pub/key1', '/pub/key1'])
   m.dispose()
 })
 
-await test('too many keys: a plain auth failure is not retried', async () => {
-  let called = 0
-  const { m } = newManager(new FakeClock(), {
-    discovery: async () => { called += 1; return { identityFile: '/tmp/none.pub', label: 'x', tried: 1 } },
-    transportFor: () => ({ spawnMain: () => spawn('sh', ['-c', 'echo "tester@127.0.0.1: Permission denied (publickey)." >&2; exit 255'], { stdio: 'pipe' }), runSide: async () => ({ code: 0 }) }),
-  })
-  await rejects(m.open('A', { host: 'local' }), /handshake|Permission denied/)
-  eq(called, 0)
+await test('learned keys persist in stateDir, not in the host list', async () => {
+  const file = join(work, 'learned.json')
+  const keys = fakeKeys(3)
+  const { m } = newManager(new FakeClock(), { identities: fakeIdentities({ keys, good: 2, store: new IdentityStore(file) }), transportFor: keyTransport(2) })
+  await m.open('A', { host: 'local' })
   m.dispose()
+  const saved = JSON.parse(readFileSync(file, 'utf8'))
+  eq(Object.values(saved.hosts).map((r) => [r.host, r.fingerprint]), [['local', keys[2].fingerprint]])
+  assert(!JSON.stringify(saved).includes('ssh-ed25519'), 'only fingerprints are stored')
+  const again = new IdentityStore(file)
+  eq(again.forget('local'), 1)
+  eq(new IdentityStore(file).list().length, 0)
+})
+
+await test('a learned key that stops working is forgotten and probing resumes', async () => {
+  const keys = fakeKeys(3)
+  const store = new IdentityStore(join(work, 'stale.json'))
+  const ids = fakeIdentities({ keys, good: 2, store })
+  const { m } = newManager(new FakeClock(), { identities: ids, transportFor: keyTransport(2) })
+  store.set(m.hosts.get('local'), keys[0])
+  const r = await m.open('A', { host: 'local' })
+  eq(r.identity.source, 'probed')
+  eq(ids.probed, ['key1', 'key2'], 'the stale key is excluded, not probed again')
+  eq(store.get(m.hosts.get('local')).fingerprint, keys[2].fingerprint)
+  m.dispose()
+})
+
+await test('host-list identityFingerprint wins and is never swapped for another key', async () => {
+  const keys = fakeKeys(3)
+  const ids = fakeIdentities({ keys, good: 2 })
+  const { m } = newManager(new FakeClock(), { identities: ids, transportFor: keyTransport(2) })
+  const host = m.hosts.get('local')
+  m.hosts.set('local', { ...host, identityFingerprint: keys[0].fingerprint })
+  ids.store.set(host, keys[2])
+  const error = await m.open('A', { host: 'local' }).catch((e) => e)
+  assert(/from the host list/.test(error.message), error.message)
+  eq(ids.probed, [], 'no probing when the host list names the key')
+  await rejects(m.open('A', { host: 'local', identityFingerprint: keys[2].fingerprint }), /always wins/)
+  m.hosts.set('local', { ...host, identityFingerprint: keys[2].fingerprint })
+  eq((await m.open('A', { host: 'local' })).identity.source, 'config')
+  m.dispose()
+})
+
+await test('the user-picked key is learned on success and reported with both lists on failure', async () => {
+  const keys = fakeKeys(5)
+  const ids = fakeIdentities({ keys, good: 4 })
+  const { m } = newManager(new FakeClock(), { identities: ids, transportFor: keyTransport(4) })
+  await m.open('A', { host: 'local' }).catch(() => {})
+  const wrong = await m.open('A', { host: 'local', identityFingerprint: keys[3].fingerprint }).catch((e) => e)
+  eq([wrong.code, wrong.result.excluded.length, wrong.result.untried.length], ['identity', 4, 1])
+  await rejects(m.open('A', { host: 'local', identityFingerprint: 'SHA256:nope' }), /43 base64/)
+  const ok = await m.open('A', { host: 'local', identityFingerprint: keys[4].fingerprint })
+  eq(ok.identity.source, 'argument')
+  eq(ids.store.get(m.hosts.get('local')).fingerprint, keys[4].fingerprint)
+  m.dispose()
+})
+
+await test('too many keys: a plain auth failure is not probed', async () => {
+  const ids = fakeIdentities({ keys: fakeKeys(3), good: 0 })
+  const { m } = newManager(new FakeClock(), { identities: ids, transportFor: () => denied() })
+  await rejects(m.open('A', { host: 'local' }), /handshake|Permission denied/)
+  eq(ids.probed, [])
+  m.dispose()
+})
+
+await test('identityFingerprint in the host list: format and conflicts', () => {
+  const fp = keyFingerprint('ssh-ed25519 ' + Buffer.from('x').toString('base64'))
+  eq(parseHost({ name: 'k', address: 'u@h', identityFingerprint: fp }).identityFingerprint, fp)
+  const throws = (entry, pattern) => { let error; try { parseHost(entry) } catch (e) { error = e } ; assert(error !== undefined && pattern.test(error.message), String(error?.message)) }
+  throws({ name: 'k', address: 'u@h', identityFingerprint: 'SHA256:short' }, /43 base64/)
+  throws({ name: 'k', address: 'u@h', identityFingerprint: fp, identityFile: '~/.ssh/k', via: 'wsl' }, /keep one/)
+  throws({ name: 'k', address: 'u@h', identityFingerprint: fp, identityAgent: 'none' }, /identityAgent/)
 })
 
 rmSync(work, { recursive: true, force: true })

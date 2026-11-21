@@ -203,6 +203,7 @@ window.__ModuleLoader__.load({
           ['via', '"windows"（默认，用 Windows 的 ssh.exe）或 "wsl"（在 WSL 里跑 ssh）'],
           ['wslDistro', 'WSL 发行版名，只用于 via: "wsl"'],
           ['identityFile', '这一侧的私钥路径，只用这一把钥匙。Windows 写 C:/Users/you/.ssh/key（正斜杠），WSL 写 ~/.ssh/key'],
+          ['identityFingerprint', '登录钥匙指纹 SHA256:…（ssh-keygen -lf 的写法），从 agent 里只报这一把；不写时插件会把试通的指纹记在 stateDir，不改这里'],
           ['identityAgent', '这一侧的 agent："none" 表示不用 agent；WSL 写 socket 路径，Windows 写管道，JSON 里是 "\\\\\\\\.\\\\pipe\\\\openssh-ssh-agent"。旧字段 agentSocket 仍可用'],
           ['shell', '远端 shell：bash、zsh 或 sh'],
           ['encoding', '远端输出编码，例如 utf-8、gbk'],
@@ -250,6 +251,7 @@ window.__ModuleLoader__.load({
           ['via', '"windows" (default, Windows ssh.exe) or "wsl" (ssh inside WSL)'],
           ['wslDistro', 'WSL distribution, only with via: "wsl"'],
           ['identityFile', 'private key on that side, used alone; Windows C:/Users/you/.ssh/key (forward slashes), WSL ~/.ssh/key'],
+          ['identityFingerprint', 'login key fingerprint SHA256:… (as ssh-keygen -lf prints it); only that agent key is offered. Without it the plugin remembers the key that worked in stateDir and never edits this list'],
           ['identityAgent', 'agent on that side: "none" for no agent, a socket path in WSL, or a pipe on Windows, in JSON "\\\\\\\\.\\\\pipe\\\\openssh-ssh-agent"; agentSocket still works'],
           ['shell', 'remote shell: bash, zsh or sh'],
           ['encoding', 'remote output encoding, e.g. utf-8 or gbk'],
@@ -358,7 +360,7 @@ window.__ModuleLoader__.load({
     const HOST_BAD_RE = /[\s"'\x60\\\x00-\x1f\x7f@]/
     // 与 plugin/ssh/hosts.mjs 的 KNOWN_KEYS 保持一致：服务端会把带未知字段的条目整条丢掉，
     // 表单里先拦住，免得「保存成功但主机不见了」。
-    const HOST_KNOWN_KEYS = new Set(['name', 'address', 'host', 'port', 'user', 'via', 'wslDistro', 'agentSocket', 'identityAgent', 'identityFile', 'shell', 'encoding', 'maxSessions', 'hostKeyFingerprint', 'loadProfile'])
+    const HOST_KNOWN_KEYS = new Set(['name', 'address', 'host', 'port', 'user', 'via', 'wslDistro', 'agentSocket', 'identityAgent', 'identityFile', 'shell', 'encoding', 'maxSessions', 'hostKeyFingerprint', 'identityFingerprint', 'loadProfile'])
     const HOST_PATH_BAD_RE = /[\s"'\x60\\\x00-\x1f\x7f]/
     const HOST_PIPE_RE = /^\\\\\.\\pipe\\[A-Za-z0-9._-]{1,128}$/
     const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)

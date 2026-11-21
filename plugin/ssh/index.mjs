@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { parseHostList, parseApprovalList } from './hosts.mjs'
 import { buildSshArgv } from './argv.mjs'
 import { SshManager, MANAGER_DEFAULTS } from './manager.mjs'
-import { findWorkingIdentity, listAgentKeys } from './identities.mjs'
+import { IdentityStore, agentKeyList, identityKey, listAgentKeys, probeOnce, writePublicKey } from './identities.mjs'
 import { SessionError } from './session.mjs'
 import { mountProjection, PROJECTION_KEY, registration as projectionRegistration } from './projection.mjs'
 
@@ -47,6 +47,7 @@ const DESCRIPTION = {
     '* Only hosts in the list can be reached; an unknown host fails with the list of available names.',
     '* Each session is an independent connection with its own shell, directory and variables. Open more than one to run things in parallel.',
     '* Sessions end after a period of inactivity and after a hard time limit; ssh_list shows both. Use reopen: "<old id>" to start a fresh session in the old directory (state such as variables is not restored).',
+    '* If login fails with an [identity] error, it lists the agent keys already excluded for that host and those not tried yet. Ask the user which one to use (show both lists), then call ssh_open again with identityFingerprint. Never guess one yourself.',
     '* Only POSIX remotes (Linux, macOS, BSD) are supported. There is no TTY: interactive programs (top, vim, password prompts) will not work; use batch flags (top -b -n 1, apt-get -y).',
   ].join('\n'),
   exec: [
@@ -169,10 +170,10 @@ export function apply(ctx, config) {
     return bundled === undefined || bundled === derived ? [derived] : [derived, bundled]
   }
   const hostPaths = () => ({ privateKnownHosts: live(config.knownHosts), userKnownHosts: live(config.userKnownHosts) })
-  const discovery = async (host) => {
-    if (host.identityAgent === 'none') return undefined
+  // agent 里的公钥列表（不含私钥）。每次连接只读一次，取不到就当没有钥匙。
+  const listKeys = async (host) => {
+    if (host.identityAgent === 'none') return []
     const agent = host.identityAgent
-    let keys = []
     if (host.via === 'wsl') {
       const listing = await listAgentKeys({
         spawn,
@@ -180,33 +181,31 @@ export function apply(ctx, config) {
         args: [...(host.wslDistro === undefined ? [] : ['-d', host.wslDistro]), '-e', 'env', ...(agent === undefined ? [] : ['SSH_AUTH_SOCK=' + agent]), 'ssh-add', '-L'],
         env: childEnv(),
       })
-      keys = listing.keys
-    } else {
-      // 裸名 ssh 靠 PATH 解析；PATH 里找不到 ssh-add 时再试 OpenSSH 自己的安装目录。
-      for (const command of sshAddCandidates()) {
-        keys = (await listAgentKeys({ spawn, command, env: childEnv(agent === undefined ? undefined : { SSH_AUTH_SOCK: agent }) })).keys
-        if (keys.length > 0) break
-      }
+      return agentKeyList(listing.keys.join('\n'))
     }
-    if (keys.length === 0) return undefined
-    return await findWorkingIdentity({
-      host,
-      spawn,
-      keys,
-      dir: agentKeyDir,
-      marker: KEY_MARKER,
-      argvFor: (target) => {
-        const built = buildSshArgv(target, hostPaths(), {
-          sshPath: live(config.sshPath),
-          wslPath: live(config.wslPath),
-          remoteCommand: "exec /bin/sh -c 'echo " + KEY_MARKER + "'",
-        })
-        return { command: built.command, args: built.args, env: childEnv(built.env) }
-      },
-    })
+    // 裸名 ssh 靠 PATH 解析；PATH 里找不到 ssh-add 时再试 OpenSSH 自己的安装目录。
+    for (const command of sshAddCandidates()) {
+      const { keys } = await listAgentKeys({ spawn, command, env: childEnv(agent === undefined ? undefined : { SSH_AUTH_SOCK: agent }) })
+      if (keys.length > 0) return agentKeyList(keys.join('\n'))
+    }
+    return []
+  }
+  const identities = {
+    store: new IdentityStore(join(stateDir, 'identities.json')),
+    listKeys,
+    pubFile: (key) => writePublicKey(key.line, agentKeyDir),
+    // 只报这一把、跑一句 echo 就退出：成功与否只看标记有没有回来。
+    probe: async (host, key) => {
+      const built = buildSshArgv({ ...host, identityFile: writePublicKey(key.line, agentKeyDir) }, hostPaths(), {
+        sshPath: live(config.sshPath),
+        wslPath: live(config.wslPath),
+        remoteCommand: "exec /bin/sh -c 'echo " + KEY_MARKER + "'",
+      })
+      return await probeOnce({ spawn, command: built.command, args: built.args, env: childEnv(built.env), timeoutMs: 15000, marker: KEY_MARKER })
+    },
   }
 
-  const manager = new SshManager({ transportFor: transportFor(config), discovery, notify: deliver, audit, spoolDir, onChange: () => persistRegistry() })
+  const manager = new SshManager({ transportFor: transportFor(config), identities, notify: deliver, audit, spoolDir, onChange: () => persistRegistry() })
 
   // 这些字段是 volatile：宿主改完只就地更新引用、不重挂插件（cordis-plugin-loader 的
   // _commitVolatile 会 emit loader/volatile-update），所以要在事件里重读一次，
@@ -278,6 +277,14 @@ export function apply(ctx, config) {
     return { kind: 'ask', reason: `ssh approval list${verdict.rule ? ` (${verdict.rule})` : ''}`, displayReason: { en, 'zh-CN': zh } }
   }, { prepend: true }), 'ssh.approval')
 
+  // 这台主机用哪把钥匙：手配的优先，学到的其次；手配存在时学到的只标「被覆盖」。
+  const identityOf = (h) => {
+    const learned = identities.store.get(h)
+    if (h.identityFingerprint !== undefined) return { identity: { source: 'config', fingerprint: h.identityFingerprint, ...(learned !== undefined && learned.fingerprint !== h.identityFingerprint ? { learnedShadowed: learned.fingerprint } : {}) } }
+    if (learned !== undefined && h.identityFile === undefined) return { identity: { source: 'learned', fingerprint: learned.fingerprint, label: learned.label } }
+    return {}
+  }
+
   const tool = (definition) => ctx.effect(() => ctx.tools.register({ output: textOutput, ...definition }), `ssh.tool.${definition.name}`)
 
   tool({
@@ -288,6 +295,7 @@ export function apply(ctx, config) {
       shell: { type: 'string', enum: ['bash', 'zsh', 'sh'], description: 'Preferred remote shell; falls back to bash, zsh, sh.' },
       name: { type: 'string', description: 'Optional label shown in the session list.' },
       reopen: { type: 'string', description: 'Id of an ended session whose directory the new session starts in.' },
+      identityFingerprint: { type: 'string', description: 'SHA256:… of the agent key to log in with, as an ssh_open error listed it. Only after the user picked one.' },
     },
     async execute(args, exec) {
       if (readOnly(exec.agent)) throw new Error('[read-only] SSH sessions cannot be opened in read-only mode; only ssh_list is available')
@@ -348,7 +356,7 @@ export function apply(ctx, config) {
     async execute(_args, exec) {
       return {
         sessions: manager.list(rootKey(exec.agent)),
-        hosts: [...manager.hosts.values()].map((h) => ({ name: h.name, via: h.via, user: h.user, ...(h.userDefaulted ? { userFrom: 'local-login' } : {}) })),
+        hosts: [...manager.hosts.values()].map((h) => ({ name: h.name, via: h.via, user: h.user, ...(h.userDefaulted ? { userFrom: 'local-login' } : {}), ...identityOf(h) })),
         enabled: manager.settings.enabled,
         projection: { key: PROJECTION_KEY, registered: projectionRegistration.registered, ...(projectionRegistration.error === null ? {} : { error: projectionRegistration.error }) },
         ...(manager.configErrors.length > 0 ? { configErrors: manager.configErrors } : {}),
@@ -368,7 +376,7 @@ export function apply(ctx, config) {
   ctx.inject?.(['commands'], (child) => {
     child.commands.register({
       name: 'ssh',
-      description: 'List or end SSH sessions: /ssh list | kill <id> | kill-all | kill-everywhere | leftovers | clear-leftovers',
+      description: 'List or end SSH sessions: /ssh list | kill <id> | kill-all | kill-everywhere | leftovers | clear-leftovers | identities | forget-identity <host>|all',
       handler: async (invocation) => {
         const owner = rootKey(invocation.agent)
         const [action = 'list', arg] = String(invocation.rawInput ?? '').trim().split(/\s+/u)
@@ -392,12 +400,23 @@ export function apply(ctx, config) {
               return { kind: 'success', text: '所有 SSH 会话已结束。' }
             case 'leftovers':
               return { kind: 'success', text: manager.leftovers.length === 0 ? '没有上次遗留的会话。' : manager.leftovers.map((l) => `${l.host} ${l.sessionId} pid=${l.pid ?? '?'} 打开于 ${new Date(l.openedAt).toISOString()}`).join('\n') + '\n远端进程不会被自动结束；需要的话请手动登录清理。' }
+            case 'identities': {
+              const rows = [...manager.hosts.values()].map((h) => [h, identityOf(h).identity]).filter(([, id]) => id !== undefined)
+              return { kind: 'success', text: rows.length === 0 ? '没有手配或学到的登录钥匙。' : rows.map(([h, id]) => `${h.name} ${id.fingerprint} ${id.source === 'config' ? '手配' : '学到 ' + (id.label ?? '')}${id.learnedShadowed ? '（学到的 ' + id.learnedShadowed + ' 已被手配覆盖）' : ''}`).join('\n') }
+            }
+            case 'forget-identity': {
+              if (arg === undefined) return { kind: 'error', text: '用法：/ssh forget-identity <主机别名> | all' }
+              const removed = identities.store.forget(arg === 'all' ? undefined : arg)
+              if (arg === 'all') manager.rejectedKeys.clear()
+              else for (const h of manager.hosts.values()) if (h.name === arg) manager.rejectedKeys.delete(identityKey(h))
+              return { kind: 'success', text: removed === 0 ? '没有可清除的记录。' : `已清除 ${removed} 条学到的钥匙指纹。` }
+            }
             case 'clear-leftovers':
               manager.leftovers = []
               persistRegistry()
               return { kind: 'success', text: '已清除「上次遗留」记录。' }
             default:
-              return { kind: 'error', text: '用法：/ssh list | kill <id> | kill-all | kill-everywhere confirm | leftovers | clear-leftovers' }
+              return { kind: 'error', text: '用法：/ssh list | kill <id> | kill-all | kill-everywhere confirm | leftovers | clear-leftovers | identities | forget-identity <主机别名>|all' }
           }
         } catch (error) {
           return { kind: 'error', text: error.message }

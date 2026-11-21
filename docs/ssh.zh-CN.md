@@ -80,6 +80,7 @@
 | `shell` | 首选 `bash`/`zsh`/`sh`，找不到就按 bash → zsh → sh |
 | `encoding` | 远端输出编码，例如 `gb18030`，默认 UTF-8 |
 | `maxSessions` | 这台主机的并发会话上限，默认 4 |
+| `identityFingerprint` | 登录钥匙指纹 `SHA256:…`（`ssh-keygen -lf` 的写法，43 位 base64、不带 `=`），从 agent 里只报这一把；不能和 `identityFile` 或 `identityAgent: "none"` 同用。和下面的 `hostKeyFingerprint`（服务端主机公钥）不是一回事 |
 | `hostKeyFingerprint` | 预留字段：只校验格式（`SHA256:…`），**不做 known_hosts 比对、不提供信任保证**；主机信任仍由 ssh 的 `StrictHostKeyChecking=accept-new` 与私有 known_hosts 负责 |
 | `loadProfile` | `true` 时用登录 shell 读 profile，默认 `false` |
 
@@ -135,7 +136,7 @@ ssh -T -e none -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UpdateHos
 - 凭据只在 `via` 这一侧找：密钥文件、agent、`~/.ssh/config`、known_hosts 都是那一侧的，另一侧读不到也不影响。只要那一侧自己有钥匙（`identityFile`）或自己的 agent（`identityAgent`），就能连上。`BatchMode=yes` 不问口令，带口令的钥匙必须先加进同一侧的 agent。
 - 连接失败时，报错末尾会附一行 `via … · user@host:port · agent … · key …`，说明这次用的是哪一侧、哪个 agent、哪把钥匙。
 - ssh 进程由宿主进程直接启动，不经沙箱受限令牌（受限令牌下管道会 `EPERM`）。它只连远端，不读写本地工作区。
-- **钥匙太多会被服务端踢出来。** agent 里挂着一串钥匙时，ssh 会按顺序挨个试；`MaxAuthTries`（多数发行版默认 6）用完就断开，报 `Too many authentication failures`，正确的钥匙往往还没轮到。插件遇到这条错误时会在这一侧跑 `ssh-add -L` 取出公钥列表，**每把钥匙单独写一个 `.pub`**（私钥始终留在 agent 里签名，不落盘），逐把用 `-o IdentityFile=<pub> -o IdentitiesOnly=yes` 试一次握手；第一把能进的记住，这台主机之后只报这一把。公钥文件放在 `stateDir/agent-keys/`（`stateDir` 默认 `<DSH_HOME>/ssh`）。想直接跳过发现过程，就在主机上写死 `identityFile`。
+- **钥匙太多会被服务端踢出来。** agent 里挂着一串钥匙时，ssh 会按顺序挨个试；`MaxAuthTries`（多数发行版默认 6）用完就断开，报 `Too many authentication failures`，正确的钥匙往往还没轮到。选钥匙的顺序是：`identityFile` > 主机清单的 `identityFingerprint` > `ssh_open` 参数 `identityFingerprint`（用户在问卷里挑的）> 上次试通、记在 `stateDir/identities.json` 的指纹 > 让 ssh 自己挑。只有撞上这条错误（或学到的那把不灵了）才逐把试：每把钥匙用它的 `.pub`（`ssh-add -L` 只给公钥，私钥始终留在 agent 里签名）配 `-o IdentitiesOnly=yes` 单独握手一次，**一次最多 3 把**。被拒的指纹按主机记在内存里，试通就释放；3 把都不行时报 `[identity]` 错误，同时列出「已排除」和「还没试」两组指纹与注释，模型据此请用户挑，再带 `identityFingerprint` 重连（不带则接着试下 3 把）。手配的 `identityFingerprint` 失败时直接报错，不会被替换。试通的指纹只写进 `stateDir/identities.json`（只有指纹与注释），**插件不改 `cordis.patch.yml`**；`/ssh identities` 查看，`/ssh forget-identity <别名>|all` 清除。公钥文件放在 `stateDir/agent-keys/`（`stateDir` 默认 `<DSH_HOME>/ssh`）。注意每次试钥匙都是一次真实的登录失败，服务端的 fail2ban 之类会计数。
 - 线索只在这一侧找：`via: wsl` 用 `wsl.exe -e env SSH_AUTH_SOCK=… ssh-add -L`，Windows 侧用 `ssh-add.exe`（先按 `sshPath` 推导，找不到再试 `%SystemRoot%\System32\OpenSSH\ssh-add.exe`）。两侧都读不到公钥时保持原报错，不会假装成功。
 
 ## 远端 shell 与分帧
