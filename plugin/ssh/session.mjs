@@ -97,16 +97,24 @@ export class SshSession extends EventEmitter {
     this.stdout = new SentinelSplitter((data) => this.sinkStdout(data))
     this.stderr = new SentinelSplitter((data) => this.sinkStderr(data))
     this.sinkStdout = () => {} // 探测哨兵之前的输出全丢弃
-    this.sinkStderr = (data) => { if (this.state === 'connecting' || this.state === 'probing') this.stderrText.push(data) }
+    // 握手没完成之前的 stderr 都留着，包括进程已经退出、状态已是 dead 之后才到的那几块。
+    this.handshaking = true
+    this.sinkStderr = (data) => { if (this.handshaking) this.stderrText.push(data) }
     child.stdout.on('data', (chunk) => { this.stdoutBytes += chunk.length; this.stdout.push(chunk) })
     child.stderr.on('data', (chunk) => { this.stderrBytes += chunk.length; this.stderr.push(chunk) })
+    // 'exit' 可能先于 stderr 的最后几块数据到达；握手失败的原因（Permission denied、
+    // Too many authentication failures）全在 stderr 里，读它之前要等流关掉。
+    this.stderrClosed = new Promise((resolve) => { child.stderr.once('close', resolve); child.stderr.once('error', resolve) })
     child.stdin.on('error', () => {})
     child.on('error', (error) => { this.stderrText.push(Buffer.from(String(error.message))); this.onExit(null) })
     child.on('exit', (code) => this.onExit(code))
     this.exited = new Promise((resolve) => { this.resolveExited = resolve })
 
     const nonce = newNonce()
-    const fail = (message) => {
+    const fail = async (message) => {
+      if (this.state === 'dead' || this.exitCode !== undefined || this.child?.exitCode !== null) {
+        await Promise.race([this.stderrClosed, new Promise((resolve) => { const t = setTimeout(resolve, 1000); t.unref?.() })])
+      }
       const detail = Buffer.concat(this.stderrText).toString('utf8').trim().split('\n').slice(-5).join('\n')
       this.terminate('probe-failed')
       // 带上这次用的是哪一侧、哪个 agent、哪把钥匙：Permission denied 本身看不出该去哪一侧查。
@@ -122,9 +130,9 @@ export class SshSession extends EventEmitter {
     this.setState('probing')
     this.write(probeScript(nonce, { preferred: this.preferredShell, loadProfile: this.host.loadProfile }))
     const answer = await this.race(probe, PROBE_TIMEOUT_MS, signal)
-    if (answer === undefined) throw fail(this.state === 'dead' ? 'ssh exited during the handshake' : 'remote shell did not answer the probe in time (only POSIX remotes are supported)')
+    if (answer === undefined) throw await fail(this.state === 'dead' ? 'ssh exited during the handshake' : 'remote shell did not answer the probe in time (only POSIX remotes are supported)')
     const [os, pid, shell] = answer.split(' ')
-    if (!/^\d+$/.test(pid ?? '') || /windows|mingw|cygwin|msys/i.test(os ?? '')) throw fail('only POSIX remotes are supported')
+    if (!/^\d+$/.test(pid ?? '') || /windows|mingw|cygwin|msys/i.test(os ?? '')) throw await fail('only POSIX remotes are supported')
     this.os = os
     this.pid = Number(pid)
     this.shell = shell
@@ -132,11 +140,12 @@ export class SshSession extends EventEmitter {
     const ready = this.stdout.expect(`__DSH_READY_${nonce} `)
     this.write(setupScript(nonce, { env: this.env }))
     const cwd = await this.race(ready, PROBE_TIMEOUT_MS, signal)
-    if (cwd === undefined) throw fail('remote shell did not finish setup')
+    if (cwd === undefined) throw await fail('remote shell did not finish setup')
     this.cwd = cwd
     this.sinkStdout = (data) => this.job?.stdout.write(data)
     this.sinkStderr = (data) => this.job?.stderr.write(data)
     this.lastActivity = this.clock.now()
+    this.handshaking = false
     this.setState('idle')
     return { sessionId: this.id, shell: this.shell, os: this.os, cwd: this.cwd, state: this.state }
   }
