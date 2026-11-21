@@ -24,7 +24,15 @@ function resultText(message) {
   const parts = []
   for (const block of blocks) {
     if (block.type === 'text') parts.push(block.text)
-    else if (block.type === 'tool-result') for (const inner of block.content ?? block.output ?? []) if (inner?.type === 'text') parts.push(inner.text)
+    else if (block.type === 'tool-result') {
+      // output 可能是 { type, value } 对象而不是数组；对象不能 for...of。
+      const inner = block.content ?? block.output
+      const list = Array.isArray(inner) ? inner : Array.isArray(inner?.value) ? inner.value : inner !== undefined ? [inner] : []
+      for (const item of list) {
+        if (item?.type === 'text' && typeof item.text === 'string') parts.push(item.text)
+        else if (item?.type === 'text' && typeof item.value === 'string') parts.push(item.value)
+      }
+    }
   }
   return parts.join('\n')
 }
@@ -65,7 +73,13 @@ function asSessionEvent(event) {
   return event
 }
 
+// 宿主在快照、恢复、推送里同步调用 apply；这里抛错会拖垮整条会话的投影读取
+// （会话打不开、列表里退化）。投影只是给标签页看的，宁可漏一条也不能抛。
 export function applyEvent(state, event) {
+  try { return applyEventUnsafe(state, event) } catch { return state }
+}
+
+function applyEventUnsafe(state, event) {
   const normalized = asSessionEvent(event)
   const at = typeof normalized.time === 'number' ? normalized.time : typeof normalized.at === 'number' ? normalized.at : undefined
   if (normalized.type === 'tool/call') {

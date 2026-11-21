@@ -635,6 +635,18 @@ await test('projection registration matches the host contract', async () => {
   eq(await registerProjection({ sessionProjections: { register: () => Promise.reject(new Error('boom')) } }), undefined)
 })
 
+await test('projection apply never throws on odd event shapes', async () => {
+  let state = initState()
+  state = applyEvent(state, { type: 'tool/call', data: { callId: 'c1', name: 'ssh_open', arguments: { host: 'h' } } })
+  const odd = [
+    { type: 'tool/result', data: { message: { source: { kind: 'tool', callId: 'c1' }, content: [{ type: 'tool-result', toolCallId: 'c1', output: { type: 'text', value: '{"sessionId":"s1","host":"h"}' } }] } } },
+    { type: 'user/message', data: { source: { kind: 'ssh' }, content: 'plain string' } },
+    { type: 'tool/result', data: { message: { source: { kind: 'tool', callId: 'c1' }, content: 'x' } } },
+  ]
+  for (const event of odd) state = applyEvent(state, event)
+  eq(state.rows.s1?.host, 'h')
+})
+
 await test('the inject callback keeps the registration alive under cordis', async () => {
   // 回归：inject 回调曾把 ProjectionHandle 当返回值交回，cordis 视为无效 effect，
   // 子 fiber 失败卸载，注册立刻被释放，标签页永远拿不到 sshSessions。
