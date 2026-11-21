@@ -67,6 +67,20 @@ function setRow(state, id, patch, at) {
   return { ...state, rows }
 }
 
+// 会话编号只在一个宿主进程内递增：DSH 重启后同一对话里又会从 s1 开始。
+// 新的 ssh_open 拿到一个已有行的编号时，旧行改挂到 `<id>~<n>` 下留作历史，
+// 显示用的 sessionId 不变；后续按编号的 exec/kill/通知只落在最新那一行。
+function retireRow(state, id) {
+  const prev = state.rows[id]
+  if (prev === undefined) return state
+  let n = 1
+  while (state.rows[`${id}~${n}`] !== undefined) n++
+  const rows = { ...state.rows }
+  delete rows[id]
+  rows[`${id}~${n}`] = prev.state === 'dead' ? prev : jsonFields({ ...prev, state: 'dead', mode: undefined, jobId: undefined, deadReason: 'replaced' })
+  return { ...state, rows }
+}
+
 /** 纯函数：一条事件折进状态。不关心的事件原样返回同一引用。 */
 /**
  * 代码模式（PTC）把 `run_code` 里的子调用记成另一对事件：`tool/ptc-dispatch-start`
@@ -118,6 +132,7 @@ function applyEventUnsafe(state, event) {
     const value = parseJson(resultText(message))
     const failed = message?.isError === true || value === undefined
     if (call.name === 'ssh_open' && !failed && typeof value.sessionId === 'string') {
+      next = retireRow(next, value.sessionId)
       next = setRow(next, value.sessionId, { host: value.host, state: 'idle', cwd: value.cwd, shell: value.shell, os: value.os, expiresAt: value.expiresAt, idleMinutes: value.idleMinutes, openedAt: at, lastActivity: at, deadReason: undefined, mode: undefined }, at)
     } else if (call.name === 'ssh_exec' && typeof call.sessionId === 'string' && next.rows[call.sessionId] !== undefined) {
       const row = next.rows[call.sessionId]
@@ -129,6 +144,12 @@ function applyEventUnsafe(state, event) {
     } else if (call.name === 'ssh_kill' && typeof call.sessionId === 'string' && !failed) {
       next = setRow(next, call.sessionId, { state: 'dead', deadReason: value.reason ?? 'killed', mode: undefined }, at)
     } else if (call.name === 'ssh_list' && !failed && Array.isArray(value.sessions)) {
+      // ssh_list 列出的是本对话当前全部活会话：表里还算活、但不在列表里的行，
+      // 是宿主重启或别处结束后没留下通知的，标成已结束，免得一直挂着「空闲 0s」。
+      const listed = new Set(value.sessions.map((s) => s?.sessionId))
+      for (const [rowId, row] of Object.entries(next.rows)) {
+        if (row.state !== 'dead' && !listed.has(rowId)) next = setRow(next, rowId, { state: 'dead', mode: undefined, jobId: undefined, deadReason: 'gone' }, at)
+      }
       for (const s of value.sessions) {
         if (typeof s?.sessionId !== 'string') continue
         next = setRow(next, s.sessionId, { host: s.host, state: s.state, mode: s.mode, cwd: s.cwd, deadReason: s.deadReason, expiresAt: s.expiresAt, lastActivity: s.lastActivity }, at)
@@ -156,7 +177,10 @@ const viewCache = new WeakMap()
 export function view(state) {
   const cached = viewCache.get(state)
   if (cached !== undefined) return cached
-  const rows = Object.values(state.rows).sort((a, b) => Number(a.sessionId.slice(1)) - Number(b.sessionId.slice(1)))
+  // rowId 是行的唯一键（客户端拿它做 React key）；按打开时间排，缺时间的按编号。
+  const rows = Object.entries(state.rows)
+    .map(([rowId, row]) => ({ ...row, rowId }))
+    .sort((a, b) => (a.openedAt ?? 0) - (b.openedAt ?? 0) || Number(a.sessionId.slice(1)) - Number(b.sessionId.slice(1)) || (a.rowId < b.rowId ? -1 : 1))
   const value = { rows }
   viewCache.set(state, value)
   return value

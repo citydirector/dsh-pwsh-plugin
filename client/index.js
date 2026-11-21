@@ -104,9 +104,9 @@ window.__ModuleLoader__.load({
     // 倒计时用本地 1 秒时钟按 expiresAt / idleDeadline 计算；「结束」走 /ssh 命令。
     const SSH_COPY = {
       zh: { tab: 'SSH', empty: '本会话还没有 SSH 会话。', host: '主机', id: 'ID', state: '状态', cwd: '目录', active: '最后活动', left: '剩余', end: '结束', endAll: '全部结束', reason: '原因',
-        states: { connecting: '连接中', probing: '握手中', idle: '空闲', running: '运行中', closing: '结束中', dead: '已结束' }, bg: '后台', fg: '前台' },
+        states: { connecting: '连接中', probing: '握手中', idle: '空闲', running: '运行中', closing: '结束中', dead: '已结束' }, reasons: { replaced: '编号已被新会话沿用', gone: '已不在运行（宿主重启或已在别处结束）' }, bg: '后台', fg: '前台' },
       en: { tab: 'SSH', empty: 'No SSH sessions in this conversation yet.', host: 'Host', id: 'ID', state: 'State', cwd: 'Directory', active: 'Last active', left: 'Left', end: 'End', endAll: 'End all', reason: 'Reason',
-        states: { connecting: 'connecting', probing: 'handshake', idle: 'idle', running: 'running', closing: 'closing', dead: 'ended' }, bg: 'bg', fg: 'fg' },
+        states: { connecting: 'connecting', probing: 'handshake', idle: 'idle', running: 'running', closing: 'closing', dead: 'ended' }, reasons: { replaced: 'id reused by a newer session', gone: 'no longer running (host restarted or ended elsewhere)' }, bg: 'bg', fg: 'fg' },
     }
     const sshCopy = () => (document.documentElement.lang || '').toLowerCase().startsWith('zh') ? SSH_COPY.zh : SSH_COPY.en
     const clockText = (ms) => {
@@ -139,10 +139,10 @@ window.__ModuleLoader__.load({
             const idleLeft = r.state === 'idle' && r.idleMinutes > 0 && r.lastActivity !== undefined ? r.lastActivity + r.idleMinutes * 60000 - now : undefined
             const left = dead ? '' : capLeft !== undefined && capLeft <= 600000 ? '⏱ ' + clockText(capLeft) : clockText(idleLeft)
             const state = (t.states[r.state] ?? r.state) + (r.mode ? ' · ' + (r.mode === 'bg' ? t.bg + ' ' + (r.jobId ?? '') : t.fg) : '')
-            return h('tr', { key: r.sessionId, style: dead ? { opacity: 0.55 } : undefined },
+            return h('tr', { key: r.rowId ?? r.sessionId, style: dead ? { opacity: 0.55 } : undefined },
               h('td', { style: cell }, r.host ?? ''),
               h('td', { style: cell }, r.sessionId),
-              h('td', { style: cell }, dead ? state + ' · ' + (r.deadReasonText ?? r.deadReason ?? '') : state),
+              h('td', { style: cell }, dead ? state + ' · ' + (r.deadReasonText ?? t.reasons?.[r.deadReason] ?? r.deadReason ?? '') : state),
               h('td', { style: { ...cell, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis' }, title: r.cwd }, r.cwd ?? ''),
               h('td', { style: cell }, r.lastActivity ? clockText(now - r.lastActivity) : ''),
               h('td', { style: cell }, left),

@@ -647,6 +647,31 @@ await test('projection state stays plain JSON (no undefined, survives a JSON rou
   eq(state.rows.s1.state, 'dead')
 })
 
+await test('projection keeps the old row when a restarted host reuses a session id', async () => {
+  const call = (id, name, args, t) => ({ type: 'tool/call', time: t, data: { callId: id, name, arguments: JSON.stringify(args) } })
+  const result = (id, value, t) => ({ type: 'tool/result', time: t, data: { message: { source: { kind: 'tool', callId: id }, content: [{ type: 'text', text: JSON.stringify(value) }] } } })
+  let state = initState()
+  for (const e of [call('a', 'ssh_open', { host: 'one' }, 1), result('a', { sessionId: 's1', host: 'one' }, 2),
+    call('b', 'ssh_kill', { sessionId: 's1' }, 3), result('b', { ok: true }, 4),
+    call('c', 'ssh_open', { host: 'two' }, 10), result('c', { sessionId: 's1', host: 'two' }, 11)]) state = applyEvent(state, e)
+  const rows = view(state).rows
+  eq(rows.length, 2)
+  eq(rows.map((r) => r.host).join(','), 'one,two')
+  eq(new Set(rows.map((r) => r.rowId)).size, 2)
+  eq(state.rows.s1.host, 'two')
+  eq(state.rows.s1.state, 'idle')
+})
+
+await test('ssh_list marks rows it no longer lists as ended', async () => {
+  const call = (id, name, args, t) => ({ type: 'tool/call', time: t, data: { callId: id, name, arguments: JSON.stringify(args) } })
+  const result = (id, value, t) => ({ type: 'tool/result', time: t, data: { message: { source: { kind: 'tool', callId: id }, content: [{ type: 'text', text: JSON.stringify(value) }] } } })
+  let state = initState()
+  for (const e of [call('a', 'ssh_open', { host: 'one' }, 1), result('a', { sessionId: 's2', host: 'one' }, 2),
+    call('l', 'ssh_list', {}, 5), result('l', { sessions: [] }, 6)]) state = applyEvent(state, e)
+  eq(state.rows.s2.state, 'dead')
+  eq(state.rows.s2.deadReason, 'gone')
+})
+
 await test('projection apply never throws on odd event shapes', async () => {
   let state = initState()
   state = applyEvent(state, { type: 'tool/call', data: { callId: 'c1', name: 'ssh_open', arguments: { host: 'h' } } })
