@@ -41,9 +41,24 @@ function parseJson(text) {
   try { const value = JSON.parse(text); return plainObject(value) ? value : undefined } catch { return undefined }
 }
 
+// 状态会被宿主 structuredClone 后写进持久化投影缓存（契约要求是纯 JSON）。
+// undefined、NaN、Infinity 不是 JSON：值为 undefined 的键直接去掉（等于清空该字段），
+// 不是有限数的数字也去掉。只收字符串、有限数、布尔、null。
+function jsonFields(fields) {
+  const out = {}
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined) continue
+    if (typeof value === 'number' && !Number.isFinite(value)) continue
+    if (value !== null && typeof value === 'object') continue
+    if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') continue
+    out[key] = value
+  }
+  return out
+}
+
 function setRow(state, id, patch, at) {
   const prev = state.rows[id] ?? { sessionId: id }
-  const rows = { ...state.rows, [id]: { ...prev, ...patch, updatedAt: at ?? prev.updatedAt } }
+  const rows = { ...state.rows, [id]: jsonFields({ ...prev, ...patch, updatedAt: at ?? prev.updatedAt }) }
   const ids = Object.keys(rows)
   if (ids.length > MAX_ROWS) {
     const dead = ids.filter((key) => rows[key].state === 'dead').slice(0, ids.length - MAX_ROWS)
@@ -86,7 +101,7 @@ function applyEventUnsafe(state, event) {
     const { name, callId, arguments: args } = normalized.data ?? {}
     if (!TOOLS.has(name) || typeof callId !== 'string') return state
     const parsed = typeof args === 'string' ? parseJson(args) : plainObject(args) ? args : undefined
-    let next = { ...state, calls: { ...state.calls, [callId]: { name, sessionId: parsed?.sessionId, background: parsed?.background === true } } }
+    let next = { ...state, calls: { ...state.calls, [callId]: jsonFields({ name, sessionId: typeof parsed?.sessionId === 'string' ? parsed.sessionId : undefined, background: parsed?.background === true }) } }
     if (name === 'ssh_exec' && typeof parsed?.sessionId === 'string' && next.rows[parsed.sessionId] !== undefined && next.rows[parsed.sessionId].state !== 'dead') {
       next = setRow(next, parsed.sessionId, { state: 'running', mode: parsed.background === true ? 'bg' : 'fg', lastActivity: at }, at)
     }

@@ -635,6 +635,18 @@ await test('projection registration matches the host contract', async () => {
   eq(await registerProjection({ sessionProjections: { register: () => Promise.reject(new Error('boom')) } }), undefined)
 })
 
+await test('projection state stays plain JSON (no undefined, survives a JSON round trip)', async () => {
+  let state = initState()
+  state = applyEvent(state, { type: 'tool/call', time: 1, data: { callId: 'o1', name: 'ssh_open', arguments: '{"host":"h"}' } })
+  state = applyEvent(state, { type: 'tool/result', time: 2, data: { message: { source: { kind: 'tool', callId: 'o1' }, content: [{ type: 'text', text: '{"sessionId":"s1","host":"h","cwd":"/root"}' }] } } })
+  state = applyEvent(state, { type: 'tool/call', time: 3, data: { callId: 'k1', name: 'ssh_kill', arguments: '{"sessionId":"s1"}' } })
+  state = applyEvent(state, { type: 'tool/result', time: 4, data: { message: { source: { kind: 'tool', callId: 'k1' }, content: [{ type: 'text', text: '{"ok":true}' }] } } })
+  const walk = (v, path) => { if (v === undefined) throw new Error('undefined at ' + path); if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk(x, path + '.' + k) }
+  walk(state, 'state')
+  eq(JSON.stringify(JSON.parse(JSON.stringify(state))), JSON.stringify(state))
+  eq(state.rows.s1.state, 'dead')
+})
+
 await test('projection apply never throws on odd event shapes', async () => {
   let state = initState()
   state = applyEvent(state, { type: 'tool/call', data: { callId: 'c1', name: 'ssh_open', arguments: { host: 'h' } } })
