@@ -11,7 +11,7 @@ import { parseHostList, parseApprovalList } from './hosts.mjs'
 import { buildSshArgv } from './argv.mjs'
 import { SshManager, MANAGER_DEFAULTS } from './manager.mjs'
 import { SessionError } from './session.mjs'
-import { registerProjection, PROJECTION_KEY, registration as projectionRegistration } from './projection.mjs'
+import { registerProjection, PROJECTION_KEY } from './projection.mjs'
 
 export const name = 'ssh'
 export const inject = ['tools']
@@ -300,13 +300,6 @@ export function apply(ctx, config) {
         sessions: manager.list(rootKey(exec.agent)),
         hosts: [...manager.hosts.values()].map((h) => ({ name: h.name, via: h.via, user: h.user, ...(h.userDefaulted ? { userFrom: 'local-login' } : {}) })),
         enabled: manager.settings.enabled,
-        // 投影没挂上时标签页只会空着；把注册结果放在这里，肉眼可查。
-        projection: {
-          key: PROJECTION_KEY,
-          attempted: projectionRegistration.attempted,
-          registered: projectionRegistration.registered,
-          ...(projectionRegistration.error === null ? {} : { error: projectionRegistration.error }),
-        },
         ...(manager.configErrors.length > 0 ? { configErrors: manager.configErrors } : {}),
       }
     },

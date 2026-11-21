@@ -144,28 +144,15 @@ export function projectionDefinition() {
   }
 }
 
-// 注册是否成功必须可查：投影没挂上时标签页只会空着，没有别的症状可追。
-export const registration = { attempted: false, registered: false, error: null, at: 0 }
-
 export function registerProjection(ctx, { onError } = {}) {
-  registration.attempted = true
-  registration.at = Date.now()
-  // 用 Promise.resolve().then 包一层：服务缺席时的同步抛错也会变成一次可记录的拒绝，
-  // 而不是在 inject 回调里直接炸掉、连尝试记录都留不下。
-  const pending = Promise.resolve().then(() => {
-    if (ctx.sessionProjections === undefined) throw new Error('sessionProjections service is absent on the injected context')
-    return ctx.sessionProjections.register(projectionDefinition())
-  })
-  return pending.then((handle) => {
-    registration.registered = true
-    registration.error = null
-    return handle
-  }, (error) => {
-    registration.registered = false
-    registration.error = String(error?.message ?? error)
+  // register() 本身随 ctx 的生命周期撤销，热替换不会留下重复注册。
+  // 宿主契约要求在消费投影前等注册完成，这里把 Promise 交回去；但 plugin/index.mjs 的
+  // ctx.inject 回调忽略返回值，未处理的拒绝会拖垮整个宿主进程，所以默认在这里收尾。
+  const pending = Promise.resolve(ctx.sessionProjections.register(projectionDefinition()))
+  return pending.catch((error) => {
     if (typeof onError === 'function') return onError(error)
     // 注册失败不会抛给调用方（见上），所以这里必须留下能查的痕迹：Tab 会一直空着。
-    try { ctx.logger?.warn?.('ssh projection registration failed; the sessions tab will stay empty: ' + registration.error) } catch {}
+    try { ctx.logger?.warn?.('ssh projection registration failed; the sessions tab will stay empty: ' + String(error?.message ?? error)) } catch {}
     return undefined
   })
 }
