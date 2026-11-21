@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { parseHostList, parseApprovalList } from './hosts.mjs'
 import { buildSshArgv } from './argv.mjs'
 import { SshManager, MANAGER_DEFAULTS } from './manager.mjs'
+import { findWorkingIdentity, listAgentKeys } from './identities.mjs'
 import { SessionError } from './session.mjs'
 import { mountProjection, PROJECTION_KEY, registration as projectionRegistration } from './projection.mjs'
 
@@ -156,7 +157,56 @@ export function apply(ctx, config) {
     else agent.inject(message)
   }
 
-  const manager = new SshManager({ transportFor: transportFor(config), notify: deliver, audit, spoolDir, onChange: () => persistRegistry() })
+  // 「Too many authentication failures」= 服务端 MaxAuthTries 被 agent 里那串钥匙挨个试完了。
+  // 客户端唯一能做的是少报几把：每次只报一把、私钥仍留在 agent 里签名，逐把试到能进的那把。
+  const KEY_MARKER = '__DSH_KEY_OK__'
+  const agentKeyDir = join(stateDir, 'agent-keys')
+  // sshPath 可能只是裸名（走 PATH），也可能指向具体安装；两种都要能配到同目录的 ssh-add。
+  const sshAddCandidates = () => {
+    const derived = live(config.sshPath).replace(/(^|[\\/])ssh(\.exe)?$/i, (whole, slash, ext) => `${slash}ssh-add${ext ?? ''}`)
+    const system = process.env.SystemRoot ?? process.env.windir
+    const bundled = system === undefined ? undefined : `${system}\\System32\\OpenSSH\\ssh-add.exe`
+    return bundled === undefined || bundled === derived ? [derived] : [derived, bundled]
+  }
+  const hostPaths = () => ({ privateKnownHosts: live(config.knownHosts), userKnownHosts: live(config.userKnownHosts) })
+  const discovery = async (host) => {
+    if (host.identityAgent === 'none') return undefined
+    const agent = host.identityAgent
+    let keys = []
+    if (host.via === 'wsl') {
+      const listing = await listAgentKeys({
+        spawn,
+        command: live(config.wslPath),
+        args: [...(host.wslDistro === undefined ? [] : ['-d', host.wslDistro]), '-e', 'env', ...(agent === undefined ? [] : ['SSH_AUTH_SOCK=' + agent]), 'ssh-add', '-L'],
+        env: childEnv(),
+      })
+      keys = listing.keys
+    } else {
+      // 裸名 ssh 靠 PATH 解析；PATH 里找不到 ssh-add 时再试 OpenSSH 自己的安装目录。
+      for (const command of sshAddCandidates()) {
+        keys = (await listAgentKeys({ spawn, command, env: childEnv(agent === undefined ? undefined : { SSH_AUTH_SOCK: agent }) })).keys
+        if (keys.length > 0) break
+      }
+    }
+    if (keys.length === 0) return undefined
+    return await findWorkingIdentity({
+      host,
+      spawn,
+      keys,
+      dir: agentKeyDir,
+      marker: KEY_MARKER,
+      argvFor: (target) => {
+        const built = buildSshArgv(target, hostPaths(), {
+          sshPath: live(config.sshPath),
+          wslPath: live(config.wslPath),
+          remoteCommand: "exec /bin/sh -c 'echo " + KEY_MARKER + "'",
+        })
+        return { command: built.command, args: built.args, env: childEnv(built.env) }
+      },
+    })
+  }
+
+  const manager = new SshManager({ transportFor: transportFor(config), discovery, notify: deliver, audit, spoolDir, onChange: () => persistRegistry() })
 
   // 这些字段是 volatile：宿主改完只就地更新引用、不重挂插件（cordis-plugin-loader 的
   // _commitVolatile 会 emit loader/volatile-update），所以要在事件里重读一次，

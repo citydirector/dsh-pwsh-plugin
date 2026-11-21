@@ -33,7 +33,7 @@ export function describeCredentials(host) {
  * @param sshPath Windows 侧 ssh 可执行文件（默认 ssh）
  * @returns { command, args, env? }；env 只含要覆盖的变量，调用方叠在 process.env 上
  */
-export function buildSshArgv(host, paths, { sshPath = 'ssh', wslPath = 'wsl.exe' } = {}) {
+export function buildSshArgv(host, paths, { sshPath = 'ssh', wslPath = 'wsl.exe', remoteCommand = 'exec /bin/sh' } = {}) {
   const known = [paths.privateKnownHosts, paths.userKnownHosts].filter((item) => typeof item === 'string' && item.length > 0)
   if (known.length === 0) throw new Error('a known_hosts path is required')
   for (const file of known) {
@@ -49,7 +49,7 @@ export function buildSshArgv(host, paths, { sshPath = 'ssh', wslPath = 'wsl.exe'
   // 命令行 -o 压过用户 ~/.ssh/config 里的 IdentityAgent；用 SSH_AUTH_SOCK 关键字让 ssh 自己读环境变量，
   // 免得把带反斜杠的命名管道塞进 argv —— ssh 解析 -o 时会把反斜杠当转义。
   if (host.via === 'windows' && agent !== undefined) sshArgs.push('-o', 'IdentityAgent=SSH_AUTH_SOCK')
-  sshArgs.push('-p', String(host.port), '-l', host.user, '--', host.sshHost, 'exec /bin/sh')
+  sshArgs.push('-p', String(host.port), '-l', host.user, '--', host.sshHost, remoteCommand)
 
   // Windows 侧：管道名经环境变量交给 ssh.exe；argv 里不出现反斜杠。
   if (host.via === 'windows') return agent === undefined ? { command: sshPath, args: sshArgs } : { command: sshPath, args: sshArgs, env: { SSH_AUTH_SOCK: agent } }

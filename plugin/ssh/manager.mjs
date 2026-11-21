@@ -50,8 +50,11 @@ export class SshManager {
    * @param o.notify ({ owner, agentId, text, wake }) => void
    * @param o.audit (record) => void
    */
-  constructor({ transportFor, clock = realClock, notify = () => {}, audit = () => {}, spoolDir, onChange = () => {} } = {}) {
+  constructor({ transportFor, clock = realClock, notify = () => {}, audit = () => {}, spoolDir, onChange = () => {}, discovery } = {}) {
     this.transportFor = transportFor
+    // 发现「服务端只肯收这一把钥匙」的入口；测试不传就没有这条重试路径。
+    this.discovery = discovery
+    this.pinnedIdentities = new Map()
     this.clock = clock
     this.notifyHook = notify
     this.auditHook = audit
@@ -156,6 +159,31 @@ export class SshManager {
       if (previous === undefined) throw new SessionError('unknown', `no session ${reopen} to reopen`)
       if (previous.state !== 'dead') throw new SessionError('busy', `session ${reopen} is still alive`)
     }
+    const pinned = host.identityFile === undefined ? this.pinnedIdentities.get(host.name) : undefined
+    let session = this.startSession(ownerKey, owner, pinned === undefined ? host : { ...host, identityFile: pinned }, { name, shell })
+    let result
+    try {
+      result = await session.open({ signal })
+    } catch (error) {
+      // agent 里的钥匙比服务端肯给的机会多时，第一次握手必然撞上 MaxAuthTries；换一把再试一次。
+      const found = await this.findIdentity(ownerKey, host, error)
+      if (found === undefined) throw error
+      owner.sessions.delete(session.id)
+      session = this.startSession(ownerKey, owner, { ...host, identityFile: found.identityFile }, { name, shell })
+      result = await session.open({ signal })
+      result.identityPinned = { label: found.label, tried: found.tried }
+    }
+    if (previous?.cwd !== undefined) {
+      const back = await session.exec(`cd -- ${shQuote(previous.cwd)}`).catch(() => undefined)
+      if (back?.exitCode === 0) result.cwd = session.cwd
+    }
+    result.idleMinutes = this.settings.idleMinutes
+    result.expiresAt = session.openedAt + this.settings.hardCapHours * 3600000
+    return result
+  }
+
+  /** 建会话并登记；换钥匙重试走同一条路径，别在 open 里写第二份。 */
+  startSession(ownerKey, owner, host, { name, shell }) {
     const id = `s${owner.nextId++}`
     const session = new SshSession({
       id, host, name, shell,
@@ -172,14 +200,22 @@ export class SshManager {
     session.on('dead', () => this.onDead(ownerKey, session))
     this.audit({ event: 'open', owner: ownerKey, sessionId: id, host: host.name })
     this.onChange()
-    const result = await session.open({ signal })
-    if (previous?.cwd !== undefined) {
-      const back = await session.exec(`cd -- ${shQuote(previous.cwd)}`).catch(() => undefined)
-      if (back?.exitCode === 0) result.cwd = session.cwd
-    }
-    result.idleMinutes = this.settings.idleMinutes
-    result.expiresAt = session.openedAt + this.settings.hardCapHours * 3600000
-    return result
+    return session
+  }
+
+  /**
+   * 握手被 MaxAuthTries 掐断时，逐把只报一把钥匙再试一次；成功一次就记住这台主机，
+   * 之后每次连接都只报它。返回 undefined 表示这条错误不该按「钥匙太多」处理。
+   */
+  async findIdentity(ownerKey, host, error) {
+    if (this.discovery === undefined || host.identityFile !== undefined) return undefined
+    if (!/Too many authentication failures/i.test(String(error?.message ?? error))) return undefined
+    let found
+    try { found = await this.discovery(host, error) } catch { return undefined }
+    if (found?.identityFile === undefined) return undefined
+    this.pinnedIdentities.set(host.name, found.identityFile)
+    this.audit({ event: 'identity-pinned', owner: ownerKey, host: host.name, identityFile: found.identityFile, label: found.label, tried: found.tried })
+    return found
   }
 
   async exec(ownerKey, args) {

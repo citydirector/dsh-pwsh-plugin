@@ -11,7 +11,8 @@ import { SentinelSplitter, commandScript } from '../plugin/ssh/framing.mjs'
 import { decodeOutput, foldCarriageReturns, OutputBuffer, renderSnapshot } from '../plugin/ssh/output.mjs'
 import { SshSession } from '../plugin/ssh/session.mjs'
 import { SshManager } from '../plugin/ssh/manager.mjs'
-import { applyEvent, initState, view, registerProjection } from '../plugin/ssh/projection.mjs'
+import { parseAgentKeys, findWorkingIdentity } from '../plugin/ssh/identities.mjs'
+import { applyEvent, initState, view, registerProjection, mountProjection, registration } from '../plugin/ssh/projection.mjs'
 import * as plugin from '../plugin/ssh/index.mjs'
 
 if (process.platform === 'win32') {
@@ -585,6 +586,30 @@ await test('projection folds tool calls, results and notices', () => {
   assert(same === state, 'unrelated events keep the same reference')
 })
 
+await test('projection folds code-mode sub-calls', () => {
+  // 代码模式（PTC）里模型调的是 run_code，脚本中的 ssh_* 记成 ptc-dispatch 事件。
+  // 只认 tool/call 的话这一整类事件都会被跳过，标签页永远是空的。
+  let state = initState()
+  const start = (subCallId, name, args) => ({ type: 'tool/ptc-dispatch-start', data: { rootCallId: 'c9', parentCallId: 'c9', subCallId, name, arguments: args } })
+  const done = (subCallId, name, value, isError = false) => ({ type: 'tool/ptc-dispatch', data: { rootCallId: 'c9', parentCallId: 'c9', subCallId, name, isError, content: [{ type: 'text', text: JSON.stringify(value) }] } })
+  state = applyEvent(state, start('x1', 'ssh_open', { host: 'qq-bot' }))
+  state = applyEvent(state, done('x1', 'ssh_open', { sessionId: 's1', host: 'qq-bot', cwd: '/root', shell: 'bash', os: 'Linux', expiresAt: 9, idleMinutes: 30 }))
+  eq(view(state).rows.length, 1)
+  eq([view(state).rows[0].sessionId, view(state).rows[0].host, view(state).rows[0].state], ['s1', 'qq-bot', 'idle'])
+  state = applyEvent(state, start('x2', 'ssh_exec', { sessionId: 's1', command: 'sleep 5', background: true }))
+  eq(view(state).rows[0].state, 'running')
+  state = applyEvent(state, done('x2', 'ssh_exec', { jobId: 'j1', logPath: '/tmp/j1' }))
+  // 后台命令的返回值只说明任务已开跑，会话仍然忙；要等通知到达才算回到 idle。
+  eq([view(state).rows[0].state, view(state).rows[0].mode, view(state).rows[0].jobId], ['running', 'bg', 'j1'])
+  state = applyEvent(state, { type: 'user/message', data: { source: { kind: 'ssh' }, content: [{ type: 'text', text: '[ssh] qq-bot · s1 后台任务 j1 已结束：exit=0，用时 1s，输出 0 B。用 ssh_read 查看。' }] } })
+  eq(view(state).rows[0].state, 'idle')
+  // 与 SSH 无关的子调用不该凭空造出会话行
+  const before = view(state)
+  state = applyEvent(state, start('x3', 'read', { file_path: '/etc/hosts' }))
+  state = applyEvent(state, done('x3', 'read', { content: 'x' }))
+  eq(view(state).rows.length, 1)
+  assert(before !== undefined, 'the earlier view stays addressable')
+})
 await test('projection view reuses the reference the host compares', () => {
   let state = initState()
   const first = view(state)
@@ -602,13 +627,26 @@ await test('projection registration matches the host contract', async () => {
   const pending = registerProjection(ctx)
   assert(typeof pending?.then === 'function', 'registerProjection hands back a promise a caller may await')
   assert(await pending === handle, 'the registration handle is passed through')
-  eq([definition.key, definition.stateVersion], ['sshSessions', 1])
+  eq([registration.attempted, registration.registered, registration.error], [true, true, null])
+  // 2：折叠开始认代码模式的 ptc-dispatch 事件。按宿主契约，语义变了就要换版本，
+  // 否则持久化缓存里 v1 的空检查点会被继续采用，老会话恢复出来仍是空表。
+  eq([definition.key, definition.stateVersion], ['sshSessions', 2])
   // 宿主运行时只调 .parse：状态与视图都要过得了这两个 schema
   const state = definition.stateSchema.parse(definition.init())
   const next = definition.apply(state, { type: 'tool/call', data: { callId: 'c1', name: 'ssh_open', arguments: { host: 'local' } } })
   definition.wire.viewSchema.parse(definition.wire.view(next))
   // plugin/index.mjs 不 await 这个 Promise：拒绝必须被收在这里，不能变成未处理的拒绝
   eq(await registerProjection({ sessionProjections: { register: () => Promise.reject(new Error('boom')) } }), undefined)
+  // 失败必须留痕：标签页空着时，ssh_list 是唯一能看到原因的地方。
+  eq([registration.attempted, registration.registered, registration.error], [true, false, 'boom']) 
+})
+
+await test('mountProjection resolves to undefined so the injected child fiber stays healthy', async () => {
+  // 插件体（这里就是 inject 回调）的返回值会被 cordis 当 effect 收集：交回 ProjectionHandle
+  // 会抛 Invalid effect，子 fiber 进失败态并卸载，注册随之释放 —— 标签页于是永远空着。
+  const handle = { stateOf: () => undefined, readerFor: () => undefined, dispose: () => {} }
+  eq(await mountProjection({ sessionProjections: { register: () => Promise.resolve(handle) } }), undefined)
+  eq([registration.registered, registration.error], [true, null])
 })
 
 // ---- 浏览器半侧：SSH 设置分组 -------------------------------------------------
@@ -1026,6 +1064,72 @@ if (realSshd.skip !== undefined) {
     await realSshd.stop()
   }
 }
+
+// ---- 钥匙太多：一次只报一把 ---------------------------------------------------
+
+await test('agent key listing drops anything that is not a public key', () => {
+  const text = [
+    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL7b card-a',
+    'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ==',
+    'ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAA= work',
+    'The agent has no identities.',
+    'ssh-ed25519 not-base64!! broken',
+  ].join('\n')
+  eq(parseAgentKeys(text).length, 3)
+  eq(parseAgentKeys('').length, 0)
+})
+
+await test('keys are offered one at a time until one gets through', async () => {
+  const keys = parseAgentKeys(['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL first-key', 'ssh-rsa AAAAB3Nza second-key'].join('\n'))
+  const tried = []
+  const fakeSpawn = (command, args) => {
+    const file = args.find((arg) => arg.startsWith('IdentityFile=')).slice('IdentityFile='.length)
+    const line = readFileSync(file, 'utf8')
+    const second = line.includes('second-key')
+    tried.push(second ? 'second' : 'first')
+    return spawn('sh', ['-c', second ? 'echo __DSH_KEY_OK__' : 'echo denied >&2; exit 255'], { stdio: 'pipe' })
+  }
+  const found = await findWorkingIdentity({
+    host: { name: 'w', via: 'windows' },
+    spawn: fakeSpawn,
+    keys,
+    dir: join(work, 'agent-keys'),
+    argvFor: (host) => ({ command: 'sh', args: ['-c', 'unused', 'IdentityFile=' + host.identityFile], env: {} }),
+  })
+  eq(tried, ['first', 'second'])
+  eq([found.label, found.tried], ['second-key', 2])
+  assert(existsSync(found.identityFile), 'the chosen key should have a .pub on disk')
+})
+
+await test('too many keys: the manager retries with one key and remembers it', async () => {
+  const seen = []
+  const transports = []
+  const { m } = newManager(new FakeClock(), {
+    discovery: async (host) => { seen.push(host.name); return { identityFile: '/tmp/one.pub', label: 'card', tried: 2 } },
+    transportFor: (host) => {
+      transports.push(host.identityFile)
+      if (host.identityFile !== undefined) return localTransport()
+      return { spawnMain: () => spawn('sh', ['-c', 'echo "Received disconnect from 127.0.0.1 port 22:2: Too many authentication failures" >&2; exit 255'], { stdio: 'pipe' }), runSide: async () => ({ code: 0 }) }
+    },
+  })
+  const first = await m.open('A', { host: 'local' })
+  eq(first.identityPinned, { label: 'card', tried: 2 })
+  eq(seen, ['local'])
+  await m.open('A', { host: 'local' })
+  eq(transports, [undefined, '/tmp/one.pub', '/tmp/one.pub'])
+  m.dispose()
+})
+
+await test('too many keys: a plain auth failure is not retried', async () => {
+  let called = 0
+  const { m } = newManager(new FakeClock(), {
+    discovery: async () => { called += 1; return { identityFile: '/tmp/none.pub', label: 'x', tried: 1 } },
+    transportFor: () => ({ spawnMain: () => spawn('sh', ['-c', 'echo "tester@127.0.0.1: Permission denied (publickey)." >&2; exit 255'], { stdio: 'pipe' }), runSide: async () => ({ code: 0 }) }),
+  })
+  await rejects(m.open('A', { host: 'local' }), /handshake|Permission denied/)
+  eq(called, 0)
+  m.dispose()
+})
 
 rmSync(work, { recursive: true, force: true })
 console.log(`SUMMARY pass=${pass} fail=${fail} skip=${skip}`)

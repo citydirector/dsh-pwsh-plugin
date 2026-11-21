@@ -135,6 +135,8 @@ ssh -T -e none -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UpdateHos
 - 凭据只在 `via` 这一侧找：密钥文件、agent、`~/.ssh/config`、known_hosts 都是那一侧的，另一侧读不到也不影响。只要那一侧自己有钥匙（`identityFile`）或自己的 agent（`identityAgent`），就能连上。`BatchMode=yes` 不问口令，带口令的钥匙必须先加进同一侧的 agent。
 - 连接失败时，报错末尾会附一行 `via … · user@host:port · agent … · key …`，说明这次用的是哪一侧、哪个 agent、哪把钥匙。
 - ssh 进程由宿主进程直接启动，不经沙箱受限令牌（受限令牌下管道会 `EPERM`）。它只连远端，不读写本地工作区。
+- **钥匙太多会被服务端踢出来。** agent 里挂着一串钥匙时，ssh 会按顺序挨个试；`MaxAuthTries`（多数发行版默认 6）用完就断开，报 `Too many authentication failures`，正确的钥匙往往还没轮到。插件遇到这条错误时会在这一侧跑 `ssh-add -L` 取出公钥列表，**每把钥匙单独写一个 `.pub`**（私钥始终留在 agent 里签名，不落盘），逐把用 `-o IdentityFile=<pub> -o IdentitiesOnly=yes` 试一次握手；第一把能进的记住，这台主机之后只报这一把。公钥文件放在 `stateDir/agent-keys/`（`stateDir` 默认 `<DSH_HOME>/ssh`）。想直接跳过发现过程，就在主机上写死 `identityFile`。
+- 线索只在这一侧找：`via: wsl` 用 `wsl.exe -e env SSH_AUTH_SOCK=… ssh-add -L`，Windows 侧用 `ssh-add.exe`（先按 `sshPath` 推导，找不到再试 `%SystemRoot%\System32\OpenSSH\ssh-add.exe`）。两侧都读不到公钥时保持原报错，不会假装成功。
 
 ## 远端 shell 与分帧
 
