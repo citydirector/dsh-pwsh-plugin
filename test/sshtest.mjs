@@ -585,6 +585,30 @@ await test('projection folds tool calls, results and notices', () => {
   assert(same === state, 'unrelated events keep the same reference')
 })
 
+await test('projection folds code-mode sub-calls', () => {
+  // 代码模式（PTC）里模型调的是 run_code，脚本中的 ssh_* 记成 ptc-dispatch 事件。
+  // 只认 tool/call 的话这一整类事件都会被跳过，标签页永远是空的。
+  let state = initState()
+  const start = (subCallId, name, args) => ({ type: 'tool/ptc-dispatch-start', data: { rootCallId: 'c9', parentCallId: 'c9', subCallId, name, arguments: args } })
+  const done = (subCallId, name, value, isError = false) => ({ type: 'tool/ptc-dispatch', data: { rootCallId: 'c9', parentCallId: 'c9', subCallId, name, isError, content: [{ type: 'text', text: JSON.stringify(value) }] } })
+  state = applyEvent(state, start('x1', 'ssh_open', { host: 'qq-bot' }))
+  state = applyEvent(state, done('x1', 'ssh_open', { sessionId: 's1', host: 'qq-bot', cwd: '/root', shell: 'bash', os: 'Linux', expiresAt: 9, idleMinutes: 30 }))
+  eq(view(state).rows.length, 1)
+  eq([view(state).rows[0].sessionId, view(state).rows[0].host, view(state).rows[0].state], ['s1', 'qq-bot', 'idle'])
+  state = applyEvent(state, start('x2', 'ssh_exec', { sessionId: 's1', command: 'sleep 5', background: true }))
+  eq(view(state).rows[0].state, 'running')
+  state = applyEvent(state, done('x2', 'ssh_exec', { jobId: 'j1', logPath: '/tmp/j1' }))
+  // 后台命令的返回值只说明任务已开跑，会话仍然忙；要等通知到达才算回到 idle。
+  eq([view(state).rows[0].state, view(state).rows[0].mode, view(state).rows[0].jobId], ['running', 'bg', 'j1'])
+  state = applyEvent(state, { type: 'user/message', data: { source: { kind: 'ssh' }, content: [{ type: 'text', text: '[ssh] qq-bot · s1 后台任务 j1 已结束：exit=0，用时 1s，输出 0 B。用 ssh_read 查看。' }] } })
+  eq(view(state).rows[0].state, 'idle')
+  // 与 SSH 无关的子调用不该凭空造出会话行
+  const before = view(state)
+  state = applyEvent(state, start('x3', 'read', { file_path: '/etc/hosts' }))
+  state = applyEvent(state, done('x3', 'read', { content: 'x' }))
+  eq(view(state).rows.length, 1)
+  assert(before !== undefined, 'the earlier view stays addressable')
+})
 await test('projection view reuses the reference the host compares', () => {
   let state = initState()
   const first = view(state)
