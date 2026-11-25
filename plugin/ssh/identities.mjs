@@ -132,6 +132,8 @@ export function probeOnce({ spawn, command, args, env, timeoutMs, marker }) {
     const timer = setTimeout(() => done(false), timeoutMs)
     child.on('error', () => done(false))
     child.on('exit', (code) => done(code === 0 && out.includes(marker)))
+    // 按流解码：逐块 String(chunk) 会把跨块的多字节字符（中文注释）切成乱码。
+    child.stdout?.setEncoding?.('utf8')
     child.stdout?.on('data', (chunk) => { out += String(chunk) })
     child.stderr?.on('data', () => {})
     child.stdin?.on('error', () => {})
@@ -159,7 +161,10 @@ export async function listAgentKeys({ spawn, command, args = ['-L'], env, timeou
       const keys = parseAgentKeys(out)
       done(keys.length === 0 ? { keys: [], error: err.trim() || 'the agent holds no keys' } : { keys })
     })
+    // 按流解码：逐块 String(chunk) 会把跨块的多字节字符（中文注释）切成乱码。
+    child.stdout?.setEncoding?.('utf8')
     child.stdout?.on('data', (chunk) => { out += String(chunk) })
+    child.stderr?.setEncoding?.('utf8')
     child.stderr?.on('data', (chunk) => { err += String(chunk) })
     child.stdin?.on('error', () => {})
   })
