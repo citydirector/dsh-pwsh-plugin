@@ -9,7 +9,7 @@ import { apply as applyBash } from '../wsl/custom-bash.mjs'
 
 const recycleSource = readFileSync(new URL('./file-recycle.cs', import.meta.url), 'utf8')
 const WINDOWS_SOURCE = readFileSync(new URL('./file-worker.ps1', import.meta.url), 'utf8').replace('# RECYCLE_HELPER',()=>"$null = Add-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+Buffer.from(recycleSource).toString('base64')+"')))")
-const WINDOWS_BOOT = "$s=[IO.MemoryStream]::new([Convert]::FromBase64String('"+gzipSync(WINDOWS_SOURCE).toString('base64')+"'));$g=[IO.Compression.GzipStream]::new($s,[IO.Compression.CompressionMode]::Decompress);$r=[IO.StreamReader]::new($g);try{& ([ScriptBlock]::Create($r.ReadToEnd()))}finally{$r.Dispose();$s.Dispose()}"
+const WINDOWS_BOOT = "$s=[IO.MemoryStream]::new([Convert]::FromBase64String('"+gzipSync(WINDOWS_SOURCE).toString('base64')+"'));$g=[IO.Compression.GzipStream]::new($s,[IO.Compression.CompressionMode]::Decompress);$r=[IO.StreamReader]::new($g,[Text.Encoding]::UTF8);try{& ([ScriptBlock]::Create($r.ReadToEnd()))}finally{$r.Dispose();$s.Dispose()}"
 const POSIX_SOURCE = readFileSync(new URL('./file-worker.cjs', import.meta.url), 'utf8')
 const quote = value => "'" + value.replaceAll("'", "'\\''") + "'"
 // volatile 字段解析成带 get() 的引用对象；普通配置项原样返回。

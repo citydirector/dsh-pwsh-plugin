@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-$skadiRequest = [Console]::In.ReadToEnd() | ConvertFrom-Json -Depth 64
+# stdin 是 Node 送来的 UTF-8；[Console]::In 跟随控制台代码页（中文系统是 936），中文路径会被读成乱码。
+$skadiRequest = [IO.StreamReader]::new([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new($false)).ReadToEnd() | ConvertFrom-Json -Depth 64
 $null = Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;

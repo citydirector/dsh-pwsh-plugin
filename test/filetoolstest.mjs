@@ -49,6 +49,11 @@ try {
  check('recycle-sink-vetoes-permanent-delete',()=>assert(verified.refused<0&&verified.allowed===0))
  check('recycled-item-visible-in-windows-bin',()=>assert(verified.inRecycleBin===1))
  await assert.rejects(()=>remove(p.planId),/used|Unknown/);check('plans-are-single-use',()=>{})
+ // 中文路径：worker 必须按 UTF-8 读 stdin；按控制台代码页（中文系统是 936）读会把「网关」读成乱码，再报路径不存在。
+ const cjkDir=join(root,'网关-中文路径'),cjkFile=join(cjkDir,'说明.txt');mkdirSync(cjkDir);writeFileSync(cjkFile,'中文')
+ const cjkPlan=await plan(cjkDir)
+ check('cjk-path-plan-keeps-exact-names',()=>assert(cjkPlan.targets[0]===cjkDir&&cjkPlan.entries.some(e=>e.path===cjkFile)))
+ await remove(cjkPlan.planId);check('cjk-path-recycled',()=>assert(!existsSync(cjkDir)))
  // 每次 PTC 程序各自绑定 SDK，计划跨程序调用仍归属于同一真实会话。
  const {PtcExecutor}=await importFromDsh('dsh-tool-executor-ptc/lib/index.js')
  const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor

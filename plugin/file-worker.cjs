@@ -94,7 +94,7 @@ async function main(q) {
    if(q.op==='clean')await fs.rm(p,{recursive:true})
    else await new Promise((resolve,reject)=>{
     const child=cp.spawn('gio',['trash','--',p],{stdio:['ignore','ignore','pipe']});let error=''
-    child.stderr.on('data',b=>error=(error+b).slice(-8192));child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(Error(error||'gio trash failed')))
+    child.stderr.setEncoding('utf8');child.stderr.on('data',b=>error=(error+b).slice(-8192));child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(Error(error||'gio trash failed')))
    })
    try{await fs.lstat(p);throw Error('Target remains after removal: '+p)}catch(e){if(e.code!=='ENOENT')throw e}
    removed.push(p)
