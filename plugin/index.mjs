@@ -178,7 +178,7 @@ export function apply(ctx, config) {
     if (session) await session.dispose(reason)
   }
 
-  const acquire = async (slot, workdir, agent, signal) => {
+  const acquire = async (slot, agent, signal) => {
     if (signal?.aborted) throw new Error('pwsh_run cancelled before execution')
     const cwd = await resolveCwd(ctx, agent, signal)
     const policy = resolvePolicy(agent) ?? null
@@ -233,7 +233,9 @@ export function apply(ctx, config) {
         }
         catch (error) { throw new Error(describeConfineFailure(error, policy.workspaceRoot)) }
       }
-      const session = await startSession(ctx.subprocess, { executable, argv, cwd: workdir ?? cwd,
+      // 进程总从会话目录启动。Windows 进程会一直持有启动目录的句柄，不允许删除共享，直到退出；
+      // workdir 只在每次调用时由 session-server 用 Set-Location 生效，不能拿来当启动目录。
+      const session = await startSession(ctx.subprocess, { executable, argv, cwd,
         serverSource: SERVER_SOURCE, label: slot.label, maxOutputBytes, signal: startupSignal })
       if (stopped || startupSignal.aborted) {
         await session.dispose('pwsh session startup cancelled')
@@ -268,6 +270,19 @@ export function apply(ctx, config) {
     sessions.clear()
   }, 'pwsh-run.sessions')
 
+  // 子代理结束时回收它的常驻进程，不再等 idleMs。正在执行的调用跑完后再回收（见 enqueue 的 finally）。
+  if (typeof ctx.on === 'function') {
+    ctx.effect(() => ctx.on('agent/disposed', (event) => {
+      const id = event?.agent?.session?.id
+      const slot = typeof id === 'string' ? sessions.get(id) : undefined
+      if (!slot) return
+      if (slot.users > 0) { slot.retired = true; return }
+      const retiring = evict(slot, slot.session, 'pwsh session reclaimed: agent disposed')
+      if (sessions.get(id) === slot) sessions.delete(id)
+      void retiring
+    }), 'pwsh-run.sessions.agent-disposed')
+  }
+
   const runScript = async (args, exec, slot) => {
     const requested = args.timeoutMs ?? defaultTimeoutMs
     const terminated = slot.isolated
@@ -276,7 +291,7 @@ export function apply(ctx, config) {
     const workdir = typeof args.workdir === 'string' && args.workdir.length > 0 ? args.workdir : undefined
     // 工作目录用 API 设置，避免在正文前拼语句破坏 using / param / #requires。
     let session
-    try { session = await acquire(slot, workdir, exec?.agent, exec?.signal) }
+    try { session = await acquire(slot, exec?.agent, exec?.signal) }
     catch (error) {
       const message = String(error?.message ?? error)
       throw new Error(/^pwsh_run\b/.test(message) ? message : 'pwsh_run could not start a session: ' + message)
@@ -335,6 +350,7 @@ export function apply(ctx, config) {
     }).finally(async () => {
       if (slot.isolated) await evict(slot, slot.session, 'isolated pwsh call completed')
       slot.users--
+      if (slot.retired && slot.users === 0) await evict(slot, slot.session, 'pwsh session reclaimed: agent disposed')
       if (slot.session) slot.session.lastUsed = Date.now()
       if (!slot.session && slot.users === 0 && sessions.get(key) === slot) sessions.delete(key)
     })

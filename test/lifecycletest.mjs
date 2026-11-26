@@ -17,10 +17,10 @@ function runtime(options = {}) {
       if (prior) return Promise.resolve(prior)
       return new Promise((resolve) => waiting.push({ script, resolve }))
     },
-    spawn() {
+    spawn(spec) {
       let finish
       const handle = {
-        stdout: new EventEmitter(), stderr: new EventEmitter(), terminated: 0, count: 0,
+        cwd: spec?.cwd, stdout: new EventEmitter(), stderr: new EventEmitter(), terminated: 0, count: 0,
         done: new Promise((resolve) => { finish = resolve }),
         terminate() { this.terminated++; finish({ exitCode: 1 }) },
         waitForExit() { return this.done },
@@ -59,7 +59,7 @@ function harness(config = {}, options = {}) {
   let registration
   const h = {
     subprocess, policy: { mode: 'danger-full-access', workspaceRoot: process.cwd() }, cwd: process.cwd(),
-    resolutions: 0, confined: 0, ensure: undefined,
+    resolutions: 0, confined: 0, ensure: undefined, listeners: new Map(),
     sandbox: { async confine(argv) { h.confined++; return { argv } } },
     close: async () => {
       for (const dispose of effects.reverse()) dispose?.()
@@ -78,6 +78,7 @@ function harness(config = {}, options = {}) {
     },
     tools: { register(value) { registration = value; return () => {} } },
     effect(fn) { effects.push(fn()) },
+    on(name, listener) { h.listeners.set(name, listener); return () => h.listeners.delete(name) },
   }
   apply(ctx, config)
   return h
@@ -277,4 +278,32 @@ test('missing session ID and invalid timeout are rejected before spawn', opts, a
   assert.equal(validateTimeout(1), 1); assert.equal(validateTimeout(MAX_TIMEOUT_MS), MAX_TIMEOUT_MS)
   await assert.rejects(async () => h.run('anonymous', null), /session ID/)
   assert.equal(h.subprocess.handles.length, 0)
+})
+test('workdir never becomes the process start directory', opts, async (t) => {
+  const h = harness(); t.after(h.close)
+  const elsewhere = process.cwd() + '\\elsewhere'
+  assert.equal((await h.run('increment', 'A', { workdir: elsewhere })).text, '1')
+  assert.equal(h.subprocess.handles[0].cwd, h.cwd)
+  assert.equal(h.subprocess.requests.find((x) => x.script === 'increment').workdir, elsewhere)
+})
+test('agent disposal reclaims only that idle session', opts, async (t) => {
+  const h = harness(); t.after(h.close)
+  await h.run('increment', 'A'); await h.run('increment', 'B')
+  h.listeners.get('agent/disposed')({ agent: { session: { id: 'A' } } })
+  await sleep(20)
+  assert.equal(h.subprocess.handles[0].terminated, 1)
+  assert.equal(h.subprocess.handles[1].terminated, 0)
+  assert.equal((await h.run('increment', 'A')).text, '1')
+  assert.equal(h.subprocess.handles.length, 3)
+})
+test('agent disposal waits for a running call before reclaiming', opts, async (t) => {
+  const h = harness(); t.after(h.close)
+  const run = h.run('hold', 'A')
+  const entry = await h.subprocess.request('hold')
+  h.listeners.get('agent/disposed')({ agent: { session: { id: 'A' } } })
+  await sleep(20)
+  assert.equal(entry.handle.terminated, 0)
+  entry.handle.reply(entry.id, ['O:ZG9uZQ==']); assert.equal((await run).text, 'done')
+  await sleep(20)
+  assert.equal(entry.handle.terminated, 1)
 })

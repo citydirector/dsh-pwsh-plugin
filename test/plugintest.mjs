@@ -1,7 +1,7 @@
 // 模拟 DSH 的 ctx 接口，驱动 plugin/index.mjs 的完整 apply/execute 路径
 import { spawn } from "node:child_process";
 import { apply } from "../plugin/index.mjs";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, renameSync } from "node:fs";
 
 const PWSH = process.env.PWSH_BIN ?? "pwsh";
 const subprocess = {
@@ -81,6 +81,18 @@ mkdirSync(dollarDir, { recursive: true });
 r = await run("Write-Output $PWD.Path", { workdir: dollarDir });
 check("workdir-dollar", r.text.trim() === dollarDir, JSON.stringify(r.text));
 rmSync(dollarDir, { recursive: true, force: true });
+
+// 9b. 新会话首调带 workdir：进程不能从该目录启动，否则目录在会话存活期间改不了名、删不掉
+{
+  const lockDir = process.cwd() + "\\_skadi_temp\\_cwd-lock-probe";
+  mkdirSync(lockDir, { recursive: true });
+  const execW = { agent: { session: { id: "sess-W", header: { cwd: process.cwd() } } }, signal: undefined };
+  r = await registration.execute({ script: "Write-Output $PWD.Path", workdir: lockDir }, execW);
+  let free = false;
+  try { renameSync(lockDir, lockDir + "-moved"); renameSync(lockDir + "-moved", lockDir); free = true; } catch (error) { free = String(error.code); }
+  check("workdir-does-not-lock", r.text.trim() === lockDir && free === true, JSON.stringify({ pwd: r.text, free }));
+  try { rmSync(lockDir, { recursive: true, force: true }); } catch (error) { console.error("cleanup left " + lockDir + ": " + error.code); }
+}
 
 // 10. 大脚本
 const big = "Write-Output 'big-ok'\n" + Array.from({length: 4000}, (_, i) => "$v" + i + " = " + i).join("\n");
