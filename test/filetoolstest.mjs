@@ -185,6 +185,8 @@ try {
  nativeFixture()
  check('guard-live-blocks-native-and-persistent',()=>{for(const name of ['pwsh','pwsh_run'])assert(guards[0]({name,arguments:{command:'Remove-Item fixture',script:'Remove-Item fixture'}})?.includes('file_remove'))})
  check('guard-blocks-bash-and-common-APIs',()=>{assert(deletionCommand('rm -rf /tmp/a','bash'));assert(deletionCommand('[IO.File]::Delete($p)','pwsh'));assert(deletionCommand('fs.rmSync(p)','bash'))})
+ check('guard-blocks-static-delete-on-file-types',()=>{for(const s of ["[IO.File]::Delete('x')",'[System.IO.Directory]::Delete($p,$true)','[system.io.file]::delete($p)',"using namespace System.IO\n[File]::Delete($p)","[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($p,'OnlyErrorDialogs','SendToRecycleBin')",'$t=[IO.File]; $t::Delete($p)','[Foo[int]]::Delete($p)','Get-Item x; [IO.File]::DeleteFile($p)'])assert(deletionCommand(s,'pwsh'),s)})
+ check('guard-allows-static-delete-on-other-types',()=>{for(const s of ['[Probe]::Delete($p)','[IO.FileProbe]::Delete($p)','[Profile]::DeleteFile($p)','[My.Tools.Checker]::DeleteDirectory($p)','[IO.File]::Exists($p)'])assert.equal(deletionCommand(s,'pwsh'),null,s)})
  check('guard-allows-reading-and-test-processes',()=>{assert.equal(deletionCommand('Get-Item x # Remove-Item x','pwsh'),null);assert.equal(guards[0]({name:'pwsh_run',arguments:{script:'node test/itest.mjs'}}),undefined)})
  check('file-tools-are-not-blocked-by-guard',()=>assert.equal(guards[0]({name:'file_remove',arguments:{action:'execute'}}),undefined))
  // 最后仅回收此脚本创建且清单可见的夹具目录内容，保留工作区根。

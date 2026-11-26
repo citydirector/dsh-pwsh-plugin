@@ -1,4 +1,14 @@
 // 入口检查可解释常见删除语法，不代替操作系统的文件权限。
+// 静态方法叫 Delete 不一定是删文件：只有写死的类型是文件类（File、Directory、VB 的 FileSystem）才算删除。
+// 类型来自变量、表达式或写法认不出时照拦，因为看不出它是什么。
+const DELETING_TYPES = new Set(['file', 'directory', 'filesystem'])
+const staticDelete = text => {
+ for (const m of text.matchAll(/(\[[^\[\]]+\]|\$[\w:]+|\))?\s*::\s*(?:Delete|DeleteDirectory|DeleteFile)\s*\(/gi)) {
+  const type = m[1]?.startsWith('[') ? m[1].slice(1, -1).trim().split('.').pop().toLowerCase() : null
+  if (type === null || DELETING_TYPES.has(type)) return m
+ }
+ return null
+}
 export function deletionCommand(source, dialect) {
  if(typeof source!=='string') return null
  const commands=[]
@@ -8,8 +18,9 @@ export function deletionCommand(source, dialect) {
   return ' '.repeat(token.length)
  })
  const text=masked+String.fromCharCode(10)+commands.join(String.fromCharCode(10))
- const pattern=dialect==='bash'?/(?:^|[\s;&|()])(?:sudo\s+)?(?:[\w/.-]*\/)?(rm|rmdir|unlink)(?=\s|$)|\.(?:rm|rmSync|unlink|unlinkSync|rmdir|rmdirSync|Delete|DeleteDirectory|DeleteFile)\s*\(/i:/(?:^|[\s;&|()])(?:[\w.-]+\\)?(Remove-Item|Remove-ItemProperty|Clear-RecycleBin|del|erase|rd|rmdir|rm|ri)(?=\s|$)|::(?:Delete|DeleteDirectory|DeleteFile)\s*\(|\.(?:rm|rmSync|unlink|unlinkSync|rmdir|rmdirSync)\s*\(/i
- return pattern.exec(text)?.[0]?.trim()??null
+ const pattern=dialect==='bash'?/(?:^|[\s;&|()])(?:sudo\s+)?(?:[\w/.-]*\/)?(rm|rmdir|unlink)(?=\s|$)|\.(?:rm|rmSync|unlink|unlinkSync|rmdir|rmdirSync|Delete|DeleteDirectory|DeleteFile)\s*\(/i:/(?:^|[\s;&|()])(?:[\w.-]+\\)?(Remove-Item|Remove-ItemProperty|Clear-RecycleBin|del|erase|rd|rmdir|rm|ri)(?=\s|$)|\.(?:rm|rmSync|unlink|unlinkSync|rmdir|rmdirSync)\s*\(/i
+ const hits=[pattern.exec(text),dialect==='bash'?null:staticDelete(text)].filter(Boolean).sort((a,b)=>a.index-b.index)
+ return hits[0]?.[0]?.trim()??null
 }
 export function installDeletionGuard(ctx, enabled) {
  const live=enabled&&typeof enabled.get==='function'
