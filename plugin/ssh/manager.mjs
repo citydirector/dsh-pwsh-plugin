@@ -254,6 +254,9 @@ export class SshManager {
       } catch (error) {
         if (signal?.aborted) throw error
         if (source === 'config') throw this.annotate(error, `the key identityFingerprint ${chosen.fingerprint} (${chosen.label}) from the host list was used; fix or remove it in the host list`)
+        // 连不上、超时、主机钥匙不符都不是这把钥匙的错：不排除它、不忘掉它、也不去逐把试——
+        // 否则一次断网就会把学到的钥匙清掉，再对着连不上的主机白白握手三次。
+        if (!isAuthFailure(error)) throw error
         this.rejectKey(host, chosen)
         this.drop(owner, error)
         if (source === 'argument') throw this.identityError(host, keys, [chosen], `the chosen key ${chosen.fingerprint} (${chosen.label}) did not get in: ${firstLine(error)}`)
@@ -498,5 +501,8 @@ export class SshManager {
     this.owners.clear()
   }
 }
+
+/** 服务端明确拒了这把钥匙（或钥匙次数用完）才算认证失败。 */
+function isAuthFailure(error) { return /Permission denied|Too many authentication failures/iu.test(String(error?.message ?? error)) }
 
 function firstLine(error) { return String(error?.message ?? error).split('\n')[0].slice(0, 300) }

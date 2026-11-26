@@ -1200,6 +1200,24 @@ await test('too many keys: a plain auth failure is not probed', async () => {
   m.dispose()
 })
 
+const unreachable = () => ({ spawnMain: () => spawn('sh', ['-c', 'echo "ssh: connect to host 127.0.0.1 port 22: Connection refused" >&2; exit 255'], { stdio: 'pipe' }), runSide: async () => ({ code: 0 }) })
+
+await test('a network failure keeps the chosen key: no exclusion, no forgetting, no probing', async () => {
+  const keys = fakeKeys(3)
+  const ids = fakeIdentities({ keys, good: 0 })
+  const { m } = newManager(new FakeClock(), { identities: ids, transportFor: () => unreachable() })
+  const host = m.hosts.get('local')
+  ids.store.set(host, keys[0])
+  const learned = await m.open('A', { host: 'local' }).catch((e) => e)
+  assert(learned.code !== 'identity' && /refused|handshake/i.test(learned.message), learned.message)
+  eq(ids.probed, [], 'an unreachable host is not probed key by key')
+  eq(ids.store.get(host)?.fingerprint, keys[0].fingerprint, 'the learned key survives a network failure')
+  const picked = await m.open('A', { host: 'local', identityFingerprint: keys[1].fingerprint }).catch((e) => e)
+  assert(picked.code !== 'identity', picked.message)
+  eq(m.rejectedKeys.size, 0, 'neither key is marked as refused')
+  m.dispose()
+})
+
 await test('identityFingerprint in the host list: format and conflicts', () => {
   const fp = keyFingerprint('ssh-ed25519 ' + Buffer.from('x').toString('base64'))
   eq(parseHost({ name: 'k', address: 'u@h', identityFingerprint: fp }).identityFingerprint, fp)
