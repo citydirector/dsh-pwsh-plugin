@@ -1,5 +1,5 @@
 import { RecycleApprovals, SESSION_NOTICE } from './recycle-approvals.mjs'
-import { readFileSync } from 'node:fs'
+import { readFileSync, lstatSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
 import path from 'node:path'
@@ -16,6 +16,22 @@ const quote = value => "'" + value.replaceAll("'", "'\\''") + "'"
 const live = value => value !== null && typeof value === 'object' && typeof value.get === 'function' ? value.get() : value
 // 取消原因可能是宿主给的字符串（例如程序结束时的 'run_code settled'），统一成 Error 再抛。
 const abortError = reason => reason instanceof Error ? reason : Error(typeof reason === 'string' && reason.trim() ? reason : 'File operation cancelled.')
+// 工作进程可能在回收落地之后、确认之前被终止，这时 removed 会少报。宿主逐个查看目标：已经不在的单独列出，
+// 不并入 removed，因为也可能是别的进程删的。只在宿主能直接看到目标的后端上检查。
+const absentTargets = (plan, removed = []) => {
+ const windows = plan.backend === 'windows'
+ if (!(windows ? process.platform === 'win32' : plan.backend === 'posix' && process.platform !== 'win32')) return []
+ const key = p => windows ? path.win32.resolve(p).toLowerCase() : path.posix.resolve(p)
+ const done = new Set(removed.map(key))
+ return plan.paths.filter(p => { if (done.has(key(p))) return false; try { lstatSync(p); return false } catch (error) { return error?.code === 'ENOENT' } })
+}
+// 取消原因可能是多个调用共享的同一个对象，所以另建 Error，不改原对象。
+const withAbsentTargets = (error, plan) => {
+ const removed = Array.isArray(error?.removed) ? error.removed : []
+ const absent = absentTargets(plan, removed)
+ if (!absent.length) return error
+ return Object.assign(Error(String(error?.message ?? error) + '\n' + JSON.stringify({ absentAfterFailure: absent })), { removed, absentAfterFailure: absent, ...(error?.diagnostic ? { diagnostic: error.diagnostic } : {}) })
+}
 const stable = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(k => [k,item[k]])) : item)
 const output = { schema: { type:'object', properties:{text:{type:'string'}}, required:['text'], additionalProperties:false }, render: (_args,v) => [{type:'text',text:v.text}] }
 const response = value => ({text:JSON.stringify(value,null,2)})
@@ -157,8 +173,10 @@ export function installFileTools(ctx, config, resolvePolicy) {
  const waitMs={type:'integer',minimum:0,maximum:10000},operationId={type:'string'}
  const start=async(c,exec,name,action,wait,task)=>{
   if(!Number.isSafeInteger(wait)||wait<0||wait>10000)throw Error('waitMs must be between 0 and 10000.')
+  // 后台任务只认插件停止、显式 cancel 和超时。调用方结束（例如 run_code 程序收尾）不能杀掉正在回收的工作进程，
+  // 否则目标已进回收站、回执却报失败。调用方的信号只用来缩短这次等待，并原样交给任务自己决定。
   const job=operations.start(randomUUID(),c,name+':'+action,async job=>{
-   const signal=AbortSignal.any([shutdown.signal,job.controller.signal,...(exec?.signal?[exec.signal]:[])])
+   const signal=AbortSignal.any([shutdown.signal,job.controller.signal])
    let checking=false
    const monitor=setInterval(async()=>{
     if(checking||signal.aborted)return
@@ -166,9 +184,9 @@ export function installFileTools(ctx, config, resolvePolicy) {
     try{const current=await context({...exec,signal});if(!owned(c,current))job.controller.abort(Error('Session or sandbox boundary changed during the file operation.'))}
     catch(error){job.controller.abort(error)}finally{checking=false}
    },250)
-   try{return await task(job,{...exec,signal})}finally{clearInterval(monitor)}
+   try{return await task(job,{...exec,signal},exec?.signal)}finally{clearInterval(monitor)}
   })
-  await operations.wait(job,wait)
+  await operations.wait(job,wait,exec?.signal)
   if(job.status==='completed')return response(job.result)
   if(job.status==='failed')throw job.error
   return response(operations.view(job))
@@ -216,10 +234,14 @@ export function installFileTools(ctx, config, resolvePolicy) {
   const plan=getPlan(args.planId,c)
   // 单次消费在审批和重扫之前；取消或部分失败只能重新扫描，不能重放。
   plans.delete(args.planId);reservations.delete(args.planId)
-  return start(c,exec,'file_remove','execute',args.waitMs??10000,async(job,activeExec)=>{
-   const policy=await approve(args,c,activeExec,plan.paths)
+  return start(c,exec,'file_remove','execute',args.waitMs??10000,async(job,activeExec,callerSignal)=>{
+   // 审批仍跟着调用方：等审批时调用方结束就放弃，这时还什么都没删。
+   const approvalSignal=callerSignal?AbortSignal.any([activeExec.signal,callerSignal]):activeExec.signal
+   const policy=await approve(args,c,{...activeExec,signal:approvalSignal},plan.paths)
    if(plan.expires<=Date.now())throw Error('Plan expired while waiting for approval; create a new plan.')
-   const result=await run({op:'recycle',backend:plan.backend,paths:plan.paths,cwd:plan.cwd,boundary:plan.boundary,digest:plan.digest,expires:plan.expires},c,activeExec,policy,()=>{},progress=>{job.progress={...job.progress,...progress}})
+   let result
+   try{result=await run({op:'recycle',backend:plan.backend,paths:plan.paths,cwd:plan.cwd,boundary:plan.boundary,digest:plan.digest,expires:plan.expires},c,activeExec,policy,()=>{},progress=>{job.progress={...job.progress,...progress}})}
+   catch(error){throw withAbsentTargets(error,plan)}
    return {action:'execute',...result}
   })
  })

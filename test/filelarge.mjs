@@ -98,6 +98,25 @@ try{
  const final=await plan(tree)
  const removed=await normal.settle('file_remove',await normal.call('file_remove',{action:'execute',planId:final.planId,waitMs:0}))
  check('large-tree-recycled-and-external-junction-target-preserved',()=>{assert.equal(removed.method,'windows-recycle-bin');assert(!existsSync(tree));assert.equal(readFileSync(join(outside,'KEEP.txt'),'utf8'),'external sentinel')})
+ const bigTree=(name,count)=>{const dir=join(root,name);for(let i=0;i<count;i++){const p=join(dir,'d-'+Math.floor(i/500));if(i%500===0)mkdirSync(p,{recursive:true});writeFileSync(join(p,'f-'+i),'x')}return dir}
+ const removing=()=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('No removing progress observed.')),60000);onProgress=p=>{if(p.phase==='removing'&&p.currentTarget){onProgress=undefined;clearTimeout(timer);resolve(p)}}})
+ const finalStatus=async id=>{let r=await normal.call('file_remove',{action:'status',operationId:id,waitMs:10000});for(let i=0;i<30&&r.status==='running';i++)r=await normal.call('file_remove',{action:'status',operationId:id,waitMs:10000});return r}
+ // 调用方在回收进行中结束（run_code 程序收尾时宿主会中止它的信号），任务必须照常做完并如实回报。
+ const detachedTree=bigTree('detached',20000),detachedPlan=await plan(detachedTree)
+ const caller=new AbortController(),startedA=removing()
+ const detached=await normal.call('file_remove',{action:'execute',planId:detachedPlan.planId,waitMs:0},{...exec,signal:caller.signal})
+ await startedA;caller.abort('run_code settled')
+ const detachedStatus=await finalStatus(detached.operationId)
+ check('execute-survives-caller-settling',()=>{assert.equal(detachedStatus.status,'completed',JSON.stringify(detachedStatus).slice(0,600));assert.equal(detachedStatus.result.removed.length,1);assert(!existsSync(detachedTree))})
+ // 目标已离开磁盘、Send 还没返回时工作进程被杀：removed 仍为空，但回执要列出已不在的目标。
+ const killedTree=bigTree('killed',20000),killedPlan=await plan(killedTree)
+ const startedB=removing()
+ const killed=await normal.call('file_remove',{action:'execute',planId:killedPlan.planId,waitMs:0})
+ await startedB;const worker=lastHandle
+ for(let i=0;i<4000&&existsSync(killedTree);i++)await new Promise(r=>setTimeout(r,5))
+ const goneBeforeKill=!existsSync(killedTree);worker.terminate()
+ const killedStatus=await finalStatus(killed.operationId)
+ check('killed-worker-reports-absent-targets',()=>{assert(goneBeforeKill,'target still present');assert.equal(killedStatus.status,'failed',JSON.stringify(killedStatus).slice(0,600));assert.deepEqual(killedStatus.removed,[]);assert.equal(killedStatus.absentAfterFailure?.length,1);assert.match(killedStatus.error,/absentAfterFailure/)})
  mode='workspace-write'
  const temp=await normal.call('file_temp',{action:'create'})
  for(let i=0;i<750;i++)writeFileSync(join(temp.path,'temp-'+i),'temporary')

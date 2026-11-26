@@ -92,15 +92,16 @@ export class FileOperations {
     }).finally(() => { job.finished = Date.now(); job.expires = job.finished + 300000 })
     return job
   }
-  async wait(job, waitMs = 10000) {
+  // signal 只结束这次等待，不影响任务本身。
+  async wait(job, waitMs = 10000, signal) {
     if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 10000) throw Error('waitMs must be between 0 and 10000.')
-    if (!waitMs || job.status !== 'running') return
-    let timer
-    try { await Promise.race([job.done, new Promise(resolve => { timer = setTimeout(resolve, waitMs) })]) }
-    finally { clearTimeout(timer) }
+    if (!waitMs || job.status !== 'running' || signal?.aborted) return
+    let timer, stop
+    try { await Promise.race([job.done, new Promise(resolve => { stop = resolve; timer = setTimeout(resolve, waitMs); signal?.addEventListener('abort', resolve, { once: true }) })]) }
+    finally { clearTimeout(timer); if (stop) signal?.removeEventListener('abort', stop) }
   }
   view(job) {
-    return { operationId: job.id, action: job.action, status: job.status, elapsedMs: (job.finished ?? Date.now()) - job.started, progress: { ...job.progress }, ...(job.result ? { result: job.result } : {}), ...(job.error ? { error: job.error.message, removed: job.error.removed ?? job.progress.removed ?? [], diagnostic: job.error.diagnostic, inspectRemaining: true } : {}) }
+    return { operationId: job.id, action: job.action, status: job.status, elapsedMs: (job.finished ?? Date.now()) - job.started, progress: { ...job.progress }, ...(job.result ? { result: job.result } : {}), ...(job.error ? { error: job.error.message, removed: job.error.removed ?? job.progress.removed ?? [], ...(job.error.absentAfterFailure ? { absentAfterFailure: job.error.absentAfterFailure } : {}), diagnostic: job.error.diagnostic, inspectRemaining: true } : {}) }
   }
   dispose() { for (const job of this.jobs.values()) if (job.status === 'running') job.controller.abort(Error('File tools unloaded.')) }
 }
